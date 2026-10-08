@@ -1,6 +1,7 @@
 package com.sighs.apricityui.spi;
 
 import com.mojang.blaze3d.vertex.PoseStack;
+import com.mojang.blaze3d.platform.Window;
 import com.sighs.apricityui.layout.Position;
 import com.sighs.apricityui.layout.Size;
 import com.sighs.apricityui.style.Text;
@@ -14,6 +15,7 @@ import java.nio.file.Path;
 import java.util.Map;
 import java.util.function.Consumer;
 import java.util.function.Predicate;
+import com.sighs.apricityui.init.Document;
 
 /**
  * Loader-side client platform access.
@@ -105,4 +107,41 @@ public interface AuiClientService {
 
     /** Returns the current camera look (forward) vector in world space. */
     Vector3f getCameraLookVector();
+
+    /** Client mouse lifecycle hooks; legacy targets may provide no-op defaults. */
+    default boolean isClientGameplayActive() {
+        return true;
+    }
+
+    default void releaseMouse() {
+    }
+
+    default void grabMouse() {
+    }
+
+    default Window getWindow() {
+        return new Window((int) getWindowWidth(), (int) getWindowHeight(), getScaledWidth(), getScaledHeight(), 1.0D);
+    }
+
+    default String getClipboardText() {
+        return "";
+    }
+
+    default void setClipboardText(String text) {
+    }
+
+    /** Runs work on the client/game thread. Legacy targets may execute inline. */
+    default void execute(Runnable runnable) {
+        if (runnable != null) runnable.run();
+    }
+
+    /** Returns the active AUI screen document, or {@code null} when no AUI screen is open. */
+    default Document getCurrentScreenDocument() {
+        return null;
+    }
+
+    /** Performs a platform-native world occlusion test for a segment. */
+    default boolean isWorldOccluded(Vec3 origin, Vec3 target, double targetDistance) {
+        return false;
+    }
 }

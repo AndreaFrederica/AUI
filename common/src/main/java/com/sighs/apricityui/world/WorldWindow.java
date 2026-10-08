@@ -10,7 +10,6 @@ import com.sighs.apricityui.render.PoseMatrices;
 import com.sighs.apricityui.render.WorldWindowRenderContext;
 import com.sighs.apricityui.render.WorldPaintDepth;
 import com.sighs.apricityui.layout.Position;
-import net.minecraft.client.Minecraft;
 import net.minecraft.util.Mth;
 import net.minecraft.world.level.ClipContext;
 import net.minecraft.world.phys.BlockHitResult;
@@ -400,9 +399,8 @@ public class WorldWindow {
 
     /** Returns the currently effective level for the main render camera. */
     public WorldWindowDisplayPrecision getEffectiveDisplayPrecision() {
-        Minecraft minecraft = Minecraft.getInstance();
-        if (minecraft == null || minecraft.gameRenderer == null) return WorldWindowDisplayPrecision.MINIMAL;
         Vec3 cameraPosition = AuiServices.client().getCameraPosition();
+        if (cameraPosition == null) return WorldWindowDisplayPrecision.MINIMAL;
         Vec3 renderPosition = resolveRenderPosition(cameraPosition, AuiServices.client().getCameraLookVector());
         if (!isWithinDisplayDistance(cameraPosition, renderPosition)) return WorldWindowDisplayPrecision.MINIMAL;
         return resolveDisplayPrecision(cameraPosition, renderPosition);
@@ -642,9 +640,8 @@ public class WorldWindow {
         if (screenPosition == null || !Double.isFinite(screenPosition.x) || !Double.isFinite(screenPosition.y)
                 || interactionClipMatrix == null || interactionWorldMatrix == null) return null;
 
-        Minecraft minecraft = Minecraft.getInstance();
-        if (minecraft == null || minecraft.gameRenderer == null) return null;
         Vec3 rayOrigin = AuiServices.client().getCameraPosition();
+        if (rayOrigin == null) return null;
         Vec3 renderPosition = interactionPosition == null ? position : interactionPosition;
         if (!isWithinDisplayDistance(rayOrigin, renderPosition)) return null;
 
@@ -660,7 +657,7 @@ public class WorldWindow {
         Vec3 intersection = new Vec3(worldHit.x, worldHit.y, worldHit.z);
         double windowDistance = rayOrigin.distanceTo(intersection);
         if (!Double.isFinite(windowDistance) || windowDistance > maxDistance) return null;
-        if (depthTest && isOccluded(minecraft, rayOrigin, intersection, windowDistance)) return null;
+        if (depthTest && AuiServices.client().isWorldOccluded(rayOrigin, intersection, windowDistance)) return null;
         return localHit;
     }
 
@@ -675,10 +672,10 @@ public class WorldWindow {
         double ndcX = clip.x / clip.w;
         double ndcY = clip.y / clip.w;
         if (!Double.isFinite(ndcX) || !Double.isFinite(ndcY)) return null;
-        Minecraft minecraft = Minecraft.getInstance();
-        if (minecraft == null || minecraft.getWindow() == null) return null;
-        double guiWidth = Math.max(1.0, minecraft.getWindow().getGuiScaledWidth());
-        double guiHeight = Math.max(1.0, minecraft.getWindow().getGuiScaledHeight());
+        com.mojang.blaze3d.platform.Window window = AuiServices.client().getWindow();
+        if (window == null) return null;
+        double guiWidth = Math.max(1.0, window.getGuiScaledWidth());
+        double guiHeight = Math.max(1.0, window.getGuiScaledHeight());
         return new Position((ndcX + 1.0) * 0.5 * guiWidth,
                 (1.0 - ndcY) * 0.5 * guiHeight);
     }
@@ -751,10 +748,10 @@ public class WorldWindow {
     }
 
     private Position unprojectToDocument(Position screenPosition) {
-        Minecraft minecraft = Minecraft.getInstance();
-        if (minecraft == null || minecraft.getWindow() == null) return null;
-        double guiWidth = Math.max(1.0, minecraft.getWindow().getGuiScaledWidth());
-        double guiHeight = Math.max(1.0, minecraft.getWindow().getGuiScaledHeight());
+        com.mojang.blaze3d.platform.Window window = AuiServices.client().getWindow();
+        if (window == null) return null;
+        double guiWidth = Math.max(1.0, window.getGuiScaledWidth());
+        double guiHeight = Math.max(1.0, window.getGuiScaledHeight());
         float ndcX = (float) (screenPosition.x / guiWidth * 2.0 - 1.0);
         float ndcY = (float) (1.0 - screenPosition.y / guiHeight * 2.0);
 
@@ -812,20 +809,8 @@ public class WorldWindow {
     public record ScreenRect(double x, double y, double width, double height) {
     }
 
-    private boolean isOccluded(Minecraft minecraft, Vec3 rayOrigin, Vec3 intersection, double windowDistance) {
-        if (minecraft.level == null || minecraft.player == null) return true;
-
-        BlockHitResult blockHit = minecraft.level.clip(new ClipContext(
-                rayOrigin,
-                intersection,
-                ClipContext.Block.VISUAL,
-                ClipContext.Fluid.NONE,
-                minecraft.player
-        ));
-        if (blockHit.getType() == HitResult.Type.MISS) return false;
-
-        double blockDistance = rayOrigin.distanceTo(blockHit.getLocation());
-        return blockDistance + OCCLUSION_DISTANCE_EPSILON < windowDistance;
+    private boolean isOccluded(Vec3 rayOrigin, Vec3 intersection, double windowDistance) {
+        return AuiServices.client().isWorldOccluded(rayOrigin, intersection, windowDistance);
     }
 
     private boolean isWithinDisplayDistance(Vec3 cameraPosition) {
@@ -921,8 +906,8 @@ public class WorldWindow {
 
     private float worldDocumentScale() {
         if (scaleOverride != null) return 1.0f;
-        Minecraft minecraft = Minecraft.getInstance();
-        double guiScale = minecraft.getWindow().getGuiScale();
+        com.mojang.blaze3d.platform.Window window = AuiServices.client().getWindow();
+        double guiScale = window == null ? 1.0d : window.getGuiScale();
         if (!(guiScale > 0.0d) || !Double.isFinite(guiScale)) guiScale = 1.0d;
         return (float) Math.max(0.0001d, documentRenderScale() * guiScale);
     }

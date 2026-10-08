@@ -172,10 +172,10 @@ public class Cursor {
         Image.ITexture texture = handle.texture();
         if (texture == null || texture.getKey() == null) return;
 
-        Minecraft mc = Minecraft.getInstance();
-        if (mc == null || mc.getWindow() == null) return;
+        com.mojang.blaze3d.platform.Window window = AuiServices.client().getWindow();
+        if (window == null) return;
 
-        double guiScale = mc.getWindow().getGuiScale();
+        double guiScale = window.getGuiScale();
         if (guiScale <= 0) guiScale = 1.0;
 
         float width = (float) (texture.getWidth() / guiScale);
@@ -213,9 +213,6 @@ public class Cursor {
 
     private static void setSystemCursorHidden(boolean hidden) {
         if (systemCursorHidden == hidden) return;
-        Minecraft mc = Minecraft.getInstance();
-        if (mc == null || mc.getWindow() == null) return;
-
         long window = AuiServices.client().getWindowHandle();
         if (window == 0L) return;
 
@@ -226,9 +223,6 @@ public class Cursor {
     private static void setWindowCursor(long handle) {
         if (handle == 0L || handle == currentHandle) return;
         currentHandle = handle;
-
-        Minecraft mc = Minecraft.getInstance();
-        if (mc == null || mc.getWindow() == null) return;
 
         long window = AuiServices.client().getWindowHandle();
         if (window == 0L) return;

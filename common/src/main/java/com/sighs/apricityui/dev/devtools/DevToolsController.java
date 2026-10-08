@@ -26,7 +26,6 @@ import com.sighs.apricityui.ui.ContextMenu;
 import com.sighs.apricityui.ui.DialogWindow;
 import com.sighs.apricityui.dev.resource.ResourceMetaDialog;
 import com.sighs.apricityui.loader.ClientLoader;
-import net.minecraft.client.Minecraft;
 
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
@@ -1625,9 +1624,8 @@ public final class DevToolsController {
 
     private Document resolvePreferredTarget() {
         try {
-            Minecraft minecraft = Minecraft.getInstance();
-            if (minecraft != null && minecraft.screen instanceof AuiLinkedScreen screen
-                    && isDebuggable(screen.getLinkedDocument())) return screen.getLinkedDocument();
+            Document current = com.sighs.apricityui.spi.AuiServices.client().getCurrentScreenDocument();
+            if (isDebuggable(current)) return current;
         } catch (RuntimeException | LinkageError ignored) {
         }
         List<Document> documents = new ArrayList<>(Document.getAll());

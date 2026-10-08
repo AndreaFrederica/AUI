@@ -7,7 +7,6 @@ import com.sighs.apricityui.screen.AuiLinkedScreen;
 import com.sighs.apricityui.world.WorldWindow;
 import com.sighs.apricityui.ApricityUI;
 import com.sighs.apricityui.registry.annotation.KJSBindings;
-import net.minecraft.client.Minecraft;
 import net.minecraft.world.phys.Vec3;
 
 import java.util.ArrayList;
@@ -41,10 +40,7 @@ public class ApricityUIClientUtil {
 
     /** Returns the document currently bound to the active AUI screen, or {@code null}. */
     public static Document getCurrentScreenDocument() {
-        if (Minecraft.getInstance().screen instanceof AuiLinkedScreen screen) {
-            return screen.getLinkedDocument();
-        }
-        return null;
+        return com.sighs.apricityui.spi.AuiServices.client().getCurrentScreenDocument();
     }
 
     public static List<Document> getAllDocument() {

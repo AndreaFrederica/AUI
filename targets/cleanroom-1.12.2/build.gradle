@@ -148,8 +148,29 @@ processResources {
     rename '(.+_at.cfg)', 'META-INF/$1'
 }
 
+// Compile the current AUI implementation in this target while its platform
+// classes are being rewritten for Minecraft 1.12.2. Existing loader targets
+// remain independent and continue to use their own source preparation rules.
+tasks.register('prepareAuiSources', Sync) {
+    from('../../common/src/main/java') {
+        exclude 'com/sighs/apricityui/network/chunk/**'
+        exclude 'com/sighs/apricityui/mixin/**'
+        exclude 'com/sighs/apricityui/network/serialization/**'
+        exclude 'com/sighs/apricityui/network/util/**'
+        exclude 'com/sighs/apricityui/media/openal/**'
+    }
+    // The Forge 1.20.1 target is deliberately not copied here. Its event,
+    // screen and registry classes are platform implementations, not common
+    // code; Cleanroom supplies its own 1.12 implementations under src/main.
+    into "$buildDir/generated/aui-main"
+}
+
+tasks.named('compileJava').configure { dependsOn 'prepareAuiSources' }
+tasks.named('sourcesJar', Jar).configure { dependsOn 'prepareAuiSources' }
+
 sourceSets {
     main {
+        java.srcDir "$buildDir/generated/aui-main"
         blossom {
             javaSources {
                 property('mod_id', propertyString('mod_id'))

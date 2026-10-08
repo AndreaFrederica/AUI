@@ -122,7 +122,7 @@ public class ClientLoader extends Loader {
         try {
             ApricityViewport viewport = ApricityViewport.spec(path)
                     .createState(path)
-                    .resolve(Minecraft.getInstance().getWindow());
+                    .resolve(AuiServices.client().getWindow());
             return new Size(viewport.layoutWidth(), viewport.layoutHeight());
         } catch (RuntimeException | LinkageError exception) {
             return new Size(1024, 768);

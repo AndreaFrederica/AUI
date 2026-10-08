@@ -284,12 +284,11 @@ public class Document {
     public void applyViewport(boolean relayout) {
         ApricityViewport previous = viewport;
         try {
-            Minecraft minecraft = Minecraft.getInstance();
-            if (minecraft == null) {
+            if (AuiServices.client().getWindow() == null) {
                 Size fallback = Size.getHeadlessWindowSize();
                 viewport = viewportState.resolveHeadless((int) Math.round(fallback.width()), (int) Math.round(fallback.height()));
             } else {
-                viewport = viewportState.resolve(minecraft.getWindow());
+                viewport = viewportState.resolve(AuiServices.client().getWindow());
             }
         } catch (NoClassDefFoundError unavailableClientRuntime) {
             if (!isUnavailableClientRuntime(unavailableClientRuntime)) throw unavailableClientRuntime;

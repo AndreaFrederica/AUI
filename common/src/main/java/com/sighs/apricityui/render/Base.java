@@ -898,17 +898,12 @@ public class Base {
 
     /** Returns the system clipboard text, or an empty string when unavailable. */
     public static String getClipboardText() {
-        Minecraft minecraft = Minecraft.getInstance();
-        if (minecraft == null || minecraft.keyboardHandler == null) return "";
-        String text = minecraft.keyboardHandler.getClipboard();
-        return text == null ? "" : text;
+        return AuiServices.client().getClipboardText();
     }
 
     /** Copies text to the system clipboard (no-op when unavailable). */
     public static void setClipboardText(String text) {
-        Minecraft minecraft = Minecraft.getInstance();
-        if (minecraft == null || minecraft.keyboardHandler == null) return;
-        minecraft.keyboardHandler.setClipboard(text == null ? "" : text);
+        AuiServices.client().setClipboardText(text == null ? "" : text);
     }
 
 }

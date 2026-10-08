@@ -104,9 +104,7 @@ public class Window {
     }
 
     public double getDevicePixelRatio() {
-        net.minecraft.client.Minecraft minecraft = net.minecraft.client.Minecraft.getInstance();
-        if (minecraft == null || minecraft.getWindow() == null) return 1.0;
-        return minecraft.getWindow().getGuiScale();
+        return com.sighs.apricityui.spi.AuiServices.client().getWindow().getGuiScale();
     }
 
     public Performance getPerformance() {

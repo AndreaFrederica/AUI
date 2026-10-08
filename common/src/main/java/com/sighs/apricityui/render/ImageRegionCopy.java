@@ -17,6 +17,16 @@ public final class ImageRegionCopy {
     public static void copy(NativeImage source, NativeImage target,
                             int srcX, int srcY, int dstX, int dstY,
                             int width, int height, boolean flipX, boolean flipY) {
-        source.copyRect(target, srcX, srcY, dstX, dstY, width, height, flipX, flipY);
+        if (source == null || target == null || width <= 0 || height <= 0) return;
+        for (int y = 0; y < height; y++) {
+            int sourceY = srcY + (flipY ? height - 1 - y : y);
+            int targetY = dstY + y;
+            for (int x = 0; x < width; x++) {
+                int sourceX = srcX + (flipX ? width - 1 - x : x);
+                target.setPixelRGBA(targetX(dstX, x), targetY, source.getPixelRGBA(sourceX, sourceY));
+            }
+        }
     }
+
+    private static int targetX(int dstX, int x) { return dstX + x; }
 }
