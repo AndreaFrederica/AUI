@@ -1,6 +1,6 @@
 # ApricityUI 移植到 Cleanroom 1.12.2 计划
 
-当前进度：Cleanroom 目标已通过编译、资源处理和 MCP → SRG 重映射打包；客户端服务、资源读取、基础固定管线渲染、GuiScreen 生命周期和 SimpleNetworkWrapper 屏幕消息已接入。客户端和专用服务端实际启动、容器槽位同步、高级滤镜/动态纹理仍待验证和移植。复制的资源（包括 shader 和语言 JSON）目前仅作为基线，不代表全部已兼容 1.12。
+当前进度：Cleanroom 目标已通过编译、资源处理和 MCP → SRG 重映射打包；客户端服务、资源读取、基础固定管线渲染、GuiScreen 生命周期、SimpleNetworkWrapper 屏幕消息和基础 Container/Slot 菜单已接入。服务端窗口同步、复杂数据源/过滤器、高级滤镜/动态纹理仍待验证和移植。复制的资源（包括 shader 和语言 JSON）目前仅作为基线，不代表全部已兼容 1.12。
 
 ### 2026-10-08 构建验证
 
@@ -46,7 +46,7 @@ API 差异和每个模块的处理方式见 `docs/cleanroom-1.12.2-api-matrix.md
 2. `cleanroom: lock 1.12 dependencies and metadata`
 3. `cleanroom: add platform bootstrap and resource loading`（已完成基础版）
 4. `cleanroom: port rendering and input adapters`（已完成基础固定管线版）
-5. `cleanroom: port containers and networking`（网络屏幕消息已完成，容器槽位待完成）
+5. `cleanroom: port containers and networking`（基础菜单和客户端槽位已完成，服务端同步与数据源待完成）
 6. `cleanroom: port KubeJS integration and persistence`
 7. `cleanroom: enable optional advanced features`
 8. `cleanroom: verify client, server and release jar`
