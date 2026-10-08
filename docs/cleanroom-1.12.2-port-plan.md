@@ -120,6 +120,16 @@ API 差异和每个模块的处理方式见 `docs/cleanroom-1.12.2-api-matrix.md
 
 完成标准：客户端和服务端可以打开容器页面，槽位、物品和网络同步正常。
 
+### 当前进度（2026-10-08）
+
+- 已完成 Cleanroom 1.12 `Container`/`GuiContainer` 桥接、window id 分配和 vanilla 容器初始同步。
+- 绑定构建器已从空操作实现改为记录 PLAYER、SAVED_DATA、BLOCK_ENTITY、ENTITY 声明及其参数；参数随打开消息编码。
+- 服务端菜单会解析 1.12 `IInventory`：玩家背包使用 `InventoryPlayer`，方块实体和实体使用世界中的真实库存；无显式容量时将实际槽数回传客户端。
+- SAVED_DATA 已使用 `WorldSavedData` 保存槽位物品，菜单关闭时仍由 vanilla `Container` 生命周期负责同步和清理。
+- 已验证：`targets/cleanroom-1.12.2/gradlew.bat build --console plain --no-daemon` 成功。
+
+阶段五仍有待完成项：槽位 CSS/DOM 坐标同步、过滤器服务端验证、通用网络广播、动态纹理/FBO/shader，以及 Cleanroom 的真实客户端/服务端运行 smoke test。
+
 ## 阶段六：Mixin、AT 和可选能力
 
 1. 针对 1.12 重新实现容器屏幕、键盘和深度相关 Mixin。
