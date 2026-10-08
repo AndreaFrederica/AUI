@@ -68,12 +68,44 @@ public final class CleanroomRenderService implements AuiRenderService {
     @Override public void bindWrite(FboHandle target, boolean setViewport) { }
     @Override public void bindColorTexture(FboHandle target, int unit) { }
     @Override public void blitFramebuffer(FboHandle source, FboHandle target, int srcX0, int srcY0, int srcX1, int srcY1) { }
-    @Override public Object createDynamicTexture(String name, Object nativeImage, boolean linear) { return null; }
-    @Override public void uploadTextureRegion(Object texture, Object nativeImage, int x, int y, int width, int height, boolean linear) { }
+    @Override public Object createDynamicTexture(String name, Object nativeImage, boolean linear) {
+        if (!(nativeImage instanceof com.mojang.blaze3d.platform.NativeImage image)) return null;
+        try {
+            DynamicTexture texture = new DynamicTexture(image.bufferedImage());
+            texture.updateDynamicTexture();
+            return texture;
+        } catch (Throwable ignored) {
+            return null;
+        }
+    }
+    @Override public void uploadTextureRegion(Object texture, Object nativeImage, int x, int y, int width, int height, boolean linear) {
+        if (!(texture instanceof DynamicTexture dynamic) || !(nativeImage instanceof com.mojang.blaze3d.platform.NativeImage image)) return;
+        try {
+            int[] pixels = dynamic.getTextureData();
+            int textureWidth = image.getWidth();
+            for (int row = 0; row < height; row++) {
+                for (int col = 0; col < width; col++) {
+                    int destination = (y + row) * textureWidth + x + col;
+                    if (destination >= 0 && destination < pixels.length) {
+                        pixels[destination] = image.getPixelRGBA(x + col, y + row);
+                    }
+                }
+            }
+            dynamic.updateDynamicTexture();
+        } catch (Throwable ignored) { }
+    }
     @Override public void setImagePixel(Object nativeImage, int x, int y, int pixel) { if (nativeImage instanceof com.mojang.blaze3d.platform.NativeImage image) image.setPixelRGBA(x, y, pixel); }
     @Override public void closeTexture(Object texture) { if (texture instanceof DynamicTexture dynamic) dynamic.deleteGlTexture(); }
-    @Override public void registerTexture(Object texture, Object location) { }
-    @Override public void releaseTexture(Object location) { }
+    @Override public void registerTexture(Object texture, Object location) {
+        if (!(texture instanceof DynamicTexture dynamic) || !(location instanceof ResourceLocation id)) return;
+        try { Minecraft.getMinecraft().getTextureManager().loadTexture(id, dynamic); }
+        catch (Throwable ignored) { }
+    }
+    @Override public void releaseTexture(Object location) {
+        if (!(location instanceof ResourceLocation id)) return;
+        try { Minecraft.getMinecraft().getTextureManager().deleteTexture(id); }
+        catch (Throwable ignored) { }
+    }
     @Override public void setShader(Object shader) { }
     @Override public void setPositionColorShader() { }
     @Override public void setShaderColor(float a, float r, float g, float b) { GL11.glColor4f(r, g, b, a); }
