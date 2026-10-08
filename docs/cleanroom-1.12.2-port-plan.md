@@ -1,6 +1,15 @@
 # ApricityUI 移植到 Cleanroom 1.12.2 计划
 
-当前进度：阶段二进行中。已创建移植分支、复制模板、配置 ApricityUI 元数据、接入根工程 target 入口，并复制共享资源基线。
+当前进度：工程骨架已通过编译、资源处理和 MCP → SRG 重映射打包；依赖/API 调查进行中。客户端和专用服务端启动仍待验证，AUI 的 Java 功能尚未移植。复制的资源（包括 shader 和语言 JSON）目前仅作为基线，不代表已兼容 1.12。
+
+### 2026-10-08 构建验证
+
+- 调整代理后，目标 wrapper 的 Gradle 9.8.0 下载完成。
+- `targets/cleanroom-1.12.2/gradlew.bat tasks --console plain --no-daemon` 成功，Unimined 1.4.43-kappa 和 Cleanroom 依赖解析成功。
+- 在目标目录执行 `gradlew.bat build --console plain --no-daemon` 成功。测试任务为 `NO-SOURCE`，本次仅验证骨架编译和打包。
+- 产物：`targets/cleanroom-1.12.2/build/libs/apricityui-1.2.7.jar`。该 JAR 仅包含工程骨架和资源，尚不能提供 AUI 页面功能。
+- 代理使用命令进程环境变量及 JVM 的 `http.proxyHost`/`https.proxyHost` 等参数，未写入仓库配置。
+- 根构建的 Cleanroom 任务使用目标自己的 wrapper，保证采用模板的 Gradle 9.8，而不是根 wrapper 的 8.14.4。
 
 API 差异和每个模块的处理方式见 `docs/cleanroom-1.12.2-api-matrix.md`。
 
