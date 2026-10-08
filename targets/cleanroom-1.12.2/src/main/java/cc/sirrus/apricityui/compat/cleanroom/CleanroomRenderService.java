@@ -18,9 +18,11 @@ import org.lwjgl.opengl.GL30;
 import org.lwjgl.opengl.GL20;
 
 import java.io.InputStream;
+import java.nio.FloatBuffer;
 import java.nio.charset.StandardCharsets;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
+import org.lwjgl.BufferUtils;
 
 /**
  * Minimal fixed-function 1.12 renderer bridge. It deliberately uses the old
@@ -34,6 +36,13 @@ public final class CleanroomRenderService implements AuiRenderService {
     private boolean depth = true, depthMask = true, cull;
     private volatile ShaderHandle filterShader;
     private volatile ShaderHandle blurShader;
+    private volatile ShaderHandle blendShader;
+    private volatile ShaderHandle maskShader;
+    private volatile ShaderHandle maskShaderLuminance;
+    private volatile ShaderHandle maskIntersectShader;
+    private volatile ShaderHandle maskSubtractShader;
+    private volatile ShaderHandle maskExcludeShader;
+    private final FloatBuffer matrixBuffer = BufferUtils.createFloatBuffer(16);
     private CleanroomRenderService() { }
 
     private static final class Mesh {
@@ -41,7 +50,10 @@ public final class CleanroomRenderService implements AuiRenderService {
         Mesh(BufferBuilder buffer) { this.buffer = buffer; }
     }
 
-    @Override public void setProjectionMatrix(Matrix4f matrix) { projection = matrix == null ? new Matrix4f() : new Matrix4f(matrix); }
+    @Override public void setProjectionMatrix(Matrix4f matrix) {
+        projection = matrix == null ? new Matrix4f() : new Matrix4f(matrix);
+        uploadProjection();
+    }
     @Override public Matrix4f getProjectionMatrix() { return new Matrix4f(projection); }
     @Override public void enableDepthTest() { depth = true; GL11.glEnable(GL11.GL_DEPTH_TEST); }
     @Override public void disableDepthTest() { depth = false; GL11.glDisable(GL11.GL_DEPTH_TEST); }
@@ -198,6 +210,10 @@ public final class CleanroomRenderService implements AuiRenderService {
     @Override public void setShader(Object shader) {
         activeShader = shader instanceof ShaderHandle handle ? handle : null;
         GL20.glUseProgram(activeShader == null ? 0 : activeShader.program);
+        if (activeShader != null) {
+            uploadProjection();
+            applyShaderBlend(activeShader);
+        }
     }
     @Override public void setPositionColorShader() { activeShader = null; GL20.glUseProgram(0); }
     @Override public void setShaderColor(float a, float r, float g, float b) { GL11.glColor4f(r, g, b, a); }
@@ -217,11 +233,55 @@ public final class CleanroomRenderService implements AuiRenderService {
             return blurShader;
         }
     }
+    @Override public Object getFilterBlendShader() {
+        ShaderHandle current = blendShader;
+        if (current != null) return current;
+        synchronized (this) {
+            if (blendShader == null) blendShader = compileShader("filter", "filter_blend", ShaderKind.NONE);
+            return blendShader;
+        }
+    }
+    @Override public Object getFilterMaskShader(boolean luminance) {
+        ShaderHandle current = luminance ? maskShaderLuminance : maskShader;
+        if (current != null) return current;
+        synchronized (this) {
+            if (luminance) {
+                if (maskShaderLuminance == null) maskShaderLuminance = compileShader("filter", "filter_mask", ShaderKind.MASK);
+                return maskShaderLuminance;
+            }
+            if (maskShader == null) maskShader = compileShader("filter", "filter_mask", ShaderKind.MASK);
+            return maskShader;
+        }
+    }
+    @Override public Object getFilterMaskMergeShader(AuiRenderService.MaskCompositeOp op) {
+        if (op == null) return null;
+        synchronized (this) {
+            return switch (op) {
+                case INTERSECT -> maskIntersectShader == null
+                        ? (maskIntersectShader = compileShader("filter", "filter_mask_merge", ShaderKind.MASK_INTERSECT))
+                        : maskIntersectShader;
+                case SUBTRACT -> maskSubtractShader == null
+                        ? (maskSubtractShader = compileShader("filter", "filter_mask_merge", ShaderKind.MASK_SUBTRACT))
+                        : maskSubtractShader;
+                case EXCLUDE -> maskExcludeShader == null
+                        ? (maskExcludeShader = compileShader("filter", "filter_mask_merge", ShaderKind.MASK_EXCLUDE))
+                        : maskExcludeShader;
+            };
+        }
+    }
     @Override public void setDepthFunc(int func) { GL11.glDepthFunc(func); }
     @Override public void setDepthMask(boolean write) { depthMask = write; GL11.glDepthMask(write); }
     @Override public boolean isDepthTestEnabled() { return depth; }
     @Override public boolean isDepthMaskEnabled() { return depthMask; }
     @Override public void setBlendFuncSeparate(int srcRgb, int dstRgb, int srcAlpha, int dstAlpha) { GL14.glBlendFuncSeparate(srcRgb, dstRgb, srcAlpha, dstAlpha); }
+    @Override public AuiRenderService.RenderStateScope pushFilterRenderState() {
+        try {
+            final RenderStateSnapshot snapshot = RenderStateSnapshot.capture(this);
+            return () -> snapshot.restore(this);
+        } catch (Throwable ignored) {
+            return AuiRenderService.RenderStateScope.NOOP;
+        }
+    }
     @Override public void disableBlend() { GL11.glDisable(GL11.GL_BLEND); }
     @Override public void enableCull() { cull = true; GL11.glEnable(GL11.GL_CULL_FACE); }
     @Override public void disableCull() { cull = false; GL11.glDisable(GL11.GL_CULL_FACE); }
@@ -257,9 +317,51 @@ public final class CleanroomRenderService implements AuiRenderService {
         if (location >= 0) writer.accept(location);
     }
 
+    private void uploadProjection() {
+        ShaderHandle shader = activeShader;
+        if (shader == null) return;
+        int location = shader.uniforms.computeIfAbsent("ProjMat",
+                key -> GL20.glGetUniformLocation(shader.program, key));
+        if (location < 0) return;
+        matrixBuffer.clear();
+        projection.get(matrixBuffer);
+        matrixBuffer.flip();
+        GL20.glUniformMatrix4(location, false, matrixBuffer);
+    }
+
+    private static void applyShaderBlend(ShaderHandle shader) {
+        switch (shader.kind) {
+            case MASK -> {
+                GL11.glEnable(GL11.GL_BLEND);
+                GL14.glBlendFuncSeparate(GL11.GL_ZERO, GL11.GL_SRC_ALPHA,
+                        GL11.GL_ZERO, GL11.GL_SRC_ALPHA);
+            }
+            case MASK_INTERSECT -> {
+                GL11.glEnable(GL11.GL_BLEND);
+                GL14.glBlendFuncSeparate(GL11.GL_DST_ALPHA, GL11.GL_ZERO,
+                        GL11.GL_DST_ALPHA, GL11.GL_ZERO);
+            }
+            case MASK_SUBTRACT -> {
+                GL11.glEnable(GL11.GL_BLEND);
+                GL14.glBlendFuncSeparate(GL11.GL_ONE_MINUS_DST_ALPHA, GL11.GL_ZERO,
+                        GL11.GL_ONE_MINUS_DST_ALPHA, GL11.GL_ZERO);
+            }
+            case MASK_EXCLUDE -> {
+                GL11.glEnable(GL11.GL_BLEND);
+                GL14.glBlendFuncSeparate(GL11.GL_ONE_MINUS_DST_ALPHA, GL11.GL_ONE_MINUS_SRC_ALPHA,
+                        GL11.GL_ONE_MINUS_DST_ALPHA, GL11.GL_ONE_MINUS_SRC_ALPHA);
+            }
+            default -> { }
+        }
+    }
+
     private ShaderHandle activeShader;
 
     private ShaderHandle compileShader(String vertexName, String fragmentName) {
+        return compileShader(vertexName, fragmentName, ShaderKind.NONE);
+    }
+
+    private ShaderHandle compileShader(String vertexName, String fragmentName, ShaderKind kind) {
         try {
             String vertex = readShader(vertexName + ".vsh");
             String fragment = readShader(fragmentName + ".fsh");
@@ -279,9 +381,7 @@ public final class CleanroomRenderService implements AuiRenderService {
             }
             GL20.glDeleteShader(vertexId);
             GL20.glDeleteShader(fragmentId);
-            ShaderHandle result = new ShaderHandle(program);
-            activeShader = result;
-            return result;
+            return new ShaderHandle(program, kind);
         } catch (Throwable error) {
             com.sighs.apricityui.ApricityUI.LOGGER.warn("Cleanroom shader {} could not be compiled; using fixed pipeline", vertexName, error);
             return null;
@@ -309,7 +409,85 @@ public final class CleanroomRenderService implements AuiRenderService {
 
     private static final class ShaderHandle {
         final int program;
+        final ShaderKind kind;
         final Map<String, Integer> uniforms = new ConcurrentHashMap<>();
-        ShaderHandle(int program) { this.program = program; }
+        ShaderHandle(int program, ShaderKind kind) { this.program = program; this.kind = kind; }
+    }
+
+    private static final class RenderStateSnapshot {
+        final boolean blend, depthTest, cull, scissor, stencil;
+        final boolean depthMask;
+        final int depthFunc;
+        final int srcRgb, dstRgb, srcAlpha, dstAlpha;
+        final int activeTexture;
+        final int texture0, texture1;
+        final int viewportX, viewportY, viewportWidth, viewportHeight;
+        final int program;
+        final Matrix4f projection;
+
+        private RenderStateSnapshot(boolean blend, boolean depthTest, boolean cull, boolean scissor,
+                                    boolean stencil, boolean depthMask, int depthFunc,
+                                    int srcRgb, int dstRgb, int srcAlpha, int dstAlpha,
+                                    int activeTexture, int texture0, int texture1,
+                                    int viewportX, int viewportY, int viewportWidth, int viewportHeight,
+                                    int program, Matrix4f projection) {
+            this.blend = blend; this.depthTest = depthTest; this.cull = cull;
+            this.scissor = scissor; this.stencil = stencil; this.depthMask = depthMask;
+            this.depthFunc = depthFunc; this.srcRgb = srcRgb; this.dstRgb = dstRgb;
+            this.srcAlpha = srcAlpha; this.dstAlpha = dstAlpha; this.activeTexture = activeTexture;
+            this.texture0 = texture0; this.texture1 = texture1;
+            this.viewportX = viewportX; this.viewportY = viewportY;
+            this.viewportWidth = viewportWidth; this.viewportHeight = viewportHeight;
+            this.program = program; this.projection = projection;
+        }
+
+        static RenderStateSnapshot capture(CleanroomRenderService service) {
+            int active = GL11.glGetInteger(GL13.GL_ACTIVE_TEXTURE);
+            GL13.glActiveTexture(GL13.GL_TEXTURE0);
+            int texture0 = GL11.glGetInteger(GL11.GL_TEXTURE_BINDING_2D);
+            GL13.glActiveTexture(GL13.GL_TEXTURE1);
+            int texture1 = GL11.glGetInteger(GL11.GL_TEXTURE_BINDING_2D);
+            GL13.glActiveTexture(active);
+            java.nio.IntBuffer viewport = BufferUtils.createIntBuffer(4);
+            GL11.glGetInteger(GL11.GL_VIEWPORT, viewport);
+            return new RenderStateSnapshot(
+                    GL11.glIsEnabled(GL11.GL_BLEND), GL11.glIsEnabled(GL11.GL_DEPTH_TEST),
+                    GL11.glIsEnabled(GL11.GL_CULL_FACE), GL11.glIsEnabled(GL11.GL_SCISSOR_TEST),
+                    GL11.glIsEnabled(GL11.GL_STENCIL_TEST), GL11.glGetBoolean(GL11.GL_DEPTH_WRITEMASK),
+                    GL11.glGetInteger(GL11.GL_DEPTH_FUNC),
+                    GL11.glGetInteger(GL14.GL_BLEND_SRC_RGB), GL11.glGetInteger(GL14.GL_BLEND_DST_RGB),
+                    GL11.glGetInteger(GL14.GL_BLEND_SRC_ALPHA), GL11.glGetInteger(GL14.GL_BLEND_DST_ALPHA),
+                    active, texture0, texture1, viewport.get(0), viewport.get(1), viewport.get(2), viewport.get(3),
+                    GL11.glGetInteger(GL20.GL_CURRENT_PROGRAM), new Matrix4f(service.projection)
+            );
+        }
+
+        void restore(CleanroomRenderService service) {
+            setEnabled(GL11.GL_BLEND, blend);
+            setEnabled(GL11.GL_DEPTH_TEST, depthTest);
+            setEnabled(GL11.GL_CULL_FACE, cull);
+            setEnabled(GL11.GL_SCISSOR_TEST, scissor);
+            setEnabled(GL11.GL_STENCIL_TEST, stencil);
+            GL11.glDepthMask(depthMask);
+            GL11.glDepthFunc(depthFunc);
+            GL14.glBlendFuncSeparate(srcRgb, dstRgb, srcAlpha, dstAlpha);
+            GL13.glActiveTexture(GL13.GL_TEXTURE0);
+            GL11.glBindTexture(GL11.GL_TEXTURE_2D, texture0);
+            GL13.glActiveTexture(GL13.GL_TEXTURE1);
+            GL11.glBindTexture(GL11.GL_TEXTURE_2D, texture1);
+            GL13.glActiveTexture(activeTexture);
+            GL11.glViewport(viewportX, viewportY, viewportWidth, viewportHeight);
+            service.projection = new Matrix4f(projection);
+            GL20.glUseProgram(program);
+            service.activeShader = null;
+        }
+
+        private static void setEnabled(int capability, boolean enabled) {
+            if (enabled) GL11.glEnable(capability); else GL11.glDisable(capability);
+        }
+    }
+
+    private enum ShaderKind {
+        NONE, MASK, MASK_INTERSECT, MASK_SUBTRACT, MASK_EXCLUDE
     }
 }
