@@ -28,7 +28,10 @@ public class ApricityContainerScreen extends GuiContainer implements AuiLinkedSc
         super.initGui();
         if (linkedDocument != null) linkedDocument.remove();
         linkedDocument = Document.create(menu.getTemplatePath());
-        if (linkedDocument != null) linkedDocument.applyViewport(false);
+        if (linkedDocument != null) {
+            linkedDocument.applyViewport(false);
+            menu.updateSlotLayout(linkedDocument, guiLeft, guiTop);
+        }
     }
 
     @Override protected void drawGuiContainerBackgroundLayer(float partialTicks, int mouseX, int mouseY) {
@@ -39,6 +42,7 @@ public class ApricityContainerScreen extends GuiContainer implements AuiLinkedSc
         super.drawScreen(mouseX, mouseY, partialTicks);
         if (linkedDocument == null) return;
         ApricityViewport viewport = linkedDocument.getViewport();
+        menu.updateSlotLayout(linkedDocument, guiLeft, guiTop);
         PoseStack pose = new PoseStack();
         pose.pushPose();
         pose.translate(guiLeft, guiTop, 0);
