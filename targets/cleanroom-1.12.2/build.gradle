@@ -153,10 +153,8 @@ processResources {
 // remain independent and continue to use their own source preparation rules.
 tasks.register('prepareAuiSources', Sync) {
     from('../../common/src/main/java') {
-        exclude 'com/sighs/apricityui/network/chunk/**'
         exclude 'com/sighs/apricityui/mixin/**'
         exclude 'com/sighs/apricityui/network/serialization/**'
-        exclude 'com/sighs/apricityui/network/util/**'
         exclude 'com/sighs/apricityui/media/openal/**'
     }
     // The Forge 1.20.1 target is deliberately not copied here. Its event,
