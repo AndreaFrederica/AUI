@@ -135,9 +135,11 @@ API 差异和每个模块的处理方式见 `docs/cleanroom-1.12.2-api-matrix.md
 - Cleanroom 已加入轻量 `SLOT` DOM 元素；容器屏幕会按 DOM 几何同步 1.12 `Slot` 的位置、禁用/隐藏状态和显示尺寸，替代固定网格坐标。
 - 图片渲染批次已接入 1.12 `TextureManager` + `BufferBuilder`：`TextureKey` 会解析为 `ResourceLocation`，纹理四边形支持 UV、ARGB tint 和批量提交。
 - 容器 `canInteractWith` 已加入服务端安全校验：绑定玩家必须是打开者，方块实体和实体绑定必须保持在 8 格范围内。
-- 通用网络序列化与 OpenAL 源码已做恢复探针；它们分别依赖 1.20 的 `com.mojang.serialization`/`FriendlyByteBuf` 扩展和不同的 LWJGL OpenAL ABI，不能直接复用。Cleanroom 仍保持隔离，下一步以 1.12 专用 codec 和音频适配替换，而不是继续排除功能。
+- 网络范围已收缩为 AUI 实际需要的 1.12 `SimpleNetworkWrapper` 打开屏幕消息和原生 `Container` 同步；common 中的通用 chunk/serialization 工具没有被 UI 调用，继续保持平台隔离，不为它们额外制造传输协议。
+- 1.12 `GuiScreen`/`GuiContainer` 已把鼠标按键、释放、拖动、滚轮和键盘字符转发到 common `Operation`，默认字体已通过 1.12 `FontRenderer` 绘制。
+- Cleanroom 客户端已实现基于 classpath/JAR 的 `ElementRegister` 注解扫描，并在客户端预初始化阶段注册 AUI 内置元素和扩展元素。
 
-阶段五仍有待完成项：槽位 CSS/DOM 坐标同步、过滤器服务端验证、通用网络广播、动态纹理/FBO/shader，以及 Cleanroom 的真实客户端/服务端运行 smoke test。
+阶段五仍有待完成项：槽位过滤器服务端验证、动态纹理/FBO/shader 的高级路径、可选音频后端，以及 Cleanroom 的真实客户端/服务端 UI 交互 smoke test。
 
 ## 阶段六：Mixin、AT 和可选能力
 
