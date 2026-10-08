@@ -2,6 +2,8 @@
 
 当前进度：阶段二进行中。已创建移植分支、复制模板、配置 ApricityUI 元数据、接入根工程 target 入口，并复制共享资源基线。
 
+API 差异和每个模块的处理方式见 `docs/cleanroom-1.12.2-api-matrix.md`。
+
 ## 目标
 
 在不破坏现有 Forge、Fabric、NeoForge 目标的前提下，为 ApricityUI 增加一个基于 Cleanroom 1.12.2 的独立构建目标。
