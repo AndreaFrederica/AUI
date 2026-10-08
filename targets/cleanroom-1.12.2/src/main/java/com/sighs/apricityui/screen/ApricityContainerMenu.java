@@ -119,14 +119,20 @@ public class ApricityContainerMenu extends Container {
             Element.DOMRect rect = domSlot.getSlotVisualBounds();
             if (rect == null) continue;
             Slot slot = inventorySlots.get(global);
-            slot.xPos = (int) Math.round(rect.x) - left;
-            slot.yPos = (int) Math.round(rect.y) - top;
             if (slot instanceof UiSlot uiSlot) {
                 domSlot.bindToMenuSlot(domSlot.isExplicitlyDisabled());
                 uiSlot.setUiDisabled(domSlot.isExplicitlyDisabled());
                 uiSlot.setUiHidden(!domSlot.shouldRenderItem());
                 uiSlot.setUiSlotBounds(Math.max(1, (int) Math.round(rect.width)),
                         Math.max(1, (int) Math.round(rect.height)));
+                // GuiContainer keeps item rendering private in 1.12. Moving a
+                // hidden DOM slot outside the viewport provides the equivalent
+                // of display:none while preserving its server slot index.
+                slot.xPos = uiSlot.isUiHidden() ? -10000 : (int) Math.round(rect.x) - left;
+                slot.yPos = uiSlot.isUiHidden() ? -10000 : (int) Math.round(rect.y) - top;
+            } else {
+                slot.xPos = (int) Math.round(rect.x) - left;
+                slot.yPos = (int) Math.round(rect.y) - top;
             }
         }
     }
