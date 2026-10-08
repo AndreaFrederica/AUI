@@ -57,9 +57,40 @@ public final class CleanroomRenderService implements AuiRenderService {
         m.buffer.pos(p[0], p[1], p[2]).color(r, g, b, a).endVertex();
     }
     @Override public void submitMesh(Object mesh) { Tessellator.getInstance().draw(); }
-    @Override public Object beginTextureBatch(RenderHandle render) { return null; }
-    @Override public void emitTextureQuad(Object batch, Matrix4f mat, float x, float y, float width, float height, float u0, float v0, float u1, float v1) { }
-    @Override public void flushTextureBatch(Object batch, RenderHandle render) { }
+    @Override public Object beginTextureBatch(RenderHandle render) {
+        ResourceLocation location = render == null ? null : render.as();
+        if (location == null) return null;
+        try {
+            Minecraft.getMinecraft().getTextureManager().bindTexture(location);
+            BufferBuilder buffer = Tessellator.getInstance().getBuffer();
+            buffer.begin(GL11.GL_QUADS, DefaultVertexFormats.POSITION_TEX_COLOR);
+            return new TextureBatch(buffer);
+        } catch (Throwable ignored) {
+            return null;
+        }
+    }
+    @Override public void emitTextureQuad(Object batch, Matrix4f mat, float x, float y, float width, float height,
+                                          float u0, float v0, float u1, float v1) {
+        emitTextureQuad(batch, mat, x, y, width, height, u0, v0, u1, v1, 0xFFFFFFFF);
+    }
+    @Override public void emitTextureQuad(Object batch, Matrix4f mat, float x, float y, float width, float height,
+                                          float u0, float v0, float u1, float v1, int colorArgb) {
+        if (!(batch instanceof TextureBatch textureBatch)) return;
+        int a = colorArgb >>> 24, r = colorArgb >>> 16 & 255, g = colorArgb >>> 8 & 255, b = colorArgb & 255;
+        vertex(textureBatch.buffer, mat, x, y, u0, v0, r, g, b, a);
+        vertex(textureBatch.buffer, mat, x, y + height, u0, v1, r, g, b, a);
+        vertex(textureBatch.buffer, mat, x + width, y + height, u1, v1, r, g, b, a);
+        vertex(textureBatch.buffer, mat, x + width, y, u1, v0, r, g, b, a);
+    }
+    private static void vertex(BufferBuilder buffer, Matrix4f matrix, float x, float y, float u, float v,
+                               int r, int g, int b, int a) {
+        float[] p = transform(matrix, x, y, 0);
+        buffer.pos(p[0], p[1], p[2]).tex(u, v).color(r, g, b, a).endVertex();
+    }
+    @Override public void flushTextureBatch(Object batch, RenderHandle render) {
+        if (batch instanceof TextureBatch) Tessellator.getInstance().draw();
+    }
+    private static final class TextureBatch { final BufferBuilder buffer; TextureBatch(BufferBuilder buffer) { this.buffer = buffer; } }
     @Override public void emitVertexUV(Object mesh, Matrix4f mat, float x, float y, float z, float u, float v) {
         Mesh m = (Mesh) mesh; float[] p = transform(mat, x, y, z); m.buffer.pos(p[0], p[1], p[2]).tex(u, v).endVertex();
     }

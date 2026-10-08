@@ -114,8 +114,7 @@ public final class CleanroomResourceService implements AuiResourceService {
 
     @Override
     public RenderHandle smoothRenderType(TextureKey key, boolean blur, boolean depthTest) {
-        // RenderType is supplied by the 1.12 BufferBuilder backend in the
-        // rendering stage. Returning null makes callers use their safe fallback.
-        return null;
+        ResourceLocation location = key == null ? null : location(key.value());
+        return location == null ? null : RenderHandle.of(location);
     }
 }

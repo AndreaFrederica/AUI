@@ -133,6 +133,7 @@ API 差异和每个模块的处理方式见 `docs/cleanroom-1.12.2-api-matrix.md
 - 1.12 动态纹理桥已接入 `DynamicTexture`：创建、区域像素上传、纹理管理器注册和释放均可走真实 OpenGL 纹理对象。
 - 固定管线渲染桥已接入 1.12 `Framebuffer`：离屏目标、主目标句柄、深度/模板启用、清理、写入绑定、颜色纹理绑定和 `glBlitFramebuffer` 均已实现。
 - Cleanroom 已加入轻量 `SLOT` DOM 元素；容器屏幕会按 DOM 几何同步 1.12 `Slot` 的位置、禁用/隐藏状态和显示尺寸，替代固定网格坐标。
+- 图片渲染批次已接入 1.12 `TextureManager` + `BufferBuilder`：`TextureKey` 会解析为 `ResourceLocation`，纹理四边形支持 UV、ARGB tint 和批量提交。
 
 阶段五仍有待完成项：槽位 CSS/DOM 坐标同步、过滤器服务端验证、通用网络广播、动态纹理/FBO/shader，以及 Cleanroom 的真实客户端/服务端运行 smoke test。
 
