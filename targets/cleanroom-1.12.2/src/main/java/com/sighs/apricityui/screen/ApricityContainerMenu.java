@@ -20,6 +20,7 @@ import net.minecraft.nbt.NBTTagList;
 import net.minecraft.world.World;
 import net.minecraft.world.storage.MapStorage;
 import net.minecraft.world.storage.WorldSavedData;
+import com.sighs.apricityui.container.filter.FilterUtil;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -37,22 +38,31 @@ public class ApricityContainerMenu extends Container {
     public ApricityContainerMenu(EntityPlayerMP owner, String templatePath,
                                  List<ContainerDeclaration> declarations,
                                  Map<String, Map<String, String>> argsById) {
-        this(owner.inventory, templatePath, normalizeDeclarations(owner, declarations, argsById), argsById, owner);
+        this(owner, templatePath, declarations, argsById, Map.of());
+    }
+
+    public ApricityContainerMenu(EntityPlayerMP owner, String templatePath,
+                                 List<ContainerDeclaration> declarations,
+                                 Map<String, Map<String, String>> argsById,
+                                 Map<String, FilterUtil> filtersById) {
+        this(owner.inventory, templatePath, normalizeDeclarations(owner, declarations, argsById), argsById, owner, filtersById);
     }
 
     public ApricityContainerMenu(InventoryPlayer playerInventory, String templatePath,
                                  List<ContainerDeclaration> declarations) {
-        this(playerInventory, templatePath, declarations, Map.of(), null);
+        this(playerInventory, templatePath, declarations, Map.of(), null, Map.of());
     }
 
     private ApricityContainerMenu(InventoryPlayer playerInventory, String templatePath,
                                   List<ContainerDeclaration> declarations,
                                   Map<String, Map<String, String>> argsById,
-                                  EntityPlayerMP owner) {
+                                  EntityPlayerMP owner,
+                                  Map<String, FilterUtil> filtersById) {
         this.templatePath = templatePath == null ? "" : templatePath;
         this.declarations = declarations == null ? List.of() : List.copyOf(declarations);
         this.owner = owner;
         this.bindingArgs = argsById == null ? Map.of() : Map.copyOf(argsById);
+        Map<String, FilterUtil> usableFilters = filtersById == null ? Map.of() : filtersById;
         int customRow = 0;
         for (ContainerDeclaration declaration : this.declarations) {
             if (declaration == null || declaration.capacity() <= 0 || declaration.bindType() == ContainerBindType.PLAYER) continue;
@@ -63,7 +73,8 @@ public class ApricityContainerMenu extends Container {
             for (int index = 0; index < slotCount; index++) {
                 int column = index % 9;
                 int row = index / 9;
-                addSlotToContainer(new UiSlot(inventory, index, 8 + column * 18, 8 + (customRow + row) * 18));
+                addSlotToContainer(new UiSlot(inventory, index, 8 + column * 18, 8 + (customRow + row) * 18,
+                        usableFilters.get(declaration.id())));
             }
             customRow += Math.max(1, (declaration.capacity() + 8) / 9) + 1;
         }
@@ -292,11 +303,17 @@ public class ApricityContainerMenu extends Container {
     }
 
     public static class UiSlot extends Slot {
+        private final FilterUtil filter;
         private boolean uiDisabled;
         private boolean uiHidden;
         private int uiWidth = 16, uiHeight = 16;
-        public UiSlot(IInventory inventory, int index, int x, int y) { super(inventory, index, x, y); }
-        @Override public boolean isItemValid(ItemStack stack) { return !uiDisabled && super.isItemValid(stack); }
+        public UiSlot(IInventory inventory, int index, int x, int y) { this(inventory, index, x, y, null); }
+        public UiSlot(IInventory inventory, int index, int x, int y, FilterUtil filter) {
+            super(inventory, index, x, y); this.filter = filter;
+        }
+        @Override public boolean isItemValid(ItemStack stack) {
+            return !uiDisabled && super.isItemValid(stack) && (filter == null || filter.test(stack));
+        }
         @Override public boolean canTakeStack(EntityPlayer player) { return !uiDisabled && super.canTakeStack(player); }
         public void setUiDisabled(boolean value) { uiDisabled = value; }
         public void setUiHidden(boolean value) { uiHidden = value; }

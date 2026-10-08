@@ -7,6 +7,7 @@ import com.sighs.apricityui.screen.ApricityContainerScreen;
 import com.sighs.apricityui.container.bind.ContainerBindType;
 import com.sighs.apricityui.spi.AuiBindingBuilder;
 import com.sighs.apricityui.spi.AuiBindingFilter;
+import com.sighs.apricityui.container.filter.FilterUtil;
 import net.minecraft.core.BlockPos;
 import com.sighs.apricityui.spi.AuiNetworkService;
 import com.sighs.apricityui.spi.AuiPendingMenu;
@@ -45,24 +46,25 @@ public final class CleanroomNetworkService implements AuiNetworkService {
         return configurator -> {
             CleanroomBindingBuilder builder = new CleanroomBindingBuilder();
             if (configurator != null) configurator.accept(builder);
-            openScreen(player, templatePath, builder.declarations(), builder.argsById());
+            openScreen(player, templatePath, builder.declarations(), builder.argsById(), builder.filtersById());
         };
     }
 
     @Override
     public void openScreen(ServerPlayer player, String templatePath, List<ContainerDeclaration> declarations) {
-        openScreen(player, templatePath, declarations, Map.of());
+        openScreen(player, templatePath, declarations, Map.of(), Map.of());
     }
 
     private void openScreen(ServerPlayer player, String templatePath,
                             List<ContainerDeclaration> declarations,
-                            Map<String, Map<String, String>> argsById) {
+                            Map<String, Map<String, String>> argsById,
+                            Map<String, FilterUtil> filtersById) {
         if (player == null || player.legacy() == null) return;
         register();
         net.minecraft.entity.player.EntityPlayerMP legacy = player.legacy();
         int windowId = -1;
         if (declarations != null && !declarations.isEmpty()) {
-            ApricityContainerMenu menu = new ApricityContainerMenu(legacy, templatePath, declarations, argsById);
+            ApricityContainerMenu menu = new ApricityContainerMenu(legacy, templatePath, declarations, argsById, filtersById);
             declarations = menu.getDeclarations();
             legacy.getNextWindowId();
             windowId = legacy.currentWindowId;
@@ -76,12 +78,16 @@ public final class CleanroomNetworkService implements AuiNetworkService {
     private static class CleanroomBindingBuilder implements AuiBindingBuilder, AuiBindingBuilder.SlotBindingStep, AuiBindingBuilder.FilterableSlotStep {
         private final List<ContainerDeclaration> declarations = new ArrayList<>();
         private final Map<String, Map<String, String>> argsById = new LinkedHashMap<>();
+        private final Map<String, FilterUtil> filtersById = new LinkedHashMap<>();
         private boolean primarySet;
+        private String lastDeclarationId;
 
         List<ContainerDeclaration> declarations() { return List.copyOf(declarations); }
         Map<String, Map<String, String>> argsById() { return Map.copyOf(argsById); }
+        Map<String, FilterUtil> filtersById() { return Map.copyOf(filtersById); }
         @Override public BindingStep player() {
             declarations.add(new ContainerDeclaration("player", ContainerBindType.PLAYER, 36, false));
+            lastDeclarationId = "player";
             return this;
         }
         @Override public SlotBindingStep saveddata() { return saveddata("apricityui_data", 9); }
@@ -104,11 +110,15 @@ public final class CleanroomNetworkService implements AuiNetworkService {
             boolean primary = !primarySet;
             primarySet = true;
             declarations.add(new ContainerDeclaration(id, type, Math.max(0, capacity), primary));
+            lastDeclarationId = id;
             argsById.put(id, Map.copyOf(args));
             return this;
         }
         @Override public FilterableSlotStep slot(String selector) { return this; }
-        @Override public FilterableSlotStep filter(AuiBindingFilter filter) { return this; }
+        @Override public FilterableSlotStep filter(AuiBindingFilter filter) {
+            if (lastDeclarationId != null && filter instanceof FilterUtil usable) filtersById.put(lastDeclarationId, usable);
+            return this;
+        }
     }
 
     public static final class OpenScreenMessage implements IMessage {
