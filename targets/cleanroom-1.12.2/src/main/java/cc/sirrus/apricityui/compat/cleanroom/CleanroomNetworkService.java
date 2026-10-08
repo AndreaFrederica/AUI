@@ -2,6 +2,9 @@ package cc.sirrus.apricityui.compat.cleanroom;
 
 import com.sighs.apricityui.element.ContainerDeclaration;
 import com.sighs.apricityui.screen.ApricityScreen;
+import com.sighs.apricityui.screen.ApricityContainerMenu;
+import com.sighs.apricityui.screen.ApricityContainerScreen;
+import com.sighs.apricityui.container.bind.ContainerBindType;
 import com.sighs.apricityui.spi.AuiBindingBuilder;
 import com.sighs.apricityui.spi.AuiBindingFilter;
 import net.minecraft.core.BlockPos;
@@ -43,7 +46,7 @@ public final class CleanroomNetworkService implements AuiNetworkService {
     public void openScreen(ServerPlayer player, String templatePath, List<ContainerDeclaration> declarations) {
         if (player == null || player.legacy() == null) return;
         register();
-        channel.sendTo(new OpenScreenMessage(templatePath), player.legacy());
+        channel.sendTo(new OpenScreenMessage(templatePath, declarations), player.legacy());
     }
 
     private static class CleanroomBindingBuilder implements AuiBindingBuilder, AuiBindingBuilder.SlotBindingStep, AuiBindingBuilder.FilterableSlotStep {
@@ -62,9 +65,34 @@ public final class CleanroomNetworkService implements AuiNetworkService {
     public static final class OpenScreenMessage implements IMessage {
         private String path = "";
         public OpenScreenMessage() { }
-        public OpenScreenMessage(String path) { this.path = path == null ? "" : path; }
-        @Override public void fromBytes(ByteBuf buf) { path = readString(buf, 32767); }
-        @Override public void toBytes(ByteBuf buf) { writeString(buf, path); }
+        private List<ContainerDeclaration> declarations = List.of();
+        public OpenScreenMessage(String path) { this(path, List.of()); }
+        public OpenScreenMessage(String path, List<ContainerDeclaration> declarations) {
+            this.path = path == null ? "" : path;
+            this.declarations = declarations == null ? List.of() : List.copyOf(declarations);
+        }
+        @Override public void fromBytes(ByteBuf buf) {
+            path = readString(buf, 32767);
+            int count = Math.min(Math.max(buf.readInt(), 0), 128);
+            java.util.ArrayList<ContainerDeclaration> decoded = new java.util.ArrayList<>(count);
+            for (int i = 0; i < count; i++) {
+                String id = readString(buf, 256);
+                int ordinal = Math.min(Math.max(buf.readByte(), 0), ContainerBindType.values().length - 1);
+                int capacity = Math.min(Math.max(buf.readInt(), 0), 4096);
+                decoded.add(new ContainerDeclaration(id, ContainerBindType.values()[ordinal], capacity, buf.readBoolean()));
+            }
+            declarations = List.copyOf(decoded);
+        }
+        @Override public void toBytes(ByteBuf buf) {
+            writeString(buf, path);
+            buf.writeInt(declarations.size());
+            for (ContainerDeclaration declaration : declarations) {
+                writeString(buf, declaration.id());
+                buf.writeByte(declaration.bindType().ordinal());
+                buf.writeInt(declaration.capacity());
+                buf.writeBoolean(declaration.primary());
+            }
+        }
         private static String readString(ByteBuf buf, int max) {
             int length = Math.min(Math.max(buf.readInt(), 0), max * 4);
             byte[] bytes = new byte[length]; buf.readBytes(bytes); return new String(bytes, java.nio.charset.StandardCharsets.UTF_8);
@@ -74,7 +102,15 @@ public final class CleanroomNetworkService implements AuiNetworkService {
         }
         public static final class Handler implements IMessageHandler<OpenScreenMessage, IMessage> {
             @Override public IMessage onMessage(OpenScreenMessage message, MessageContext context) {
-                Minecraft.getMinecraft().addScheduledTask(() -> Minecraft.getMinecraft().displayGuiScreen(new ApricityScreen(message.path)));
+                Minecraft.getMinecraft().addScheduledTask(() -> {
+                    if (message.declarations.isEmpty()) {
+                        Minecraft.getMinecraft().displayGuiScreen(new ApricityScreen(message.path));
+                    } else {
+                        ApricityContainerMenu menu = new ApricityContainerMenu(
+                                Minecraft.getMinecraft().player.inventory, message.path, message.declarations);
+                        Minecraft.getMinecraft().displayGuiScreen(new ApricityContainerScreen(menu, Minecraft.getMinecraft().player.inventory));
+                    }
+                });
                 return null;
             }
         }
