@@ -5,6 +5,7 @@ import cc.sirrus.apricityui.compat.cleanroom.CleanroomResourceService;
 import cc.sirrus.apricityui.compat.cleanroom.CleanroomRenderService;
 import cc.sirrus.apricityui.compat.cleanroom.CleanroomNetworkService;
 import com.sighs.apricityui.spi.AuiServices;
+import com.sighs.apricityui.registry.ApricityUIRegistry;
 import net.minecraftforge.fml.common.event.FMLPreInitializationEvent;
 
 public class ClientProxy implements IProxy{
@@ -14,6 +15,8 @@ public class ClientProxy implements IProxy{
         AuiServices.setResources(CleanroomResourceService.INSTANCE);
         AuiServices.setRender(CleanroomRenderService.INSTANCE);
         AuiServices.setNetwork(CleanroomNetworkService.INSTANCE);
+        ApricityUIRegistry.scanPackages("com.sighs.apricityui.element");
+        ApricityUIRegistry.register();
         CleanroomNetworkService.INSTANCE.register();
     }
 }

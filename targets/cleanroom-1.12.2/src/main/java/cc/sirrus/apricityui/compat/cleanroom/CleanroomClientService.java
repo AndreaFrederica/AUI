@@ -27,6 +27,17 @@ import java.io.File;
 import java.lang.annotation.Annotation;
 import java.net.URI;
 import java.nio.file.Path;
+import java.nio.file.Files;
+import java.net.JarURLConnection;
+import java.net.URL;
+import java.util.ArrayList;
+import java.util.HashSet;
+import java.util.HashMap;
+import java.util.Enumeration;
+import java.util.jar.JarEntry;
+import java.util.jar.JarFile;
+import java.util.Set;
+import java.util.List;
 import java.util.Map;
 import java.util.function.Consumer;
 import java.util.function.Predicate;
@@ -39,6 +50,7 @@ import java.util.function.Predicate;
 public final class CleanroomClientService implements AuiClientService {
     public static final CleanroomClientService INSTANCE = new CleanroomClientService();
     private volatile boolean mouseGrabbed;
+    private final Set<String> scanPackages = new HashSet<>();
 
     private CleanroomClientService() {
     }
@@ -191,10 +203,12 @@ public final class CleanroomClientService implements AuiClientService {
 
     @Override
     public void addScanPackage(String basePackage) {
+        if (basePackage != null && !basePackage.isBlank()) scanPackages.add(basePackage.trim());
     }
 
     @Override
     public void addScanPackages(String... basePackages) {
+        if (basePackages != null) for (String basePackage : basePackages) addScanPackage(basePackage);
     }
 
     @Override
@@ -202,7 +216,59 @@ public final class CleanroomClientService implements AuiClientService {
                                       Predicate<Map<String, Object>> annotationPredicate,
                                       Consumer<Class<?>> consumer,
                                       Runnable onFinished) {
-        if (onFinished != null) onFinished.run();
+        try {
+            ClassLoader loader = Thread.currentThread().getContextClassLoader();
+            Set<String> classNames = new HashSet<>();
+            for (String packageName : new ArrayList<>(scanPackages)) collectClasses(loader, packageName, classNames);
+            for (String className : classNames) {
+                try {
+                    Class<?> type = Class.forName(className, false, loader);
+                    Annotation annotation = type.getAnnotation(annotationClass);
+                    if (annotation == null) continue;
+                    Map<String, Object> values = new HashMap<>();
+                    for (java.lang.reflect.Method method : annotation.annotationType().getDeclaredMethods()) {
+                        try { values.put(method.getName(), method.invoke(annotation)); }
+                        catch (ReflectiveOperationException ignored) { }
+                    }
+                    if (annotationPredicate == null || annotationPredicate.test(values)) consumer.accept(type);
+                } catch (Throwable ignored) {
+                    // A third-party class may reference an optional dependency;
+                    // one failed candidate must not prevent other elements from
+                    // registering.
+                }
+            }
+        } finally {
+            if (onFinished != null) onFinished.run();
+        }
+    }
+
+    private static void collectClasses(ClassLoader loader, String packageName, Set<String> output) {
+        String resourcePath = packageName.replace('.', '/');
+        try {
+            Enumeration<URL> resources = loader.getResources(resourcePath);
+            while (resources.hasMoreElements()) {
+                URL url = resources.nextElement();
+                if ("file".equals(url.getProtocol())) {
+                    Path root = Path.of(url.toURI());
+                    try (var files = Files.walk(root)) {
+                        files.filter(Files::isRegularFile).filter(path -> path.toString().endsWith(".class"))
+                                .forEach(path -> output.add(packageName + '.' + root.relativize(path).toString()
+                                        .replace(File.separatorChar, '.').replaceAll("\\.class$", "")));
+                    }
+                } else if ("jar".equals(url.getProtocol())) {
+                    JarURLConnection connection = (JarURLConnection) url.openConnection();
+                    try (JarFile jar = connection.getJarFile()) {
+                        Enumeration<JarEntry> entries = jar.entries();
+                        while (entries.hasMoreElements()) {
+                            String name = entries.nextElement().getName();
+                            if (name.startsWith(resourcePath + "/") && name.endsWith(".class")) {
+                                output.add(name.substring(0, name.length() - 6).replace('/', '.'));
+                            }
+                        }
+                    }
+                }
+            }
+        } catch (Throwable ignored) { }
     }
 
     @Override
