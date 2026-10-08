@@ -2,6 +2,8 @@ package com.sighs.apricityui.screen;
 
 import com.sighs.apricityui.container.bind.ContainerBindType;
 import com.sighs.apricityui.element.ContainerDeclaration;
+import com.sighs.apricityui.init.Document;
+import com.sighs.apricityui.init.Element;
 import net.minecraft.entity.player.EntityPlayer;
 import net.minecraft.entity.player.EntityPlayerMP;
 import net.minecraft.entity.player.InventoryPlayer;
@@ -57,24 +59,82 @@ public class ApricityContainerMenu extends Container {
             for (int index = 0; index < slotCount; index++) {
                 int column = index % 9;
                 int row = index / 9;
-                addSlotToContainer(new Slot(inventory, index, 8 + column * 18, 8 + (customRow + row) * 18));
+                addSlotToContainer(new UiSlot(inventory, index, 8 + column * 18, 8 + (customRow + row) * 18));
             }
             customRow += Math.max(1, (declaration.capacity() + 8) / 9) + 1;
         }
         int playerTop = 8 + customRow * 18;
         for (int row = 0; row < 3; row++) {
             for (int column = 0; column < 9; column++) {
-                addSlotToContainer(new Slot(playerInventory, column + row * 9 + 9, 8 + column * 18, playerTop + row * 18));
+                addSlotToContainer(new UiSlot(playerInventory, column + row * 9 + 9, 8 + column * 18, playerTop + row * 18));
             }
         }
         for (int column = 0; column < 9; column++) {
-            addSlotToContainer(new Slot(playerInventory, column, 8 + column * 18, playerTop + 58));
+            addSlotToContainer(new UiSlot(playerInventory, column, 8 + column * 18, playerTop + 58));
         }
     }
 
     public String getTemplatePath() { return templatePath; }
     public List<ContainerDeclaration> getDeclarations() { return declarations; }
     public void setWindowId(int windowId) { this.windowId = windowId; }
+
+    public Integer resolveGlobalSlotIndex(String id, int localIndex) {
+        if (id == null || localIndex < 0) return null;
+        int customOffset = 0;
+        for (ContainerDeclaration declaration : declarations) {
+            if (declaration == null) continue;
+            if (declaration.bindType() == ContainerBindType.PLAYER) {
+                if (id.equals(declaration.id()) && localIndex < 36) {
+                    return inventorySlots.size() - 36 + localIndex;
+                }
+                continue;
+            }
+            int count = Math.max(0, declaration.capacity());
+            if (id.equals(declaration.id())) return localIndex < count ? customOffset + localIndex : null;
+            customOffset += count;
+        }
+        return null;
+    }
+
+    /** Projects SLOT DOM geometry onto vanilla slot positions after layout. */
+    public void updateSlotLayout(Document document, int left, int top) {
+        if (document == null) return;
+        int declarationIndex = 0;
+        for (Element element : document.getElements()) {
+            if (!(element instanceof com.sighs.apricityui.element.Slot domSlot)) continue;
+            com.sighs.apricityui.element.Container container = ancestorContainer(domSlot);
+            if (container == null) continue;
+            String id = container.getAttribute("id");
+            if (id == null || id.isBlank()) {
+                id = declarationIndex < declarations.size() ? declarations.get(declarationIndex).id() : "";
+                declarationIndex++;
+            }
+            int local = domSlot.getSlotIndex();
+            Integer global = resolveGlobalSlotIndex(id, local);
+            if (global == null || global < 0 || global >= inventorySlots.size()) continue;
+            Element.DOMRect rect = domSlot.getSlotVisualBounds();
+            if (rect == null) continue;
+            Slot slot = inventorySlots.get(global);
+            slot.xPos = (int) Math.round(rect.x) - left;
+            slot.yPos = (int) Math.round(rect.y) - top;
+            if (slot instanceof UiSlot uiSlot) {
+                domSlot.bindToMenuSlot(domSlot.isExplicitlyDisabled());
+                uiSlot.setUiDisabled(domSlot.isExplicitlyDisabled());
+                uiSlot.setUiHidden(!domSlot.shouldRenderItem());
+                uiSlot.setUiSlotBounds(Math.max(1, (int) Math.round(rect.width)),
+                        Math.max(1, (int) Math.round(rect.height)));
+            }
+        }
+    }
+
+    private static com.sighs.apricityui.element.Container ancestorContainer(Element element) {
+        Element current = element == null ? null : element.parentElement;
+        while (current != null) {
+            if (current instanceof com.sighs.apricityui.element.Container container) return container;
+            current = current.parentElement;
+        }
+        return null;
+    }
 
     private static List<ContainerDeclaration> normalizeDeclarations(EntityPlayerMP owner,
                                                                      List<ContainerDeclaration> input,
@@ -202,5 +262,20 @@ public class ApricityContainerMenu extends Container {
             nbt.merge(inventories);
             return nbt;
         }
+    }
+
+    public static class UiSlot extends Slot {
+        private boolean uiDisabled;
+        private boolean uiHidden;
+        private int uiWidth = 16, uiHeight = 16;
+        public UiSlot(IInventory inventory, int index, int x, int y) { super(inventory, index, x, y); }
+        @Override public boolean isItemValid(ItemStack stack) { return !uiDisabled && super.isItemValid(stack); }
+        @Override public boolean canTakeStack(EntityPlayer player) { return !uiDisabled && super.canTakeStack(player); }
+        public void setUiDisabled(boolean value) { uiDisabled = value; }
+        public void setUiHidden(boolean value) { uiHidden = value; }
+        public boolean isUiHidden() { return uiHidden; }
+        public void setUiSlotBounds(int width, int height) { uiWidth = Math.max(1, width); uiHeight = Math.max(1, height); }
+        public int getUiSlotWidth() { return uiWidth; }
+        public int getUiSlotHeight() { return uiHeight; }
     }
 }
