@@ -6,12 +6,14 @@ import com.sighs.apricityui.init.Document;
 import com.sighs.apricityui.loader.ClientLoader;
 import com.sighs.apricityui.render.Base;
 import com.sighs.apricityui.render.Mask;
+import com.sighs.apricityui.render.Operation;
 import com.sighs.apricityui.style.Cursor;
 import com.sighs.apricityui.spi.AuiServices;
 import com.sighs.apricityui.viewport.ApricityViewport;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.gui.GuiScreen;
 import org.lwjgl.input.Keyboard;
+import org.lwjgl.input.Mouse;
 
 /** 1.12 GuiScreen owner for one AUI document. */
 public class ApricityScreen extends GuiScreen implements AuiLinkedScreen {
@@ -39,6 +41,7 @@ public class ApricityScreen extends GuiScreen implements AuiLinkedScreen {
     }
 
     @Override public void drawScreen(int mouseX, int mouseY, float partialTicks) {
+        Operation.onMouseMoveFrame(new com.sighs.apricityui.layout.Position(mouseX, mouseY));
         if (showDefaultBackground) drawDefaultBackground();
         if (linkedDocument != null) {
             PoseStack pose = new PoseStack();
@@ -52,8 +55,32 @@ public class ApricityScreen extends GuiScreen implements AuiLinkedScreen {
         super.drawScreen(mouseX, mouseY, partialTicks);
     }
 
+    @Override protected void mouseClicked(int mouseX, int mouseY, int mouseButton) throws java.io.IOException {
+        if (Operation.onMouseDown(mouseButton)) return;
+        super.mouseClicked(mouseX, mouseY, mouseButton);
+    }
+
+    @Override protected void mouseReleased(int mouseX, int mouseY, int state) {
+        if (Operation.onMouseUp(state)) return;
+        super.mouseReleased(mouseX, mouseY, state);
+    }
+
+    @Override protected void mouseClickMove(int mouseX, int mouseY, int clickedMouseButton, long timeSinceLastClick) {
+        Operation.onMouseMove(new com.sighs.apricityui.layout.Position(mouseX, mouseY));
+        super.mouseClickMove(mouseX, mouseY, clickedMouseButton, timeSinceLastClick);
+    }
+
+    @Override public void handleMouseInput() throws java.io.IOException {
+        if (Mouse.getEventDWheel() != 0 && Operation.scroll(Mouse.getEventDWheel())) return;
+        super.handleMouseInput();
+    }
+
     @Override protected void keyTyped(char typedChar, int keyCode) throws java.io.IOException {
         if (keyCode == AuiServices.keys().reloadKey()) { ClientLoader.reload(); return; }
+        boolean consumed = Operation.onCharTyped(typedChar);
+        consumed |= Operation.onKeyPressed(keyCode, 0, 0, Keyboard.isRepeatEvent(),
+                com.sighs.apricityui.event.KeyEvent.Source.SCREEN_EVENT);
+        if (consumed) return;
         super.keyTyped(typedChar, keyCode);
     }
 
