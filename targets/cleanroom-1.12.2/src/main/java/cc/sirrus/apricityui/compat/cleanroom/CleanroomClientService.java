@@ -1,0 +1,277 @@
+package cc.sirrus.apricityui.compat.cleanroom;
+
+import com.mojang.blaze3d.platform.Window;
+import com.mojang.blaze3d.vertex.PoseStack;
+import com.sighs.apricityui.init.Document;
+import com.sighs.apricityui.layout.Position;
+import com.sighs.apricityui.layout.Size;
+import com.sighs.apricityui.spi.AuiClientService;
+import com.sighs.apricityui.style.Text;
+import net.minecraft.client.Minecraft;
+import net.minecraft.client.gui.ScaledResolution;
+import net.minecraft.client.gui.GuiScreen;
+import net.minecraft.util.math.RayTraceResult;
+import net.minecraft.util.math.Vec3d;
+import net.minecraft.world.World;
+import net.minecraft.entity.Entity;
+import net.minecraftforge.fml.common.FMLCommonHandler;
+import org.joml.Vector3f;
+import org.lwjgl.input.Keyboard;
+import org.lwjgl.input.Mouse;
+
+import java.awt.Desktop;
+import java.io.File;
+import java.lang.annotation.Annotation;
+import java.net.URI;
+import java.nio.file.Path;
+import java.util.Map;
+import java.util.function.Consumer;
+import java.util.function.Predicate;
+
+/**
+ * Cleanroom 0.6 / Minecraft 1.12 implementation of the common client SPI.
+ * Minecraft 1.12 has no modern Window or camera classes, so this class is the
+ * single boundary that translates the old client fields and MouseHelper API.
+ */
+public final class CleanroomClientService implements AuiClientService {
+    public static final CleanroomClientService INSTANCE = new CleanroomClientService();
+    private volatile boolean mouseGrabbed;
+
+    private CleanroomClientService() {
+    }
+
+    private static Minecraft minecraft() {
+        try {
+            return Minecraft.getMinecraft();
+        } catch (Throwable ignored) {
+            return null;
+        }
+    }
+
+    private static ScaledResolution resolution(Minecraft mc) {
+        return mc == null ? null : new ScaledResolution(mc);
+    }
+
+    @Override
+    public Size getWindowSize() {
+        ScaledResolution scaled = resolution(minecraft());
+        return scaled == null ? new Size(1920, 1080) : new Size(scaled.getScaledWidth(), scaled.getScaledHeight());
+    }
+
+    @Override
+    public Position getMousePosition() {
+        Minecraft mc = minecraft();
+        ScaledResolution scaled = resolution(mc);
+        if (mc == null || scaled == null || !Mouse.isCreated()) return new Position(0, 0);
+        double scaleX = (double) scaled.getScaledWidth() / Math.max(1, mc.displayWidth);
+        double scaleY = (double) scaled.getScaledHeight() / Math.max(1, mc.displayHeight);
+        return new Position(Mouse.getX() * scaleX, scaled.getScaledHeight() - Mouse.getY() * scaleY - 1.0);
+    }
+
+    @Override
+    public Position getMousePositionDirectly() {
+        return getMousePosition();
+    }
+
+    @Override
+    public double getWindowWidth() {
+        Minecraft mc = minecraft();
+        return mc == null ? 1920 : mc.displayWidth;
+    }
+
+    @Override
+    public double getWindowHeight() {
+        Minecraft mc = minecraft();
+        return mc == null ? 1080 : mc.displayHeight;
+    }
+
+    @Override
+    public int getScaledWidth() {
+        Size size = getWindowSize();
+        return (int) size.width();
+    }
+
+    @Override
+    public int getScaledHeight() {
+        Size size = getWindowSize();
+        return (int) size.height();
+    }
+
+    @Override
+    public int getDefaultFontWidth(String text, boolean bold, boolean oblique, double strokeWidth) {
+        Minecraft mc = minecraft();
+        if (mc != null && mc.fontRenderer != null) return mc.fontRenderer.getStringWidth(text == null ? "" : text);
+        return (int) Math.ceil((text == null ? 0 : text.length()) * 8.0 + Math.max(0, strokeWidth) * 2.0);
+    }
+
+    @Override
+    public void drawDefaultFont(PoseStack poseStack, Text text, String content, Position position) {
+        // The 1.12 renderer adapter will provide actual BufferBuilder drawing.
+        // Keeping this boundary safe lets layout and headless resource loading run now.
+    }
+
+    @Override
+    public boolean isKeyPressed(String keyName) {
+        if (keyName == null || !Keyboard.isCreated()) return false;
+        if (keyName.startsWith("key.keyboard.")) keyName = keyName.substring("key.keyboard.".length());
+        Integer code = CleanroomInput.keyCode(keyName);
+        return code != null && Keyboard.isKeyDown(code);
+    }
+
+    @Override
+    public boolean isMouseGrabbed() {
+        Minecraft mc = minecraft();
+        return mouseGrabbed;
+    }
+
+    @Override
+    public Position getMousePositionForWorldInteraction() {
+        return getMousePosition();
+    }
+
+    @Override
+    public void openScreen(String templatePath) {
+        // GuiScreen implementation is installed by the client proxy in the next
+        // stage; no-op is preferable to loading a 1.20 screen class on 1.12.
+    }
+
+    @Override
+    public void closeScreen() {
+        Minecraft mc = minecraft();
+        if (mc != null) mc.displayGuiScreen(null);
+    }
+
+    @Override
+    public Path getGameDirectory() {
+        Minecraft mc = minecraft();
+        return mc == null ? Path.of("run").toAbsolutePath() : mc.gameDir.toPath().toAbsolutePath();
+    }
+
+    @Override
+    public Path getConfigDirectory() {
+        return getGameDirectory().resolve("config");
+    }
+
+    @Override
+    public boolean isProduction() {
+        return FMLCommonHandler.instance().getSide().isClient();
+    }
+
+    @Override
+    public void addScanPackage(String basePackage) {
+    }
+
+    @Override
+    public void addScanPackages(String... basePackages) {
+    }
+
+    @Override
+    public void scanAnnotationClasses(Class<? extends Annotation> annotationClass,
+                                      Predicate<Map<String, Object>> annotationPredicate,
+                                      Consumer<Class<?>> consumer,
+                                      Runnable onFinished) {
+        if (onFinished != null) onFinished.run();
+    }
+
+    @Override
+    public void openUri(URI uri) {
+        try {
+            if (Desktop.isDesktopSupported()) Desktop.getDesktop().browse(uri);
+        } catch (Throwable ignored) {
+        }
+    }
+
+    @Override
+    public void openFile(File file) {
+        try {
+            if (Desktop.isDesktopSupported()) Desktop.getDesktop().open(file);
+        } catch (Throwable ignored) {
+        }
+    }
+
+    @Override
+    public long getWindowHandle() {
+        return 0L;
+    }
+
+    @Override
+    public net.minecraft.world.phys.Vec3 getCameraPosition() {
+        Minecraft mc = minecraft();
+        Entity view = mc == null ? null : mc.getRenderViewEntity();
+        Vec3d position = view == null ? new Vec3d(0, 0, 0) : view.getPositionEyes(mc.getRenderPartialTicks());
+        return new net.minecraft.world.phys.Vec3(position.x, position.y, position.z);
+    }
+
+    @Override
+    public Vector3f getCameraLookVector() {
+        Minecraft mc = minecraft();
+        Entity view = mc == null ? null : mc.getRenderViewEntity();
+        if (view == null) return new Vector3f(0, 0, -1);
+        Vec3d look = view.getLook(mc.getRenderPartialTicks());
+        return new Vector3f((float) look.x, (float) look.y, (float) look.z);
+    }
+
+    @Override
+    public boolean isClientGameplayActive() {
+        Minecraft mc = minecraft();
+        return mc != null && mc.world != null && mc.currentScreen == null;
+    }
+
+    @Override
+    public void releaseMouse() {
+        Minecraft mc = minecraft();
+        if (mc != null && mc.mouseHelper != null) mc.mouseHelper.ungrabMouseCursor();
+        mouseGrabbed = false;
+    }
+
+    @Override
+    public void grabMouse() {
+        Minecraft mc = minecraft();
+        if (mc != null && mc.mouseHelper != null) mc.mouseHelper.grabMouseCursor();
+        mouseGrabbed = true;
+    }
+
+    @Override
+    public Window getWindow() {
+        Minecraft mc = minecraft();
+        return new Window(0L, (int) getWindowWidth(), (int) getWindowHeight(), getScaledWidth(), getScaledHeight(),
+                resolution(mc) == null ? 1.0 : (double) mc.displayWidth / Math.max(1, getScaledWidth()));
+    }
+
+    @Override
+    public String getClipboardText() {
+        Minecraft mc = minecraft();
+        return mc == null ? "" : GuiScreen.getClipboardString();
+    }
+
+    @Override
+    public void setClipboardText(String text) {
+        Minecraft mc = minecraft();
+        if (mc != null) GuiScreen.setClipboardString(text == null ? "" : text);
+    }
+
+    @Override
+    public Document getCurrentScreenDocument() {
+        return null;
+    }
+
+    @Override
+    public boolean isWorldOccluded(net.minecraft.world.phys.Vec3 origin,
+                                   net.minecraft.world.phys.Vec3 target,
+                                   double targetDistance) {
+        Minecraft mc = minecraft();
+        if (mc == null || mc.world == null || mc.player == null) return true;
+        Vec3d from = new Vec3d(origin.x, origin.y, origin.z);
+        Vec3d to = new Vec3d(target.x, target.y, target.z);
+        RayTraceResult result = mc.world.rayTraceBlocks(from, to, false, true, false);
+        if (result == null || result.typeOfHit == RayTraceResult.Type.MISS) return false;
+        return from.distanceTo(result.hitVec) + 1.0e-4d < targetDistance;
+    }
+
+    @Override
+    public void execute(Runnable runnable) {
+        Minecraft mc = minecraft();
+        if (mc == null || runnable == null) return;
+        mc.addScheduledTask(runnable);
+    }
+}
