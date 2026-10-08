@@ -12,6 +12,7 @@ import com.sighs.apricityui.style.Text;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.gui.ScaledResolution;
 import net.minecraft.client.gui.GuiScreen;
+import net.minecraft.client.renderer.GlStateManager;
 import net.minecraft.util.math.RayTraceResult;
 import net.minecraft.util.math.Vec3d;
 import net.minecraft.world.World;
@@ -108,8 +109,37 @@ public final class CleanroomClientService implements AuiClientService {
 
     @Override
     public void drawDefaultFont(PoseStack poseStack, Text text, String content, Position position) {
-        // The 1.12 renderer adapter will provide actual BufferBuilder drawing.
-        // Keeping this boundary safe lets layout and headless resource loading run now.
+        Minecraft mc = minecraft();
+        if (mc == null || mc.fontRenderer == null || text == null || position == null) return;
+        String value = content == null ? "" : content;
+        float scale = (float) Math.max(0.01, text.defaultFontScale());
+        org.joml.Vector4f origin = poseStack == null
+                ? new org.joml.Vector4f((float) position.x, (float) position.y, 0, 1)
+                : poseStack.last().pose().transform(new org.joml.Vector4f((float) position.x, (float) position.y, 0, 1));
+        int color = text.color == null ? 0xFFFFFFFF : text.color.getValue();
+        StringBuilder formatted = new StringBuilder();
+        if (text.isBold()) formatted.append('\u00a7').append('l');
+        if (text.isOblique()) formatted.append('\u00a7').append('o');
+        formatted.append(value);
+        GlStateManager.pushMatrix();
+        try {
+            GlStateManager.translate(origin.x, origin.y, origin.z);
+            GlStateManager.scale(scale, scale, 1.0F);
+            int stroke = Math.max(0, (int) Math.ceil(text.strokeWidth));
+            int strokeColor = text.strokeColor == null ? 0xFF000000 : text.strokeColor.getValue();
+            if (stroke > 0) {
+                for (int ox = -stroke; ox <= stroke; ox++) {
+                    for (int oy = -stroke; oy <= stroke; oy++) {
+                        if (ox * ox + oy * oy <= stroke * stroke && (ox != 0 || oy != 0)) {
+                            mc.fontRenderer.drawString(formatted.toString(), ox, oy, strokeColor, false);
+                        }
+                    }
+                }
+            }
+            mc.fontRenderer.drawString(formatted.toString(), 0, 0, color, false);
+        } finally {
+            GlStateManager.popMatrix();
+        }
     }
 
     @Override
