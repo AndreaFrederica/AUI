@@ -104,7 +104,8 @@ public class Window {
     }
 
     public double getDevicePixelRatio() {
-        return com.sighs.apricityui.spi.AuiServices.client().getWindow().getGuiScale();
+        com.mojang.blaze3d.platform.Window platformWindow = com.sighs.apricityui.spi.AuiServices.client().getWindow();
+        return platformWindow == null ? 1.0 : platformWindow.getGuiScale();
     }
 
     public Performance getPerformance() {

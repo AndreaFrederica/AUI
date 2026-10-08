@@ -78,6 +78,15 @@ public final class ClientService implements AuiClientService {
     }
 
     @Override
+    public com.mojang.blaze3d.platform.Window getWindow() {
+        try {
+            return Client.getWindow();
+        } catch (RuntimeException | LinkageError ignored) {
+            return null;
+        }
+    }
+
+    @Override
     public int getScaledWidth() {
         try {
             return Client.getWindow().getGuiScaledWidth();

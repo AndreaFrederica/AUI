@@ -120,7 +120,7 @@ public interface AuiClientService {
     }
 
     default Window getWindow() {
-        return new Window((int) getWindowWidth(), (int) getWindowHeight(), getScaledWidth(), getScaledHeight(), 1.0D);
+        return null;
     }
 
     default String getClipboardText() {
