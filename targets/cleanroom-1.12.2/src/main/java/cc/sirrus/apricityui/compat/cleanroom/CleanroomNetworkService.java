@@ -183,6 +183,10 @@ public final class CleanroomNetworkService implements AuiNetworkService {
                         ApricityContainerMenu menu = new ApricityContainerMenu(
                                 Minecraft.getMinecraft().player.inventory, message.path, message.declarations);
                         menu.setWindowId(message.windowId);
+                        // Vanilla 1.12 routes subsequent SPacketSetSlot updates through the
+                        // player's openContainer. The screen is opened by our custom packet,
+                        // so install the same menu explicitly before displaying the GUI.
+                        Minecraft.getMinecraft().player.openContainer = menu;
                         Minecraft.getMinecraft().displayGuiScreen(new ApricityContainerScreen(menu, Minecraft.getMinecraft().player.inventory));
                     }
                 });
