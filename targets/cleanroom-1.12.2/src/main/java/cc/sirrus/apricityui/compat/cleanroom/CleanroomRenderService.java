@@ -8,10 +8,13 @@ import net.minecraft.client.renderer.Tessellator;
 import net.minecraft.client.renderer.vertex.DefaultVertexFormats;
 import net.minecraft.client.renderer.vertex.VertexFormat;
 import net.minecraft.client.renderer.texture.DynamicTexture;
+import net.minecraft.client.shader.Framebuffer;
 import net.minecraft.util.ResourceLocation;
 import org.joml.Matrix4f;
 import org.lwjgl.opengl.GL11;
 import org.lwjgl.opengl.GL14;
+import org.lwjgl.opengl.GL13;
+import org.lwjgl.opengl.GL30;
 
 /**
  * Minimal fixed-function 1.12 renderer bridge. It deliberately uses the old
@@ -60,14 +63,61 @@ public final class CleanroomRenderService implements AuiRenderService {
     @Override public void emitVertexUV(Object mesh, Matrix4f mat, float x, float y, float z, float u, float v) {
         Mesh m = (Mesh) mesh; float[] p = transform(mat, x, y, z); m.buffer.pos(p[0], p[1], p[2]).tex(u, v).endVertex();
     }
-    @Override public FboHandle createOffscreenTarget(int width, int height, boolean useDepth) { return null; }
-    @Override public FboHandle getMainRenderTarget() { return null; }
-    @Override public void enableStencil(FboHandle target) { }
-    @Override public void destroyBuffers(FboHandle target) { }
-    @Override public void clear(FboHandle target, float r, float g, float b, float a) { GL11.glClearColor(r, g, b, a); GL11.glClear(GL11.GL_COLOR_BUFFER_BIT | GL11.GL_DEPTH_BUFFER_BIT | GL11.GL_STENCIL_BUFFER_BIT); }
-    @Override public void bindWrite(FboHandle target, boolean setViewport) { }
-    @Override public void bindColorTexture(FboHandle target, int unit) { }
-    @Override public void blitFramebuffer(FboHandle source, FboHandle target, int srcX0, int srcY0, int srcX1, int srcY1) { }
+    @Override public FboHandle createOffscreenTarget(int width, int height, boolean useDepth) {
+        if (width <= 0 || height <= 0) return null;
+        try {
+            Framebuffer framebuffer = new Framebuffer(width, height, useDepth);
+            framebuffer.setFramebufferFilter(GL11.GL_LINEAR);
+            return FboHandle.of(framebuffer, width, height);
+        } catch (Throwable ignored) {
+            return null;
+        }
+    }
+    @Override public FboHandle getMainRenderTarget() {
+        try {
+            Framebuffer framebuffer = Minecraft.getMinecraft().getFramebuffer();
+            return framebuffer == null ? null : FboHandle.of(framebuffer,
+                    framebuffer.framebufferWidth, framebuffer.framebufferHeight);
+        } catch (Throwable ignored) {
+            return null;
+        }
+    }
+    @Override public void enableStencil(FboHandle target) {
+        Framebuffer framebuffer = framebuffer(target);
+        if (framebuffer != null) framebuffer.enableStencil();
+    }
+    @Override public void destroyBuffers(FboHandle target) {
+        Framebuffer framebuffer = framebuffer(target);
+        if (framebuffer != null && framebuffer != Minecraft.getMinecraft().getFramebuffer()) framebuffer.deleteFramebuffer();
+    }
+    @Override public void clear(FboHandle target, float r, float g, float b, float a) {
+        Framebuffer framebuffer = framebuffer(target);
+        if (framebuffer != null) framebuffer.setFramebufferColor(r, g, b, a);
+        GL11.glClearColor(r, g, b, a);
+        GL11.glClear(GL11.GL_COLOR_BUFFER_BIT | GL11.GL_DEPTH_BUFFER_BIT | GL11.GL_STENCIL_BUFFER_BIT);
+    }
+    @Override public void bindWrite(FboHandle target, boolean setViewport) {
+        Framebuffer framebuffer = framebuffer(target);
+        if (framebuffer != null) framebuffer.bindFramebuffer(setViewport);
+    }
+    @Override public void bindColorTexture(FboHandle target, int unit) {
+        Framebuffer framebuffer = framebuffer(target);
+        if (framebuffer == null) return;
+        GL13.glActiveTexture(GL13.GL_TEXTURE0 + Math.max(0, unit));
+        GL11.glBindTexture(GL11.GL_TEXTURE_2D, framebuffer.framebufferTexture);
+    }
+    @Override public void blitFramebuffer(FboHandle source, FboHandle target, int srcX0, int srcY0, int srcX1, int srcY1) {
+        Framebuffer from = framebuffer(source), to = framebuffer(target);
+        if (from == null || to == null) return;
+        GL30.glBindFramebuffer(GL30.GL_READ_FRAMEBUFFER, from.framebufferObject);
+        GL30.glBindFramebuffer(GL30.GL_DRAW_FRAMEBUFFER, to.framebufferObject);
+        GL30.glBlitFramebuffer(srcX0, srcY0, srcX1, srcY1, srcX0, srcY0, srcX1, srcY1,
+                GL11.GL_COLOR_BUFFER_BIT, GL11.GL_LINEAR);
+        GL30.glBindFramebuffer(GL30.GL_FRAMEBUFFER, to.framebufferObject);
+    }
+    private static Framebuffer framebuffer(FboHandle handle) {
+        return handle == null ? null : handle.as();
+    }
     @Override public Object createDynamicTexture(String name, Object nativeImage, boolean linear) {
         if (!(nativeImage instanceof com.mojang.blaze3d.platform.NativeImage image)) return null;
         try {
