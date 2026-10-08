@@ -29,6 +29,28 @@
 | Canvas | `common/.../element/Canvas.java` | 依赖动态纹理和 1.12 上传 API | 可选 |
 | Iframe/WebView | `common/.../element/Iframe.java`、`webview` | 保持 Windows 可选能力，服务端无操作 | 可选 |
 
+## 实体、世界与数据 API 的具体映射
+
+1.12.2 具备这些能力；移植工作是把 AUI 使用的现代名称转换为 1.12 的原生类型，并由 Cleanroom 平台适配器承接生命周期差异。
+
+| 现代入口 | 1.12.2 原生实现 | 适配要点 |
+| --- | --- | --- |
+| `Entity` | `net.minecraft.entity.Entity` | 实体 ID、位置、旋转和世界引用直接转发 |
+| `Player` / `ServerPlayer` | `EntityPlayer` / `EntityPlayerMP` | 服务端发包、打开容器和关闭容器走 MP 类型 |
+| `Level` / `ServerLevel` | `World` / `WorldServer` | 客户端世界和服务端世界分别从 `Minecraft.world`、服务器世界管理器取得 |
+| `Vec3` | `Vec3d` | 数值字段与距离计算保持双精度 |
+| `BlockPos` | `net.minecraft.util.math.BlockPos` | 现代 `net.minecraft.core.BlockPos` façade 只负责转换 |
+| `HitResult` / `BlockHitResult` | `RayTraceResult` | 射线类型、命中点和方块面转换 |
+| `ClipContext` | `World.rayTraceBlocks(...)` | 将 block/fluid mode 转换为 1.12 的布尔参数 |
+| `ItemStack` | `net.minecraft.item.ItemStack` | 物品、NBT、槽位同步通过原生堆栈操作 |
+| `CompoundTag` | `NBTTagCompound` | 读写字段名映射，禁止用空壳对象吞掉数据 |
+| `FriendlyByteBuf` | `PacketBuffer` | 网络适配器负责 VarInt、资源位置、NBT 和物品编码 |
+| `Component` | `ITextComponent` / `TextComponentString` | 仅在显示文本边界转换 |
+| `ResourceLocation` | `net.minecraft.util.ResourceLocation` | 保留 namespace:path 语义 |
+| `Container` / `AbstractContainerMenu` | `Container` / `GuiContainer` | 菜单同步和点击协议按 1.12 的 windowId/slotClick 实现 |
+
+目标代码中的 `net.minecraft.*` façade 只用于让 common 源码保持稳定；真实运行逻辑必须在 `cc.sirrus.apricityui.compat.cleanroom` 中调用上述 1.12 原生 API。当前 façade 已通过编译探针，实体、网络和容器的运行时实现仍按阶段五继续替换。
+
 ## 第一批移植边界
 
 第一批只引入以下能力：
