@@ -235,7 +235,7 @@ public class ApricityContainerMenu extends Container {
         if (!moved) return ItemStack.EMPTY;
         if (source.getStack().isEmpty()) source.putStack(ItemStack.EMPTY);
         else source.onSlotChanged();
-        source.onTake(player, source.getStack());
+        source.onTake(player, copy);
         return copy;
     }
 
