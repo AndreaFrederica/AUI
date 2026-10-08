@@ -30,6 +30,8 @@ public class ApricityContainerMenu extends Container {
     private final String templatePath;
     private final List<ContainerDeclaration> declarations;
     private final List<IInventory> customInventories = new ArrayList<>();
+    private final EntityPlayerMP owner;
+    private final Map<String, Map<String, String>> bindingArgs;
 
     /** Server constructor: resolve declarations against real 1.12 world data. */
     public ApricityContainerMenu(EntityPlayerMP owner, String templatePath,
@@ -49,6 +51,8 @@ public class ApricityContainerMenu extends Container {
                                   EntityPlayerMP owner) {
         this.templatePath = templatePath == null ? "" : templatePath;
         this.declarations = declarations == null ? List.of() : List.copyOf(declarations);
+        this.owner = owner;
+        this.bindingArgs = argsById == null ? Map.of() : Map.copyOf(argsById);
         int customRow = 0;
         for (ContainerDeclaration declaration : this.declarations) {
             if (declaration == null || declaration.capacity() <= 0 || declaration.bindType() == ContainerBindType.PLAYER) continue;
@@ -183,7 +187,24 @@ public class ApricityContainerMenu extends Container {
         catch (RuntimeException ignored) { return null; }
     }
 
-    @Override public boolean canInteractWith(EntityPlayer player) { return player != null && !player.isDead; }
+    @Override public boolean canInteractWith(EntityPlayer player) {
+        if (player == null || player.isDead) return false;
+        if (owner != null && player != owner) return false;
+        for (ContainerDeclaration declaration : declarations) {
+            if (declaration == null) continue;
+            Map<String, String> args = bindingArgs.getOrDefault(declaration.id(), Map.of());
+            if (declaration.bindType() == ContainerBindType.BLOCK_ENTITY) {
+                Integer x = parseInt(args.get("x")), y = parseInt(args.get("y")), z = parseInt(args.get("z"));
+                if (x != null && y != null && z != null
+                        && player.getDistanceSq(x + 0.5D, y + 0.5D, z + 0.5D) > 64.0D) return false;
+            } else if (declaration.bindType() == ContainerBindType.ENTITY) {
+                Integer id = parseInt(args.get("entity_id"));
+                Entity entity = id == null ? null : player.world.getEntityByID(id);
+                if (entity != null && player.getDistanceSq(entity) > 64.0D) return false;
+            }
+        }
+        return true;
+    }
 
     @Override public ItemStack transferStackInSlot(EntityPlayer player, int index) {
         if (index < 0 || index >= inventorySlots.size()) return ItemStack.EMPTY;
