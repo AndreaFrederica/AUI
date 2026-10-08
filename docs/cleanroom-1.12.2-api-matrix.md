@@ -10,7 +10,7 @@
 | AUI 模块 | 当前代码位置 | 1.12 处理方式 | 状态 |
 | --- | --- | --- | --- |
 | Mod 生命周期 | `targets/forge-1.20.1/.../forge/ApricityUIForge.java` | 改为 `@Mod` + `@SidedProxy` + FML state events | 需重写 |
-| 客户端初始化 | `.../ClientServicesBootstrap.java`、`.../ClientLoaderForge.java` | 使用 `FMLClientSetupEvent`、客户端代理和 Forge 事件总线 | 需重写 |
+| 客户端初始化 | `.../ClientServicesBootstrap.java`、`.../ClientLoaderForge.java` | 使用客户端代理中的 `FMLPreInitializationEvent`/`FMLInitializationEvent` 等生命周期和 Forge 事件总线；1.12 没有 `FMLClientSetupEvent` | 需重写 |
 | DOM、CSS、HTML、JS | `common/src/main/java/com/sighs/apricityui/{dom,parser,style,element}` | 先逐文件编译；剥离 `PoseStack` 和现代资源类型 | 部分可复用 |
 | 资源扫描 | `common/.../loader/Loader.java`、`ClientLoader.java` | 适配 1.12 `IResourceManager` 和资源包 API | 需适配 |
 | 绘制矩阵 | `common/.../render`、`spi/AuiRenderService.java` | 使用 1.12 矩阵/GL 状态和 `BufferBuilder` | 需重写 |
