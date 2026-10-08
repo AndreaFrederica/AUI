@@ -1,6 +1,6 @@
 # ApricityUI 移植到 Cleanroom 1.12.2 计划
 
-当前进度：阶段一进行中。已创建移植分支、复制模板、配置 ApricityUI 元数据，并接入根工程的 Cleanroom target 入口。
+当前进度：阶段二进行中。已创建移植分支、复制模板、配置 ApricityUI 元数据、接入根工程 target 入口，并复制共享资源基线。
 
 ## 目标
 
