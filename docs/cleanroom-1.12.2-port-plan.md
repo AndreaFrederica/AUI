@@ -131,6 +131,7 @@ API 差异和每个模块的处理方式见 `docs/cleanroom-1.12.2-api-matrix.md
 - 已执行 `runClient` 探针：OpenGL、OpenAL、资源重载、AUI `ClientProxy` 和 12 个模组均完成加载，未出现启动异常；进程由探针主动终止。
 - 资源服务已增加对开发目录和 JAR 内 `assets/apricityui` 的递归枚举，补上 1.12 `IResourceManager` 缺少现代递归 API 的差异。
 - 1.12 动态纹理桥已接入 `DynamicTexture`：创建、区域像素上传、纹理管理器注册和释放均可走真实 OpenGL 纹理对象。
+- 固定管线渲染桥已接入 1.12 `Framebuffer`：离屏目标、主目标句柄、深度/模板启用、清理、写入绑定、颜色纹理绑定和 `glBlitFramebuffer` 均已实现。
 
 阶段五仍有待完成项：槽位 CSS/DOM 坐标同步、过滤器服务端验证、通用网络广播、动态纹理/FBO/shader，以及 Cleanroom 的真实客户端/服务端运行 smoke test。
 
