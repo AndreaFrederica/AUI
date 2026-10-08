@@ -133,6 +133,8 @@ API 差异和每个模块的处理方式见 `docs/cleanroom-1.12.2-api-matrix.md
 - 1.12 动态纹理桥已接入 `DynamicTexture`：创建、区域像素上传、纹理管理器注册和释放均可走真实 OpenGL 纹理对象。
 - 固定管线渲染桥已接入 1.12 `Framebuffer`：离屏目标、主目标句柄、深度/模板启用、清理、写入绑定、颜色纹理绑定和 `glBlitFramebuffer` 均已实现。
 - 1.12 渲染桥已能从 AUI 资源编译 `filter`/`filter_blur` GLSL 程序，支持 shader 绑定、uniform 更新和固定管线回退。
+- 1.12 shader 后端已上传 `ProjMat`，恢复滤镜 pass 的 OpenGL 状态，并接入 `filter_blend`、`filter_mask` 和三种 `mask-composite` 合成程序；默认通过固定管线回退，开发运行可用 `apricityui.cleanroom.shaderProbe` 预编译全部变体。
+- Cleanroom 已加入 LWJGL2/OpenAL 音频服务，复用 Minecraft 已创建的 OpenAL context，支持 PCM buffer、播放/暂停/停止、seek、音量和主音量读取；LWJGL3 ALC 实现继续只留在现代目标。
 - Cleanroom 已加入轻量 `SLOT` DOM 元素；容器屏幕会按 DOM 几何同步 1.12 `Slot` 的位置、禁用/隐藏状态和显示尺寸，替代固定网格坐标。
 - 图片渲染批次已接入 1.12 `TextureManager` + `BufferBuilder`：`TextureKey` 会解析为 `ResourceLocation`，纹理四边形支持 UV、ARGB tint 和批量提交。
 - AUI 物品绘制已接入 1.12 `RenderItem`，包括物品图标、数量/覆盖文字和容器外部的物品节点。
@@ -141,7 +143,7 @@ API 差异和每个模块的处理方式见 `docs/cleanroom-1.12.2-api-matrix.md
 - 1.12 `GuiScreen`/`GuiContainer` 已把鼠标按键、释放、拖动、滚轮和键盘字符转发到 common `Operation`，默认字体已通过 1.12 `FontRenderer` 绘制。
 - Cleanroom 客户端已实现基于 classpath/JAR 的 `ElementRegister` 注解扫描，并在客户端预初始化阶段注册 AUI 内置元素和扩展元素。
 
-阶段五仍有待完成项：动态纹理/FBO/shader 的高级路径、可选音频后端，以及 Cleanroom 的真实客户端/服务端 UI 交互 smoke test。
+阶段五仍有待完成项：Cleanroom 的真实客户端/服务端 UI 交互 smoke test，以及可选的 WebView/JNI 后端。
 
 ## 阶段六：Mixin、AT 和可选能力
 
