@@ -209,7 +209,7 @@ public final class ImageAsyncHandler extends AbstractAsyncHandler<ImageAsyncHand
         // 触发布局/重绘标记回到游戏线程，避免渲染线程并发修改 DOM/Document 状态。
         var requesters = task.handle.drainRequesters();
         if (!requesters.isEmpty()) {
-            Minecraft.getInstance().execute(() -> {
+            com.sighs.apricityui.spi.AuiServices.client().execute(() -> {
                 for (ImageHandle.RequesterRef requesterRef : requesters) {
                     Element element = requesterRef.getElement();
                     if (element == null || element.document == null) {

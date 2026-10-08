@@ -17,9 +17,6 @@ import com.sighs.apricityui.parser.Color;
 import com.sighs.apricityui.layout.Position;
 import com.sighs.apricityui.style.Text;
 import com.sighs.apricityui.ui.ColorPicker;
-import org.lwjgl.PointerBuffer;
-import org.lwjgl.system.MemoryStack;
-import org.lwjgl.util.tinyfd.TinyFileDialogs;
 
 import java.util.Objects;
 import java.util.Locale;
@@ -196,14 +193,18 @@ public class Input extends AbstractText {
         String accept = getAttribute("accept");
         String pattern = resolveFilePattern(accept);
         String description = "*.html".equals(pattern) ? "HTML files" : "Files";
-        try (MemoryStack stack = MemoryStack.stackPush()) {
-            PointerBuffer filters = stack.mallocPointer(1);
-            filters.put(stack.UTF8(pattern)).flip();
-            String selected = TinyFileDialogs.tinyfd_openFileDialog("Choose file", "", filters, description, isMultiple());
-            if (selected == null || selected.isBlank()) return;
+        try {
+            javax.swing.JFileChooser chooser = new javax.swing.JFileChooser();
+            chooser.setDialogTitle("Choose file");
+            chooser.setMultiSelectionEnabled(isMultiple());
+            int result = chooser.showOpenDialog(null);
+            if (result != javax.swing.JFileChooser.APPROVE_OPTION) return;
             ArrayList<String> files = new ArrayList<>();
-            for (String path : selected.split("[\\r\\n;]+")) {
-                if (!path.isBlank() && acceptsFile(path.trim(), accept)) files.add(path.trim());
+            java.io.File[] selectedFiles = isMultiple()
+                    ? chooser.getSelectedFiles()
+                    : new java.io.File[]{chooser.getSelectedFile()};
+            for (java.io.File file : selectedFiles) {
+                if (file != null && acceptsFile(file.getPath(), accept)) files.add(file.getPath());
             }
             if (files.isEmpty()) return;
             if (!isMultiple() && files.size() > 1) files.subList(1, files.size()).clear();

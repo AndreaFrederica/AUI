@@ -424,7 +424,7 @@ public class Mask {
             testScissorSink.accept(new AABB((float) x, (float) y, (float) width, (float) height));
             return;
         }
-        Window window = Minecraft.getInstance().getWindow();
+        Window window = AuiServices.client().getWindow();
         double scale = getScissorScale(window);
         double left = x * scale;
         double top = y * scale;
@@ -504,7 +504,7 @@ public class Mask {
     private record SurfaceScissorTransform(double offsetX, double offsetY, double scaleX, double scaleY,
                                            float b00, float b11, float b30, float b31) {
         private void apply(AABB rect) {
-            Window window = Minecraft.getInstance().getWindow();
+            Window window = AuiServices.client().getWindow();
             double guiScale = Math.max(1.0d, window.getGuiScale());
             double left = (offsetX + rect.x() * scaleX) * guiScale;
             double top = (offsetY + rect.y() * scaleY) * guiScale;

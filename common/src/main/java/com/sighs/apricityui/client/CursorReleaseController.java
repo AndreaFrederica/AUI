@@ -2,8 +2,6 @@ package com.sighs.apricityui.client;
 
 import com.sighs.apricityui.spi.AuiServices;
 import com.sighs.apricityui.style.Cursor;
-import net.minecraft.client.Minecraft;
-import net.minecraft.client.MouseHandler;
 
 /** Keeps the native cursor released while the configured hold key is down. */
 public final class CursorReleaseController {
@@ -14,21 +12,17 @@ public final class CursorReleaseController {
     }
 
     public static void tick() {
-        Minecraft minecraft = Minecraft.getInstance();
-        MouseHandler mouseHandler = minecraft.mouseHandler;
-        boolean available = minecraft.level != null
-                && minecraft.screen == null
-                && minecraft.getOverlay() == null
-                && minecraft.isWindowActive();
+        var client = AuiServices.client();
+        boolean available = client.isClientGameplayActive();
 
         update(
                 AuiServices.keys().isReleaseMouseDown(),
                 available,
-                mouseHandler.isMouseGrabbed(),
-                mouseHandler::releaseMouse,
+                client.isMouseGrabbed(),
+                client::releaseMouse,
                 () -> {
                     Cursor.resetToDefault();
-                    mouseHandler.grabMouse();
+                    client.grabMouse();
                 }
         );
     }

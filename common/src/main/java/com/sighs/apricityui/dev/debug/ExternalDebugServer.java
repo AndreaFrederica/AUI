@@ -7,7 +7,7 @@ import com.google.gson.JsonNull;
 import com.google.gson.JsonObject;
 import com.sighs.apricityui.ApricityUI;
 import com.sighs.apricityui.spi.AuiServices;
-import net.minecraft.client.Minecraft;
+import com.sighs.apricityui.spi.AuiServices;
 
 import java.io.IOException;
 import java.net.InetAddress;
@@ -212,10 +212,8 @@ public final class ExternalDebugServer {
 
     private static Path resolveDiscoveryFile() {
         try {
-            Minecraft minecraft = Minecraft.getInstance();
-            if (minecraft != null && minecraft.gameDirectory != null) {
-                return minecraft.gameDirectory.toPath().resolve("apricity").resolve("debug.json");
-            }
+            java.nio.file.Path gameDirectory = AuiServices.client().getGameDirectory();
+            if (gameDirectory != null) return gameDirectory.resolve("apricity").resolve("debug.json");
         } catch (Throwable ignored) {
         }
         return Path.of("run", "apricity", "debug.json").toAbsolutePath();
