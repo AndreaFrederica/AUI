@@ -3,6 +3,8 @@ package cc.sirrus.apricityui.compat.cleanroom;
 import com.mojang.blaze3d.platform.Window;
 import com.mojang.blaze3d.vertex.PoseStack;
 import com.sighs.apricityui.init.Document;
+import com.sighs.apricityui.screen.ApricityScreen;
+import com.sighs.apricityui.screen.AuiLinkedScreen;
 import com.sighs.apricityui.layout.Position;
 import com.sighs.apricityui.layout.Size;
 import com.sighs.apricityui.spi.AuiClientService;
@@ -131,8 +133,8 @@ public final class CleanroomClientService implements AuiClientService {
 
     @Override
     public void openScreen(String templatePath) {
-        // GuiScreen implementation is installed by the client proxy in the next
-        // stage; no-op is preferable to loading a 1.20 screen class on 1.12.
+        Minecraft mc = minecraft();
+        if (mc != null) mc.displayGuiScreen(new ApricityScreen(templatePath));
     }
 
     @Override
@@ -252,7 +254,9 @@ public final class CleanroomClientService implements AuiClientService {
 
     @Override
     public Document getCurrentScreenDocument() {
-        return null;
+        Minecraft mc = minecraft();
+        return mc != null && mc.currentScreen instanceof AuiLinkedScreen screen
+                ? screen.getLinkedDocument() : null;
     }
 
     @Override
