@@ -15,6 +15,12 @@ import org.lwjgl.opengl.GL11;
 import org.lwjgl.opengl.GL14;
 import org.lwjgl.opengl.GL13;
 import org.lwjgl.opengl.GL30;
+import org.lwjgl.opengl.GL20;
+
+import java.io.InputStream;
+import java.nio.charset.StandardCharsets;
+import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
 
 /**
  * Minimal fixed-function 1.12 renderer bridge. It deliberately uses the old
@@ -26,6 +32,8 @@ public final class CleanroomRenderService implements AuiRenderService {
     public static final CleanroomRenderService INSTANCE = new CleanroomRenderService();
     private Matrix4f projection = new Matrix4f();
     private boolean depth = true, depthMask = true, cull;
+    private volatile ShaderHandle filterShader;
+    private volatile ShaderHandle blurShader;
     private CleanroomRenderService() { }
 
     private static final class Mesh {
@@ -187,11 +195,28 @@ public final class CleanroomRenderService implements AuiRenderService {
         try { Minecraft.getMinecraft().getTextureManager().deleteTexture(id); }
         catch (Throwable ignored) { }
     }
-    @Override public void setShader(Object shader) { }
-    @Override public void setPositionColorShader() { }
+    @Override public void setShader(Object shader) {
+        activeShader = shader instanceof ShaderHandle handle ? handle : null;
+        GL20.glUseProgram(activeShader == null ? 0 : activeShader.program);
+    }
+    @Override public void setPositionColorShader() { activeShader = null; GL20.glUseProgram(0); }
     @Override public void setShaderColor(float a, float r, float g, float b) { GL11.glColor4f(r, g, b, a); }
-    @Override public Object getFilterShader() { return null; }
-    @Override public Object getFilterBlurShader() { return null; }
+    @Override public Object getFilterShader() {
+        ShaderHandle current = filterShader;
+        if (current != null) return current;
+        synchronized (this) {
+            if (filterShader == null) filterShader = compileShader("filter", "filter");
+            return filterShader;
+        }
+    }
+    @Override public Object getFilterBlurShader() {
+        ShaderHandle current = blurShader;
+        if (current != null) return current;
+        synchronized (this) {
+            if (blurShader == null) blurShader = compileShader("filter_blur", "filter_blur");
+            return blurShader;
+        }
+    }
     @Override public void setDepthFunc(int func) { GL11.glDepthFunc(func); }
     @Override public void setDepthMask(boolean write) { depthMask = write; GL11.glDepthMask(write); }
     @Override public boolean isDepthTestEnabled() { return depth; }
@@ -218,9 +243,73 @@ public final class CleanroomRenderService implements AuiRenderService {
     @Override public void recordRenderCall(Runnable task) { if (task != null) task.run(); }
     @Override public String getGLVersionString() { return GL11.glGetString(GL11.GL_VERSION); }
     @Override public void flushSharedBuffers() { }
-    @Override public void setShaderUniformFloat(String name, float value) { }
-    @Override public void setShaderUniform2f(String name, float a, float b) { }
-    @Override public void setShaderUniform3f(String name, float a, float b, float c) { }
-    @Override public void setShaderUniform4f(String name, float a, float b, float c, float d) { }
-    @Override public void setShaderUniformI(String name, int value) { }
+    @Override public void setShaderUniformFloat(String name, float value) { uniform(name, location -> GL20.glUniform1f(location, value)); }
+    @Override public void setShaderUniform2f(String name, float a, float b) { uniform(name, location -> GL20.glUniform2f(location, a, b)); }
+    @Override public void setShaderUniform3f(String name, float a, float b, float c) { uniform(name, location -> GL20.glUniform3f(location, a, b, c)); }
+    @Override public void setShaderUniform4f(String name, float a, float b, float c, float d) { uniform(name, location -> GL20.glUniform4f(location, a, b, c, d)); }
+    @Override public void setShaderUniformI(String name, int value) { uniform(name, location -> GL20.glUniform1i(location, value)); }
+
+    private void uniform(String name, java.util.function.IntConsumer writer) {
+        if (name == null) return;
+        ShaderHandle shader = activeShader;
+        if (shader == null) return;
+        int location = shader.uniforms.computeIfAbsent(name, key -> GL20.glGetUniformLocation(shader.program, key));
+        if (location >= 0) writer.accept(location);
+    }
+
+    private ShaderHandle activeShader;
+
+    private ShaderHandle compileShader(String vertexName, String fragmentName) {
+        try {
+            String vertex = readShader(vertexName + ".vsh");
+            String fragment = readShader(fragmentName + ".fsh");
+            int vertexId = compile(GL20.GL_VERTEX_SHADER, vertex);
+            int fragmentId = compile(GL20.GL_FRAGMENT_SHADER, fragment);
+            int program = GL20.glCreateProgram();
+            GL20.glAttachShader(program, vertexId);
+            GL20.glAttachShader(program, fragmentId);
+            GL20.glBindAttribLocation(program, 0, "Position");
+            GL20.glBindAttribLocation(program, 1, "UV0");
+            GL20.glBindAttribLocation(program, 2, "Color");
+            GL20.glLinkProgram(program);
+            if (GL20.glGetProgrami(program, GL20.GL_LINK_STATUS) == GL11.GL_FALSE) {
+                String log = GL20.glGetProgramInfoLog(program, 4096);
+                GL20.glDeleteProgram(program);
+                throw new IllegalStateException(log);
+            }
+            GL20.glDeleteShader(vertexId);
+            GL20.glDeleteShader(fragmentId);
+            ShaderHandle result = new ShaderHandle(program);
+            activeShader = result;
+            return result;
+        } catch (Throwable error) {
+            com.sighs.apricityui.ApricityUI.LOGGER.warn("Cleanroom shader {} could not be compiled; using fixed pipeline", vertexName, error);
+            return null;
+        }
+    }
+
+    private static int compile(int type, String source) {
+        int shader = GL20.glCreateShader(type);
+        GL20.glShaderSource(shader, source);
+        GL20.glCompileShader(shader);
+        if (GL20.glGetShaderi(shader, GL20.GL_COMPILE_STATUS) == GL11.GL_FALSE) {
+            String log = GL20.glGetShaderInfoLog(shader, 4096);
+            GL20.glDeleteShader(shader);
+            throw new IllegalStateException(log);
+        }
+        return shader;
+    }
+
+    private static String readShader(String file) throws Exception {
+        ResourceLocation location = new ResourceLocation("apricityui", "shaders/core/" + file);
+        try (InputStream input = Minecraft.getMinecraft().getResourceManager().getResource(location).getInputStream()) {
+            return new String(input.readAllBytes(), StandardCharsets.UTF_8);
+        }
+    }
+
+    private static final class ShaderHandle {
+        final int program;
+        final Map<String, Integer> uniforms = new ConcurrentHashMap<>();
+        ShaderHandle(int program) { this.program = program; }
+    }
 }
