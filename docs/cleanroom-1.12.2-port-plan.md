@@ -140,7 +140,7 @@ API 差异和每个模块的处理方式见 `docs/cleanroom-1.12.2-api-matrix.md
 - 1.12 `GuiScreen`/`GuiContainer` 已把鼠标按键、释放、拖动、滚轮和键盘字符转发到 common `Operation`，默认字体已通过 1.12 `FontRenderer` 绘制。
 - Cleanroom 客户端已实现基于 classpath/JAR 的 `ElementRegister` 注解扫描，并在客户端预初始化阶段注册 AUI 内置元素和扩展元素。
 
-阶段五仍有待完成项：槽位过滤器服务端验证、动态纹理/FBO/shader 的高级路径、可选音频后端，以及 Cleanroom 的真实客户端/服务端 UI 交互 smoke test。
+阶段五仍有待完成项：动态纹理/FBO/shader 的高级路径、可选音频后端，以及 Cleanroom 的真实客户端/服务端 UI 交互 smoke test。
 
 ## 阶段六：Mixin、AT 和可选能力
 
