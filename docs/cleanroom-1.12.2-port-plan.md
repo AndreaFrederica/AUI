@@ -1,6 +1,6 @@
 # ApricityUI 移植到 Cleanroom 1.12.2 计划
 
-当前进度：工程骨架已通过编译、资源处理和 MCP → SRG 重映射打包；依赖/API 调查进行中。客户端和专用服务端启动仍待验证，AUI 的 Java 功能尚未移植。复制的资源（包括 shader 和语言 JSON）目前仅作为基线，不代表已兼容 1.12。
+当前进度：Cleanroom 目标已通过编译、资源处理和 MCP → SRG 重映射打包；客户端服务、资源读取、基础固定管线渲染、GuiScreen 生命周期和 SimpleNetworkWrapper 屏幕消息已接入。客户端和专用服务端实际启动、容器槽位同步、高级滤镜/动态纹理仍待验证和移植。复制的资源（包括 shader 和语言 JSON）目前仅作为基线，不代表全部已兼容 1.12。
 
 ### 2026-10-08 构建验证
 
@@ -10,6 +10,8 @@
 - 产物：`targets/cleanroom-1.12.2/build/libs/apricityui-1.2.7.jar`。该 JAR 仅包含工程骨架和资源，尚不能提供 AUI 页面功能。
 - 代理使用命令进程环境变量及 JVM 的 `http.proxyHost`/`https.proxyHost` 等参数，未写入仓库配置。
 - 根构建的 Cleanroom 任务使用目标自己的 wrapper，保证采用模板的 Gradle 9.8，而不是根 wrapper 的 8.14.4。
+- Cleanroom 基础服务实现后，`targets/cleanroom-1.12.2/gradlew.bat build --console plain --no-daemon` 成功。
+- Forge 1.20.1 回归构建 `buildForge1201` 成功，963 个测试通过；平台窗口服务改为由各目标显式实现，避免 Cleanroom façade 构造器污染 Forge API。
 
 API 差异和每个模块的处理方式见 `docs/cleanroom-1.12.2-api-matrix.md`。
 
@@ -42,9 +44,9 @@ API 差异和每个模块的处理方式见 `docs/cleanroom-1.12.2-api-matrix.md
 
 1. `cleanroom: add template-based target skeleton`
 2. `cleanroom: lock 1.12 dependencies and metadata`
-3. `cleanroom: add platform bootstrap and resource loading`
-4. `cleanroom: port rendering and input adapters`
-5. `cleanroom: port containers and networking`
+3. `cleanroom: add platform bootstrap and resource loading`（已完成基础版）
+4. `cleanroom: port rendering and input adapters`（已完成基础固定管线版）
+5. `cleanroom: port containers and networking`（网络屏幕消息已完成，容器槽位待完成）
 6. `cleanroom: port KubeJS integration and persistence`
 7. `cleanroom: enable optional advanced features`
 8. `cleanroom: verify client, server and release jar`
