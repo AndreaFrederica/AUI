@@ -7,6 +7,7 @@ import com.sighs.apricityui.render.Mask;
 import com.sighs.apricityui.render.Operation;
 import com.sighs.apricityui.style.Cursor;
 import com.sighs.apricityui.viewport.ApricityViewport;
+import cc.sirrus.apricityui.compat.cleanroom.CleanroomInput;
 import net.minecraft.client.gui.inventory.GuiContainer;
 import net.minecraft.entity.player.InventoryPlayer;
 import net.minecraft.inventory.Container;
@@ -77,8 +78,9 @@ public class ApricityContainerScreen extends GuiContainer implements AuiLinkedSc
     }
 
     @Override protected void keyTyped(char typedChar, int keyCode) throws java.io.IOException {
+        int glfwKey = CleanroomInput.toGlfwKey(keyCode);
         if (Operation.onCharTyped(typedChar)
-                || Operation.onKeyPressed(keyCode, 0, 0, false, com.sighs.apricityui.event.KeyEvent.Source.SCREEN_EVENT)) return;
+                || Operation.onKeyPressed(glfwKey < 0 ? keyCode : glfwKey, 0, 0, false, com.sighs.apricityui.event.KeyEvent.Source.SCREEN_EVENT)) return;
         super.keyTyped(typedChar, keyCode);
     }
 
