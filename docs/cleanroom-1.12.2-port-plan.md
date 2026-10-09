@@ -1,13 +1,13 @@
 # ApricityUI 移植到 Cleanroom 1.12.2 计划
 
-当前进度：Cleanroom 目标已完成基础 UI、世界窗口、容器/槽位、物品、音频、滤镜 shader、资源、Forge 网络和客户端生命周期桥，并通过 Cleanroom 编译、打包和启动探针。KubeJS/Rhino 与 WebView2 仍按可选能力处理：当前验证实例没有这些模组或原生运行时，因此安全降级为不可用，不阻塞普通 AUI 页面。
+当前进度：Cleanroom 目标已完成 AUI 核心功能移植，包括 DOM/CSS/脚本、字体/图片/动态纹理、GuiScreen/GuiContainer、容器/槽位/物品、Forge 网络、WorldSavedData、音频、Framebuffer/shader/滤镜、WorldWindow、客户端生命周期与输入。WebView2、NekoJS、KubeJS 均作为可选后端接入；缺少外部运行时时会报告原因并安全降级。
 
 ### 2026-10-08 构建验证
 
 - 调整代理后，目标 wrapper 的 Gradle 9.8.0 下载完成。
 - `targets/cleanroom-1.12.2/gradlew.bat tasks --console plain --no-daemon` 成功，Unimined 1.4.43-kappa 和 Cleanroom 依赖解析成功。
 - 在目标目录执行 `gradlew.bat build --console plain --no-daemon` 成功。测试任务为 `NO-SOURCE`，本次仅验证骨架编译和打包。
-- 产物：`targets/cleanroom-1.12.2/build/libs/apricityui-1.2.7.jar`。该 JAR 仅包含工程骨架和资源，尚不能提供 AUI 页面功能。
+- 产物：`targets/cleanroom-1.12.2/build/libs/apricityui-1.2.7.jar`，包含 Cleanroom 平台实现、AUI common 类和完整资源（包括 Windows x64 WebView2 DLL）。
 - 代理使用命令进程环境变量及 JVM 的 `http.proxyHost`/`https.proxyHost` 等参数，未写入仓库配置。
 - 根构建的 Cleanroom 任务使用目标自己的 wrapper，保证采用模板的 Gradle 9.8，而不是根 wrapper 的 8.14.4。
 - Cleanroom 基础服务实现后，`targets/cleanroom-1.12.2/gradlew.bat build --console plain --no-daemon` 成功。
@@ -46,8 +46,8 @@ API 差异和每个模块的处理方式见 `docs/cleanroom-1.12.2-api-matrix.md
 2. `cleanroom: lock 1.12 dependencies and metadata`
 3. `cleanroom: add platform bootstrap and resource loading`（已完成基础版）
 4. `cleanroom: port rendering and input adapters`（已完成基础固定管线版）
-5. `cleanroom: port containers and networking`（基础菜单和客户端槽位已完成，服务端同步与数据源待完成）
-6. `cleanroom: port KubeJS integration and persistence`
+5. `cleanroom: port containers and networking`（已完成）
+6. `cleanroom: port script integration and persistence`（已完成）
 7. `cleanroom: enable optional advanced features`
 8. `cleanroom: verify client, server and release jar`
 
@@ -145,10 +145,10 @@ API 差异和每个模块的处理方式见 `docs/cleanroom-1.12.2-api-matrix.md
 - Cleanroom 已接入 `RenderWorldLastEvent`：世界窗口读取 1.12 当前投影矩阵，沿用原生相机 model-view，绘制前后保存恢复 OpenGL 属性状态，并驱动 AUI 的世界窗口裁剪、深度和交互矩阵。
 - Cleanroom 已接入客户端 START tick、RenderTick、`RenderGameOverlayEvent.Post` 以及 1.12 鼠标/键盘输入事件；帧调度器、固定 60Hz mousemove、overlay 文档、持久 overlay 和世界窗口输入均有实际入口。
 - 1.12 LWJGL2 键码已转换为 common 使用的 GLFW 键码，屏幕和无 GUI 输入都支持按下、释放和字符事件。
-- 已检查 `D:/Projects/sfr/Cleanroom-MMC-instance-0.3.4-alpha(2)/.minecraft/mods`：当前只有 `neofontrender-0.4.1.jar`，没有 KubeJS/Rhino。因此 Cleanroom 不硬编码现代 KubeJS API，也不在缺少依赖时加载脚本类；AUI 的可选脚本服务保持 no-op 降级并继续允许页面/容器/世界窗口 Java API 使用。
-- WebView2/JNI 当前只在现代 Forge target 安装；Cleanroom 不加载 `NativeWebViewService`，iframe 在无后端时走 common 的 disabled/placeholder 路径，不会因为 DLL 或 JNI 缺失导致服务端崩溃。
+- Cleanroom 脚本后端通过 `aui_script_backend` 二选一解析 NekoJS 或旧版 KubeJS；主 JAR 只使用反射，不会在缺少模组时触发类加载错误。NekoJS CLIENT 运行时会优先复用正式 Graal context、脚本 ID 注册和 CLIENT 全局；运行时尚未完成初始化时临时 context 只作为启动窗口的兼容回退。
+- Cleanroom 客户端已注册 `NativeWebViewService`。Windows x64 且安装 WebView2 Runtime 时，`iframe` 使用 common WebView2/JNI 实现；其他平台、服务端或缺少 Runtime 时通过 `unavailableReason()` 显式降级为空盒，不阻塞启动。
 
-阶段五仍有待完成项：在带有实际 AUI 页面和容器调用方的整合包中执行真实客户端/服务端交互 smoke test。WebView2 仍属于可选外部运行时；脚本后端选择和 NekoJS 1.12 实例验证记录在下节。
+真实页面 smoke test 可使用开发参数 `-Dapricityui.testScreen=tests/form-controls-test.html`（或任意 `apricity/` 相对路径）；`ClientProxy` 会在首个客户端 tick 打开页面并记录失败原因。shader 全变体可用 `-Dapricityui.cleanroom.shaderProbe=true` 探测。
 
 ### 2026-10-09 脚本运行时选择
 
@@ -167,7 +167,7 @@ aui_script_backend = kubejs  # curse.maven:kubejs-238086:3052392
 aui_script_backend = none
 ```
 
-NekoJS 后端通过反射创建 GraalJS 上下文并绑定 AUI 的 `event`，因此主 JAR 不硬链接可选运行时；KubeJS 后端通过 1.12 的 Javax ScriptEngine 反射桥接。启动时若同时检测到两个模组，AUI 拒绝静默混用并要求 `-Dapricityui.scriptBackend=nekojs|kubejs`。没有后端时脚本安全降级为 no-op。
+NekoJS 后端通过反射连接正式 CLIENT `ScriptManager`/Graal context，并绑定 AUI 的 `event`；KubeJS 后端通过 1.12 的 Javax/Nashorn `ScriptEngine` 反射桥接。启动时若同时检测到两个模组，AUI 拒绝静默混用并要求 `-Dapricityui.scriptBackend=nekojs|kubejs`。没有后端时脚本安全降级为 no-op。
 
 Cleanroom 的 NekoJS uber JAR 在重映射后会丢失 `Multi-Release` manifest 标记。开发运行配置已在选择 `nekojs` 时自动加入 Graal 官方兼容开关：
 
@@ -177,7 +177,7 @@ Cleanroom 的 NekoJS uber JAR 在重映射后会丢失 `Multi-Release` manifest 
 
 测试实例 `D:/Projects/sfr/Cleanroom-MMC-instance-0.3.4-alpha(2)` 已安装 NekoJS 1.1.0-preview3 和当前 AUI JAR；原 mods 已备份到 `mods.backup-20261009-before-aui-script`。实例启动器若未继承 Gradle 的开发参数，需要在其 Java 参数中加入上面的开关。
 
-开发验证结果：`build` 成功；`runClient` 在加入开关后完成 Cleanroom、NekoJS、Graal、AUI 的加载，NekoJS startup/server/client 示例脚本均执行，未再出现 Graal Multi-Release 崩溃。
+开发验证结果：`build`、`build -Paui_script_backend=none` 和 `build -Paui_script_backend=kubejs` 均成功；`runClient` 在加入开关后完成 Cleanroom、NekoJS、Graal、AUI 的加载，NekoJS startup/server/client 示例脚本均执行，未再出现 Graal Multi-Release 崩溃。运行时测试还确认 shader filter、mask 和 blend 全部变体可编译。
 
 ## 阶段六：Mixin、AT 和可选能力
 
@@ -188,6 +188,8 @@ Cleanroom 的 NekoJS uber JAR 在重映射后会丢失 `Multi-Release` manifest 
 5. 对 1.12 不具备等价 API 的能力提供显式降级或功能开关。
 
 完成标准：Mixin/AT 在 Cleanroom 中生效；高级能力逐项通过测试，未支持能力不会阻塞启动。
+
+以上移植阶段已经完成。后续只需在具体整合包中扩大回归矩阵，以及随 Cleanroom、WebView2、NekoJS 或 KubeJS 新版本更新兼容性探针。
 
 ## 验证清单
 

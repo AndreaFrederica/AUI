@@ -8,7 +8,9 @@ import cc.sirrus.apricityui.compat.cleanroom.CleanroomNetworkService;
 import cc.sirrus.apricityui.compat.cleanroom.CleanroomAudioService;
 import cc.sirrus.apricityui.compat.cleanroom.CleanroomScriptService;
 import com.sighs.apricityui.spi.AuiServices;
+import com.sighs.apricityui.webview.NativeWebViewService;
 import com.sighs.apricityui.registry.ApricityUIRegistry;
+import com.sighs.apricityui.loader.ClientLoader;
 import net.minecraftforge.fml.common.event.FMLPreInitializationEvent;
 import net.minecraftforge.fml.common.event.FMLInitializationEvent;
 import net.minecraft.client.Minecraft;
@@ -32,6 +34,19 @@ public class ClientProxy implements IProxy{
             }
         }));
         AuiServices.setNetwork(CleanroomNetworkService.INSTANCE);
+        // Cleanroom ships the same optional Windows x64 WebView2 JNI backend as
+        // the other targets.  Registration is safe on servers and unsupported
+        // platforms because NativeWebViewService reports availability lazily.
+        AuiServices.setWebView(NativeWebViewService.INSTANCE);
+        try {
+            com.sighs.apricityui.ApricityUI.LOGGER.info(
+                    "[AUI Cleanroom] WebView2 backend available={} reason={}",
+                    NativeWebViewService.INSTANCE.isAvailable(),
+                    NativeWebViewService.INSTANCE.unavailableReason());
+        } catch (Throwable error) {
+            com.sighs.apricityui.ApricityUI.LOGGER.warn(
+                    "[AUI Cleanroom] WebView2 backend probe failed", error);
+        }
         AuiServices.setScript(CleanroomScriptService.INSTANCE);
         CleanroomScriptService.INSTANCE.warmUp();
         ApricityUIRegistry.scanPackages("com.sighs.apricityui.element");
@@ -42,6 +57,26 @@ public class ClientProxy implements IProxy{
 
     @Override
     public void init(FMLInitializationEvent event) {
+        // Forge 1.12 has no FMLClientSetupEvent.  The first client task is the
+        // equivalent safe point: the resource manager exists and all mod
+        // resource packs have been attached, so HTML/CSS/JS discovery can run.
+        Minecraft.getMinecraft().addScheduledTask(ClientLoader::reloadResources);
+        String smokePage = System.getProperty("apricityui.testScreen", "").trim();
+        if (!smokePage.isEmpty()) {
+            // The FML init callback can run before Minecraft has completed its
+            // first client tick. Queue the real screen open on the client task
+            // queue so this is also useful for headless smoke probes.
+            Minecraft.getMinecraft().addScheduledTask(() -> {
+                try {
+                    AuiServices.client().openScreen(smokePage);
+                    com.sighs.apricityui.ApricityUI.LOGGER.info(
+                            "[AUI Cleanroom] smoke screen opened: {}", smokePage);
+                } catch (Throwable error) {
+                    com.sighs.apricityui.ApricityUI.LOGGER.warn(
+                            "[AUI Cleanroom] smoke screen failed: {}", smokePage, error);
+                }
+            });
+        }
         if (!Boolean.getBoolean("apricityui.cleanroom.shaderProbe")) return;
         // FML init runs after the display/context exists. Compile every AUI
         // shader once so a dev run can verify the real Cleanroom GLSL path.

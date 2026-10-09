@@ -2,6 +2,7 @@ package cc.sirrus.apricityui.compat.cleanroom;
 
 import com.sighs.apricityui.ApricityUI;
 import com.sighs.apricityui.event.Event;
+import com.sighs.apricityui.parser.JS;
 import com.sighs.apricityui.spi.AuiScriptService;
 import net.minecraftforge.fml.common.Loader;
 
@@ -28,6 +29,8 @@ public final class CleanroomScriptService implements AuiScriptService {
     private final Object lock = new Object();
     private volatile Backend backend;
     private Object nekoContext;
+    private Object nekoManager;
+    private boolean nekoTemporary;
     private Method nekoEval;
     private Object kubeEngine;
 
@@ -49,8 +52,12 @@ public final class CleanroomScriptService implements AuiScriptService {
     @Override
     public void evalGlobal(String code, String documentUuid) {
         if (code == null || code.isBlank()) return;
+        // global.js already contains quotes around the UUID placeholder.  The
+        // common service contract replaces the marker with the raw escaped
+        // value; adding a second pair of quotes produces `""uuid""` and
+        // breaks both Nashorn and the legacy KubeJS engine.
         String uuid = documentUuid == null ? "" : documentUuid.replace("\\", "\\\\").replace("\"", "\\\"");
-        eval(code.replace("__AUI_DOCUMENT_UUID__", "\"" + uuid + "\""), null, "global.js");
+        eval(code.replace("__AUI_DOCUMENT_UUID__", uuid), null, "global.js");
     }
 
     @Override
@@ -130,30 +137,109 @@ public final class CleanroomScriptService implements AuiScriptService {
             Class<?> contextClass = context.getClass();
             Object bindings = contextClass.getMethod("getBindings", String.class).invoke(context, "js");
             Method putMember = bindings.getClass().getMethod("putMember", String.class, Object.class);
-            putMember.invoke(bindings, "event", event);
-            nekoEval.invoke(context, "js", code);
+            if (event == null) {
+                try {
+                    bindings.getClass().getMethod("removeMember", String.class).invoke(bindings, "event");
+                } catch (NoSuchMethodException ignored) {
+                    putMember.invoke(bindings, "event", null);
+                }
+            } else {
+                putMember.invoke(bindings, "event", event);
+            }
+
+            // Make AUI snippets first-class NekoJS scripts: this preserves the
+            // runtime's CLIENT globals, module loader and error attribution.
+            String scriptId = "apricityui/" + (event == null ? "global.js" : "inline.js");
+            String previous = null;
+            try {
+                Class<?> registry = Class.forName("com.tkisor.nekojs.script.ScriptContextRegistry");
+                previous = (String) registry.getMethod("switchCurrentScriptId",
+                        contextClass, String.class).invoke(null, context, scriptId);
+            } catch (Throwable ignored) {
+                // Older NekoJS builds do not expose the registry helper.
+            }
+            try {
+                nekoEval.invoke(context, "js", code);
+            } finally {
+                if (previous != null) {
+                    try {
+                        Class<?> registry = Class.forName("com.tkisor.nekojs.script.ScriptContextRegistry");
+                        registry.getMethod("restoreCurrentScriptId", contextClass, String.class)
+                                .invoke(null, context, previous);
+                    } catch (Throwable ignored) {
+                    }
+                }
+            }
         } catch (Throwable error) {
             ApricityUI.LOGGER.error("[AUI Cleanroom] NekoJS evaluation failed", error);
         }
     }
 
     private Object ensureNekoContext() {
-        if (nekoContext != null) return nekoContext;
+        if (nekoContext != null && !nekoTemporary) return nekoContext;
         try {
             Class<?> contextClass = Class.forName("graal.graalvm.polyglot.Context");
+            Object formal = findNekoRuntimeContext(contextClass);
+            if (formal != null) {
+                if (nekoTemporary && nekoContext != null) {
+                    try { nekoContext.getClass().getMethod("close").invoke(nekoContext); } catch (Throwable ignored) { }
+                }
+                nekoContext = formal;
+                nekoTemporary = false;
+                nekoEval = contextClass.getMethod("eval", String.class, CharSequence.class);
+                ApricityUI.LOGGER.info("[AUI Cleanroom] attached to NekoJS CLIENT runtime");
+                return formal;
+            }
+
+            // Keep a compatibility fallback for the brief window before NekoJS
+            // has completed preInit.  It is replaced by the official context on
+            // the first later evaluation and never replaces a healthy runtime.
             Method newBuilder = contextClass.getMethod("newBuilder", String[].class);
             Object builder = newBuilder.invoke(null, (Object) new String[]{"js"});
             try {
                 builder.getClass().getMethod("allowAllAccess", boolean.class).invoke(builder, true);
             } catch (NoSuchMethodException ignored) {
-                // Older preview builds may expose a restricted builder only.
             }
             nekoContext = builder.getClass().getMethod("build").invoke(builder);
+            nekoTemporary = true;
             nekoEval = contextClass.getMethod("eval", String.class, CharSequence.class);
+            ApricityUI.LOGGER.warn("[AUI Cleanroom] NekoJS CLIENT runtime is not ready; using a temporary context");
             return nekoContext;
         } catch (Throwable error) {
             ApricityUI.LOGGER.warn("[AUI Cleanroom] NekoJS is present but its Graal context is unavailable", error);
             backend = Backend.NONE;
+            return null;
+        }
+    }
+
+    private Object findNekoRuntimeContext(Class<?> contextClass) {
+        try {
+            Class<?> mod = Class.forName("com.tkisor.nekojs.NekoJSMod");
+            Object root = mod.getField("RUNTIME_ROOT").get(null);
+            if (root == null) return null;
+            Class<?> type = Class.forName("com.tkisor.nekojs.api.ScriptType");
+            Object client = Enum.valueOf((Class) type, "CLIENT");
+            Object manager = root.getClass().getMethod("scriptManagerOrNull", type).invoke(root, client);
+            if (manager == null) {
+                manager = root.getClass().getMethod("scriptManagerOf", type).invoke(root, client);
+            }
+            if (manager == null) return null;
+            nekoManager = manager;
+
+            java.lang.reflect.Field runtime = manager.getClass().getDeclaredField("runtime");
+            runtime.setAccessible(true);
+            Object environment = runtime.get(manager);
+            if (environment == null) {
+                Method create = manager.getClass().getDeclaredMethod("getOrCreateEnvironment");
+                create.setAccessible(true);
+                environment = create.invoke(manager);
+            }
+            if (environment == null) return null;
+            Method context = environment.getClass().getMethod("context");
+            Object result = context.invoke(environment);
+            return contextClass.isInstance(result) ? result : null;
+        } catch (Throwable error) {
+            ApricityUI.LOGGER.debug("[AUI Cleanroom] NekoJS runtime context not ready: {}", error.toString());
             return null;
         }
     }
@@ -165,7 +251,7 @@ public final class CleanroomScriptService implements AuiScriptService {
             Bindings bindings = engine.getBindings(ScriptContext.ENGINE_SCOPE);
             if (event == null) bindings.remove("event");
             else bindings.put("event", event);
-            engine.eval(code, bindings);
+            engine.eval(JS.rewriteForLegacyKube(code), bindings);
         } catch (Throwable error) {
             ApricityUI.LOGGER.error("[AUI Cleanroom] legacy KubeJS evaluation failed", error);
         }
@@ -185,6 +271,7 @@ public final class CleanroomScriptService implements AuiScriptService {
                     Field engine = pack.getClass().getField("engine");
                     Object candidate = engine.get(pack);
                     if (candidate instanceof ScriptEngine scriptEngine) {
+                        installKubeBindings(scriptEngine);
                         kubeEngine = scriptEngine;
                         return scriptEngine;
                     }
@@ -194,5 +281,23 @@ public final class CleanroomScriptService implements AuiScriptService {
             ApricityUI.LOGGER.warn("[AUI Cleanroom] KubeJS engine is unavailable on this Java runtime", error);
         }
         return null;
+    }
+
+    /**
+     * KubeJS 1.12 exposes its JavaScript engine without the modern KubeJS
+     * binding registrar.  Install the same public AUI facade that newer
+     * loaders expose so global.js and page scripts can resolve
+     * {@code ApricityUI.getDocumentByUUID(...)}.
+     */
+    private static void installKubeBindings(ScriptEngine engine) {
+        try {
+            Bindings bindings = engine.getBindings(ScriptContext.ENGINE_SCOPE);
+            // Nashorn treats a java.lang.Class placed in ENGINE_SCOPE as an
+            // opaque object.  Java.type creates the callable static facade
+            // expected by AUI's browser bootstrap.
+            engine.eval("var ApricityUI = Java.type('com.sighs.apricityui.ApricityUI');", bindings);
+        } catch (Throwable error) {
+            ApricityUI.LOGGER.debug("[AUI Cleanroom] unable to install KubeJS bindings", error);
+        }
     }
 }
