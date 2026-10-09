@@ -60,23 +60,20 @@ public class ClientProxy implements IProxy{
         // Forge 1.12 has no FMLClientSetupEvent.  The first client task is the
         // equivalent safe point: the resource manager exists and all mod
         // resource packs have been attached, so HTML/CSS/JS discovery can run.
-        Minecraft.getMinecraft().addScheduledTask(ClientLoader::reloadResources);
         String smokePage = System.getProperty("apricityui.testScreen", "").trim();
-        if (!smokePage.isEmpty()) {
-            // The FML init callback can run before Minecraft has completed its
-            // first client tick. Queue the real screen open on the client task
-            // queue so this is also useful for headless smoke probes.
-            Minecraft.getMinecraft().addScheduledTask(() -> {
+        CleanroomClientEvents.deferBootstrap(() -> {
+            ClientLoader.reloadResources();
+            if (!smokePage.isEmpty()) {
                 try {
                     AuiServices.client().openScreen(smokePage);
                     com.sighs.apricityui.ApricityUI.LOGGER.info(
                             "[AUI Cleanroom] smoke screen opened: {}", smokePage);
                 } catch (Throwable error) {
                     com.sighs.apricityui.ApricityUI.LOGGER.warn(
-                            "[AUI Cleanroom] smoke screen failed: {}", smokePage, error);
+                        "[AUI Cleanroom] smoke screen failed: {}", smokePage, error);
                 }
-            });
-        }
+            }
+        });
         if (!Boolean.getBoolean("apricityui.cleanroom.shaderProbe")) return;
         // FML init runs after the display/context exists. Compile every AUI
         // shader once so a dev run can verify the real Cleanroom GLSL path.
