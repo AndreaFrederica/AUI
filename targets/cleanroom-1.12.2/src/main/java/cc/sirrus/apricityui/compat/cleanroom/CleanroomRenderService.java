@@ -286,6 +286,18 @@ public final class CleanroomRenderService implements AuiRenderService {
     @Override public void enableCull() { cull = true; GL11.glEnable(GL11.GL_CULL_FACE); }
     @Override public void disableCull() { cull = false; GL11.glDisable(GL11.GL_CULL_FACE); }
     @Override public boolean isCullEnabled() { return cull; }
+
+    /**
+     * Reconciles the small state cache after a loader event restores raw OpenGL
+     * attributes around an AUI pass. Legacy Forge hooks may use glPushAttrib/
+     * glPopAttrib, which do not update Java-side booleans or the active shader.
+     */
+    public void syncCachedStateFromGl() {
+        depth = GL11.glIsEnabled(GL11.GL_DEPTH_TEST);
+        depthMask = GL11.glGetBoolean(GL11.GL_DEPTH_WRITEMASK);
+        cull = GL11.glIsEnabled(GL11.GL_CULL_FACE);
+        activeShader = null;
+    }
     @Override public void enablePolygonOffset() { GL11.glEnable(GL11.GL_POLYGON_OFFSET_FILL); }
     @Override public void disablePolygonOffset() { GL11.glDisable(GL11.GL_POLYGON_OFFSET_FILL); }
     @Override public void polygonOffset(float factor, float units) { GL11.glPolygonOffset(factor, units); }
