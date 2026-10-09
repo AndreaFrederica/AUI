@@ -695,10 +695,14 @@ function __auiDecorateNode(el) {
   if (!el || el.__auiDecoratedElement) return el;
   // Probe extensibility once. A Java host object cannot receive the DOM
   // properties installed below; switch to its cached JS facade in that case.
+  let forceHostFacade = typeof __auiNekoJS !== 'undefined' && __auiNekoJS === true
+    && typeof el.getNodeName === 'function';
   try {
     let probe = '__auiExtensibleProbe';
-    Object.defineProperty(el, probe, { value: true, configurable: true });
-    delete el[probe];
+    if (!forceHostFacade) {
+      Object.defineProperty(el, probe, { value: true, configurable: true });
+      delete el[probe];
+    } else throw new Error('NekoJS host object');
   } catch (e) {
     let facade = __auiHostFacade(el);
     if (facade !== el) el = facade;

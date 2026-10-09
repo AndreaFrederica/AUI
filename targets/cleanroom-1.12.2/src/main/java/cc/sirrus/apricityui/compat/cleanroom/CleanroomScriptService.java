@@ -299,6 +299,10 @@ public final class CleanroomScriptService implements AuiScriptService {
                 facade = Class.forName("com.sighs.apricityui.util.kjs.ApricityUIClientUtil");
             }
             putMember.invoke(bindings, "ApricityUI", facade);
+            // Graal host objects may report successful defineProperty calls while
+            // silently discarding the property. The common DOM bridge uses this
+            // marker to route Element values through a mutable JS facade.
+            putMember.invoke(bindings, "__auiNekoJS", Boolean.TRUE);
             nekoGlobalsContext = context;
             ApricityUI.LOGGER.info("[AUI Cleanroom] installed the ApricityUI guest global for NekoJS (facade={})",
                     facade instanceof Class ? "host-class" : "java-type");
