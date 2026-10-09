@@ -15,6 +15,8 @@ import net.minecraft.client.Minecraft;
 import net.minecraft.client.gui.GuiScreen;
 import org.lwjgl.input.Keyboard;
 import org.lwjgl.input.Mouse;
+import org.lwjgl.opengl.GL11;
+import org.lwjgl.opengl.GL20;
 
 /** 1.12 GuiScreen owner for one AUI document. */
 public class ApricityScreen extends GuiScreen implements AuiLinkedScreen {
@@ -47,11 +49,30 @@ public class ApricityScreen extends GuiScreen implements AuiLinkedScreen {
         if (linkedDocument != null) {
             PoseStack pose = new PoseStack();
             ApricityViewport viewport = linkedDocument.getViewport();
+            int previousProgram = GL11.glGetInteger(GL20.GL_CURRENT_PROGRAM);
+            GL11.glMatrixMode(GL11.GL_PROJECTION);
+            GL11.glPushMatrix();
+            GL11.glLoadIdentity();
+            GL11.glOrtho(0.0, AuiServices.client().getScaledWidth(),
+                    AuiServices.client().getScaledHeight(), 0.0, -1000.0, 1000.0);
+            GL11.glMatrixMode(GL11.GL_MODELVIEW);
+            GL11.glPushMatrix();
+            GL11.glLoadIdentity();
+            GL20.glUseProgram(0);
             pose.pushPose();
             pose.scale(viewport.renderScale(), viewport.renderScale(), 1.0f);
             Mask.pushScissorScale(viewport.scissorScale(), pose);
             try { Base.drawScreenDocument(pose, linkedDocument); }
-            finally { Mask.popScissorScale(); pose.popPose(); }
+            finally {
+                Mask.popScissorScale();
+                pose.popPose();
+                GL11.glMatrixMode(GL11.GL_MODELVIEW);
+                GL11.glPopMatrix();
+                GL11.glMatrixMode(GL11.GL_PROJECTION);
+                GL11.glPopMatrix();
+                GL11.glMatrixMode(GL11.GL_MODELVIEW);
+                GL20.glUseProgram(previousProgram);
+            }
         }
         super.drawScreen(mouseX, mouseY, partialTicks);
     }
