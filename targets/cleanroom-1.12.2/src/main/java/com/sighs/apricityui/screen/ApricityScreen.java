@@ -59,6 +59,14 @@ public class ApricityScreen extends GuiScreen implements AuiLinkedScreen {
             GL11.glPushMatrix();
             GL11.glLoadIdentity();
             GL20.glUseProgram(0);
+            // GuiScreen is a 2D pass. The vanilla screen renderer normally
+            // disables depth before drawing; AUI's shared graph defaults to
+            // depth enabled for world windows, so explicitly make the screen
+            // pass depth independent.
+            boolean previousDepth = AuiServices.render().isDepthTestEnabled();
+            boolean previousDepthMask = AuiServices.render().isDepthMaskEnabled();
+            AuiServices.render().disableDepthTest();
+            AuiServices.render().setDepthMask(false);
             pose.pushPose();
             pose.scale(viewport.renderScale(), viewport.renderScale(), 1.0f);
             Mask.pushScissorScale(viewport.scissorScale(), pose);
@@ -66,6 +74,9 @@ public class ApricityScreen extends GuiScreen implements AuiLinkedScreen {
             finally {
                 Mask.popScissorScale();
                 pose.popPose();
+                if (previousDepth) AuiServices.render().enableDepthTest();
+                else AuiServices.render().disableDepthTest();
+                AuiServices.render().setDepthMask(previousDepthMask);
                 GL11.glMatrixMode(GL11.GL_MODELVIEW);
                 GL11.glPopMatrix();
                 GL11.glMatrixMode(GL11.GL_PROJECTION);

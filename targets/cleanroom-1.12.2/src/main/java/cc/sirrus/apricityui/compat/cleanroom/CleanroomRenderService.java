@@ -42,6 +42,9 @@ public final class CleanroomRenderService implements AuiRenderService {
     private volatile ShaderHandle maskIntersectShader;
     private volatile ShaderHandle maskSubtractShader;
     private volatile ShaderHandle maskExcludeShader;
+    private volatile ShaderHandle positionColorShader;
+    private boolean positionColorShaderAttempted;
+    private boolean positionColorDiagnosticLogged;
     private final FloatBuffer matrixBuffer = BufferUtils.createFloatBuffer(16);
     private CleanroomRenderService() { }
 
@@ -76,7 +79,31 @@ public final class CleanroomRenderService implements AuiRenderService {
         Mesh m = (Mesh) mesh; float[] p = transform(mat, x, y, z);
         m.buffer.pos(p[0], p[1], p[2]).color(r, g, b, a).endVertex();
     }
-    @Override public void submitMesh(Object mesh) { Tessellator.getInstance().draw(); }
+    @Override public void submitMesh(Object mesh) {
+        Tessellator.getInstance().draw();
+        // BufferBuilder's POSITION_COLOR pass is owned by AUI only.  Restore
+        // Minecraft's fixed/texture pipeline before font and texture batches;
+        // leaving this program bound makes every subsequent textured draw use
+        // the color-only fragment shader and appear black.
+        GL20.glUseProgram(0);
+        activeShader = null;
+        if (!positionColorDiagnosticLogged) {
+            positionColorDiagnosticLogged = true;
+            try {
+                java.nio.IntBuffer viewport = BufferUtils.createIntBuffer(4);
+                GL11.glGetInteger(GL11.GL_VIEWPORT, viewport);
+                java.nio.IntBuffer scissor = BufferUtils.createIntBuffer(4);
+                GL11.glGetInteger(GL11.GL_SCISSOR_BOX, scissor);
+                com.sighs.apricityui.ApricityUI.LOGGER.info(
+                        "[AUI Cleanroom] first mesh submitted program={} viewport={}x{}+{},{} scissor={} box={}x{}+{},{} glError={}",
+                        GL11.glGetInteger(GL20.GL_CURRENT_PROGRAM), viewport.get(2), viewport.get(3), viewport.get(0), viewport.get(1),
+                        GL11.glIsEnabled(GL11.GL_SCISSOR_TEST), scissor.get(2), scissor.get(3), scissor.get(0), scissor.get(1),
+                        GL11.glGetError());
+            } catch (Throwable error) {
+                com.sighs.apricityui.ApricityUI.LOGGER.debug("[AUI Cleanroom] mesh diagnostic failed", error);
+            }
+        }
+    }
     @Override public Object beginTextureBatch(RenderHandle render) {
         ResourceLocation location = render == null ? null : render.as();
         if (location == null) return null;
@@ -215,7 +242,22 @@ public final class CleanroomRenderService implements AuiRenderService {
             applyShaderBlend(activeShader);
         }
     }
-    @Override public void setPositionColorShader() { activeShader = null; GL20.glUseProgram(0); }
+    @Override public void setPositionColorShader() {
+        ShaderHandle shader = positionColorShader;
+        if (shader == null && !positionColorShaderAttempted) {
+            synchronized (this) {
+                shader = positionColorShader;
+                if (shader == null && !positionColorShaderAttempted) {
+                    positionColorShaderAttempted = true;
+                    shader = compilePositionColorShader();
+                    positionColorShader = shader;
+                }
+            }
+        }
+        activeShader = shader;
+        GL20.glUseProgram(shader == null ? 0 : shader.program);
+        if (shader != null) uploadProjection();
+    }
     @Override public void setShaderColor(float a, float r, float g, float b) { GL11.glColor4f(r, g, b, a); }
     @Override public Object getFilterShader() {
         ShaderHandle current = filterShader;
@@ -400,6 +442,34 @@ public final class CleanroomRenderService implements AuiRenderService {
         }
     }
 
+    /** Simple vertex-color program used for AUI's POSITION_COLOR batches. */
+    private ShaderHandle compilePositionColorShader() {
+        try {
+            int vertexId = compile(GL20.GL_VERTEX_SHADER,
+                    "#version 120\nattribute vec3 Position;\nattribute vec4 Color;\nvarying vec4 vertexColor;\nvoid main(){ gl_Position = gl_ModelViewProjectionMatrix * vec4(Position, 1.0); vertexColor = Color; }\n");
+            int fragmentId = compile(GL20.GL_FRAGMENT_SHADER,
+                    "#version 120\nvarying vec4 vertexColor;\nvoid main(){ gl_FragColor = vertexColor; }\n");
+            int program = GL20.glCreateProgram();
+            GL20.glAttachShader(program, vertexId);
+            GL20.glAttachShader(program, fragmentId);
+            GL20.glBindAttribLocation(program, 0, "Position");
+            GL20.glBindAttribLocation(program, 1, "Color");
+            GL20.glLinkProgram(program);
+            if (GL20.glGetProgrami(program, GL20.GL_LINK_STATUS) == GL11.GL_FALSE) {
+                String log = GL20.glGetProgramInfoLog(program, 4096);
+                GL20.glDeleteProgram(program);
+                throw new IllegalStateException(log);
+            }
+            GL20.glDeleteShader(vertexId);
+            GL20.glDeleteShader(fragmentId);
+            com.sighs.apricityui.ApricityUI.LOGGER.info("[AUI Cleanroom] POSITION_COLOR shader enabled (program={})", program);
+            return new ShaderHandle(program, ShaderKind.POSITION_COLOR);
+        } catch (Throwable error) {
+            com.sighs.apricityui.ApricityUI.LOGGER.warn("[AUI Cleanroom] POSITION_COLOR shader unavailable; using fixed pipeline", error);
+            return null;
+        }
+    }
+
     private static int compile(int type, String source) {
         int shader = GL20.glCreateShader(type);
         GL20.glShaderSource(shader, source);
@@ -500,6 +570,6 @@ public final class CleanroomRenderService implements AuiRenderService {
     }
 
     private enum ShaderKind {
-        NONE, MASK, MASK_INTERSECT, MASK_SUBTRACT, MASK_EXCLUDE
+        NONE, POSITION_COLOR, MASK, MASK_INTERSECT, MASK_SUBTRACT, MASK_EXCLUDE
     }
 }
