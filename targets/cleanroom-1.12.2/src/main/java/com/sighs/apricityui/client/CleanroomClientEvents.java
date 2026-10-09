@@ -2,6 +2,7 @@ package com.sighs.apricityui.client;
 
 import cc.sirrus.apricityui.compat.cleanroom.CleanroomClientService;
 import cc.sirrus.apricityui.compat.cleanroom.CleanroomInput;
+import cc.sirrus.apricityui.compat.cleanroom.CleanroomRenderService;
 import com.mojang.blaze3d.vertex.PoseStack;
 import com.sighs.apricityui.ApricityUI;
 import com.sighs.apricityui.dev.resource.ResourcePreviewDialog;
@@ -112,6 +113,7 @@ public final class CleanroomClientEvents {
             AuiServices.render().setProjectionMatrix(previousProjection);
             GL20.glUseProgram(previousProgram);
             GL11.glPopAttrib();
+            CleanroomRenderService.INSTANCE.syncCachedStateFromGl();
         }
     }
 
@@ -139,6 +141,7 @@ public final class CleanroomClientEvents {
             ApricityUI.LOGGER.warn("[AUI Cleanroom] overlay render failed", error);
         } finally {
             GL11.glPopAttrib();
+            CleanroomRenderService.INSTANCE.syncCachedStateFromGl();
         }
     }
 
