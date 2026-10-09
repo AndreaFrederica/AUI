@@ -7,11 +7,14 @@ import com.sighs.apricityui.render.Mask;
 import com.sighs.apricityui.render.Operation;
 import com.sighs.apricityui.style.Cursor;
 import com.sighs.apricityui.viewport.ApricityViewport;
+import com.sighs.apricityui.spi.AuiServices;
 import cc.sirrus.apricityui.compat.cleanroom.CleanroomInput;
 import net.minecraft.client.gui.inventory.GuiContainer;
 import net.minecraft.entity.player.InventoryPlayer;
 import net.minecraft.inventory.Container;
 import org.lwjgl.input.Mouse;
+import org.lwjgl.opengl.GL11;
+import org.lwjgl.opengl.GL20;
 
 /** 1.12 GuiContainer shell that renders the linked AUI document over slots. */
 public class ApricityContainerScreen extends GuiContainer implements AuiLinkedScreen {
@@ -48,12 +51,31 @@ public class ApricityContainerScreen extends GuiContainer implements AuiLinkedSc
         ApricityViewport viewport = linkedDocument.getViewport();
         menu.updateSlotLayout(linkedDocument, guiLeft, guiTop);
         PoseStack pose = new PoseStack();
+        int previousProgram = GL11.glGetInteger(GL20.GL_CURRENT_PROGRAM);
+        GL11.glMatrixMode(GL11.GL_PROJECTION);
+        GL11.glPushMatrix();
+        GL11.glLoadIdentity();
+        GL11.glOrtho(0.0, AuiServices.client().getScaledWidth(),
+                AuiServices.client().getScaledHeight(), 0.0, -1000.0, 1000.0);
+        GL11.glMatrixMode(GL11.GL_MODELVIEW);
+        GL11.glPushMatrix();
+        GL11.glLoadIdentity();
+        GL20.glUseProgram(0);
         pose.pushPose();
         pose.translate(guiLeft, guiTop, 0);
         pose.scale(viewport.renderScale(), viewport.renderScale(), 1.0f);
         Mask.pushScissorScale(viewport.scissorScale(), pose);
         try { Base.drawScreenDocument(pose, linkedDocument); }
-        finally { Mask.popScissorScale(); pose.popPose(); }
+        finally {
+            Mask.popScissorScale();
+            pose.popPose();
+            GL11.glMatrixMode(GL11.GL_MODELVIEW);
+            GL11.glPopMatrix();
+            GL11.glMatrixMode(GL11.GL_PROJECTION);
+            GL11.glPopMatrix();
+            GL11.glMatrixMode(GL11.GL_MODELVIEW);
+            GL20.glUseProgram(previousProgram);
+        }
         Cursor.drawPseudoCursor(pose);
     }
 
