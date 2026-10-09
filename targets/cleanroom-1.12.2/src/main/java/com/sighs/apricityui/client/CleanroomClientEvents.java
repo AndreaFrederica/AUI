@@ -93,6 +93,7 @@ public final class CleanroomClientEvents {
 
         Matrix4f projection = readCurrentMatrix(GL11.GL_PROJECTION_MATRIX);
         Matrix4f previousProjection = AuiServices.render().getProjectionMatrix();
+        int previousProgram = GL11.glGetInteger(GL20.GL_CURRENT_PROGRAM);
         GL11.glPushAttrib(GL11.GL_ALL_ATTRIB_BITS);
         try {
             // WorldWindow emits camera-relative vertices. The legacy event has
@@ -109,7 +110,7 @@ public final class CleanroomClientEvents {
             ApricityUI.LOGGER.warn("[AUI Cleanroom] world-window render failed", error);
         } finally {
             AuiServices.render().setProjectionMatrix(previousProjection);
-            GL20.glUseProgram(0);
+            GL20.glUseProgram(previousProgram);
             GL11.glPopAttrib();
         }
     }
