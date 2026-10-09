@@ -12,6 +12,7 @@ import net.minecraftforge.fml.common.event.FMLPreInitializationEvent;
 import net.minecraftforge.fml.common.event.FMLInitializationEvent;
 import net.minecraft.client.Minecraft;
 import net.minecraft.util.SoundCategory;
+import com.sighs.apricityui.client.CleanroomClientEvents;
 
 public class ClientProxy implements IProxy{
     @Override
@@ -33,6 +34,7 @@ public class ClientProxy implements IProxy{
         ApricityUIRegistry.scanPackages("com.sighs.apricityui.element");
         ApricityUIRegistry.register();
         CleanroomNetworkService.INSTANCE.register();
+        CleanroomClientEvents.register();
     }
 
     @Override

@@ -9,6 +9,7 @@ import com.sighs.apricityui.render.Mask;
 import com.sighs.apricityui.render.Operation;
 import com.sighs.apricityui.style.Cursor;
 import com.sighs.apricityui.spi.AuiServices;
+import cc.sirrus.apricityui.compat.cleanroom.CleanroomInput;
 import com.sighs.apricityui.viewport.ApricityViewport;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.gui.GuiScreen;
@@ -77,8 +78,9 @@ public class ApricityScreen extends GuiScreen implements AuiLinkedScreen {
 
     @Override protected void keyTyped(char typedChar, int keyCode) throws java.io.IOException {
         if (keyCode == AuiServices.keys().reloadKey()) { ClientLoader.reload(); return; }
+        int glfwKey = CleanroomInput.toGlfwKey(keyCode);
         boolean consumed = Operation.onCharTyped(typedChar);
-        consumed |= Operation.onKeyPressed(keyCode, 0, 0, Keyboard.isRepeatEvent(),
+        consumed |= Operation.onKeyPressed(glfwKey < 0 ? keyCode : glfwKey, 0, 0, Keyboard.isRepeatEvent(),
                 com.sighs.apricityui.event.KeyEvent.Source.SCREEN_EVENT);
         if (consumed) return;
         super.keyTyped(typedChar, keyCode);

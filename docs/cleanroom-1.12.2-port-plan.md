@@ -1,6 +1,6 @@
 # ApricityUI 移植到 Cleanroom 1.12.2 计划
 
-当前进度：Cleanroom 目标已通过编译、资源处理和 MCP → SRG 重映射打包；客户端服务、资源读取、基础固定管线渲染、GuiScreen 生命周期、SimpleNetworkWrapper 屏幕消息和基础 Container/Slot 菜单已接入。服务端窗口同步、复杂数据源/过滤器、高级滤镜/动态纹理仍待验证和移植。复制的资源（包括 shader 和语言 JSON）目前仅作为基线，不代表全部已兼容 1.12。
+当前进度：Cleanroom 目标已完成基础 UI、世界窗口、容器/槽位、物品、音频、滤镜 shader、资源、Forge 网络和客户端生命周期桥，并通过 Cleanroom 编译、打包和启动探针。KubeJS/Rhino 与 WebView2 仍按可选能力处理：当前验证实例没有这些模组或原生运行时，因此安全降级为不可用，不阻塞普通 AUI 页面。
 
 ### 2026-10-08 构建验证
 
@@ -142,8 +142,13 @@ API 差异和每个模块的处理方式见 `docs/cleanroom-1.12.2-api-matrix.md
 - 网络范围已收缩为 AUI 实际需要的 1.12 `SimpleNetworkWrapper` 打开屏幕消息和原生 `Container` 同步；common 中的通用 chunk/serialization 工具没有被 UI 调用，继续保持平台隔离，不为它们额外制造传输协议。
 - 1.12 `GuiScreen`/`GuiContainer` 已把鼠标按键、释放、拖动、滚轮和键盘字符转发到 common `Operation`，默认字体已通过 1.12 `FontRenderer` 绘制。
 - Cleanroom 客户端已实现基于 classpath/JAR 的 `ElementRegister` 注解扫描，并在客户端预初始化阶段注册 AUI 内置元素和扩展元素。
+- Cleanroom 已接入 `RenderWorldLastEvent`：世界窗口读取 1.12 当前投影矩阵，沿用原生相机 model-view，绘制前后保存恢复 OpenGL 属性状态，并驱动 AUI 的世界窗口裁剪、深度和交互矩阵。
+- Cleanroom 已接入客户端 START tick、RenderTick、`RenderGameOverlayEvent.Post` 以及 1.12 鼠标/键盘输入事件；帧调度器、固定 60Hz mousemove、overlay 文档、持久 overlay 和世界窗口输入均有实际入口。
+- 1.12 LWJGL2 键码已转换为 common 使用的 GLFW 键码，屏幕和无 GUI 输入都支持按下、释放和字符事件。
+- 已检查 `D:/Projects/sfr/Cleanroom-MMC-instance-0.3.4-alpha(2)/.minecraft/mods`：当前只有 `neofontrender-0.4.1.jar`，没有 KubeJS/Rhino。因此 Cleanroom 不硬编码现代 KubeJS API，也不在缺少依赖时加载脚本类；AUI 的可选脚本服务保持 no-op 降级并继续允许页面/容器/世界窗口 Java API 使用。
+- WebView2/JNI 当前只在现代 Forge target 安装；Cleanroom 不加载 `NativeWebViewService`，iframe 在无后端时走 common 的 disabled/placeholder 路径，不会因为 DLL 或 JNI 缺失导致服务端崩溃。
 
-阶段五仍有待完成项：Cleanroom 的真实客户端/服务端 UI 交互 smoke test，以及可选的 WebView/JNI 后端。
+阶段五仍有待完成项：在带有实际 AUI 页面和容器调用方的整合包中执行真实客户端/服务端交互 smoke test。KubeJS/Rhino 和 WebView2 属于可选外部运行时，待对应 1.12 版本出现后再写平台适配，不把现代 API 猜测性移植进主包。
 
 ## 阶段六：Mixin、AT 和可选能力
 
