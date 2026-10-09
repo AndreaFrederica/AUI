@@ -448,6 +448,43 @@ function __auiInstallValueBridge(target, name, getter, setter) {
   } catch (e) {}
 }
 
+// GraalJS host objects (used by NekoJS) expose Java methods but are not
+// extensible, so Object.defineProperty(form, 'elements', ...) cannot work on
+// them. Keep one JS facade per host object and let the normal decoration code
+// install browser properties on that facade. Method reads are bound back to the
+// Java object, which preserves identity-sensitive APIs such as form ownership.
+let __auiHostFacades = typeof WeakMap === 'function' ? new WeakMap() : null;
+function __auiHostFacade(host) {
+  if (!host || !__auiHostFacades) return host;
+  let cached = __auiHostFacades.get(host);
+  if (cached) return cached;
+  let facade = {};
+  Object.defineProperty(facade, '__auiHostObject', { value: host, configurable: false });
+  let proxy = typeof Proxy === 'function' ? new Proxy(facade, {
+    get: function(target, key, receiver) {
+      if (Reflect.has(target, key)) return Reflect.get(target, key, receiver);
+      let value;
+      try { value = host[key]; } catch (e) { value = undefined; }
+      return typeof value === 'function' ? value.bind(host) : value;
+    },
+    set: function(target, key, value, receiver) {
+      if (Reflect.has(target, key) || key in target) return Reflect.set(target, key, value, receiver);
+      try { host[key] = value; } catch (e) {}
+      return true;
+    },
+    has: function(target, key) {
+      if (Reflect.has(target, key)) return true;
+      try { return key in host; } catch (e) { return false; }
+    }
+  }) : facade;
+  __auiHostFacades.set(host, proxy);
+  return proxy;
+}
+
+function __auiNative(value) {
+  return value && value.__auiHostObject ? value.__auiHostObject : value;
+}
+
 function __auiDecorateList(list) {
   if (!list) return [];
   let out = [];
@@ -587,11 +624,12 @@ function __auiAppendMany(target, args, mode) {
   for (let i = 0; i < args.length; i++) {
     let node = __auiToNode(args[i]);
     if (!node) continue;
-    if (mode === 'prepend') target.__auiNativePrepend(node);
-    else if (mode === 'before') target.__auiNativeBefore(node);
-    else if (mode === 'after') target.__auiNativeAfter(node);
-    else if (mode === 'replaceWith') target.__auiNativeReplaceWith(node);
-    else last = target.appendChild(node);
+    let nativeNode = __auiNative(node);
+    if (mode === 'prepend') target.__auiNativePrepend(nativeNode);
+    else if (mode === 'before') target.__auiNativeBefore(nativeNode);
+    else if (mode === 'after') target.__auiNativeAfter(nativeNode);
+    else if (mode === 'replaceWith') target.__auiNativeReplaceWith(nativeNode);
+    else last = target.appendChild(nativeNode);
     if (mode !== 'append') last = node;
   }
   return __auiDecorateNode(last);
@@ -655,6 +693,17 @@ function __auiDecorateStyle(el) {
 
 function __auiDecorateNode(el) {
   if (!el || el.__auiDecoratedElement) return el;
+  // Probe extensibility once. A Java host object cannot receive the DOM
+  // properties installed below; switch to its cached JS facade in that case.
+  try {
+    let probe = '__auiExtensibleProbe';
+    Object.defineProperty(el, probe, { value: true, configurable: true });
+    delete el[probe];
+  } catch (e) {
+    let facade = __auiHostFacade(el);
+    if (facade !== el) el = facade;
+  }
+  if (el.__auiDecoratedElement) return el;
   try {
     Object.defineProperty(el, '__auiDecoratedElement', { value: true });
     __auiInstallValueBridge(el, 'nodeType', () => el.getNodeType());
@@ -675,14 +724,14 @@ function __auiDecorateNode(el) {
       if (typeof el.setTextContent === 'function') el.setTextContent(v == null ? '' : String(v));
     });
     let ac = el.appendChild;
-    el.appendChild = function(child) { return __auiDecorateNode(ac.call(el, child)); };
+    el.appendChild = function(child) { return __auiDecorateNode(ac.call(el, __auiNative(child))); };
     el.__auiNativePrepend = el.prepend;
     el.append = function() { return __auiAppendMany(el, arguments, 'append'); };
     el.prepend = function() { return __auiAppendMany(el, arguments, 'prepend'); };
     let ic = el.insertBefore;
-    el.insertBefore = function(child, ref) { return __auiDecorateNode(ic.call(el, child, ref)); };
+    el.insertBefore = function(child, ref) { return __auiDecorateNode(ic.call(el, __auiNative(child), __auiNative(ref))); };
     let rc = el.removeChild;
-    el.removeChild = function(child) { return __auiDecorateNode(rc.call(el, child)); };
+    el.removeChild = function(child) { return __auiDecorateNode(rc.call(el, __auiNative(child))); };
     let rm = el.remove;
     el.remove = function() { return rm.call(el); };
     el.__auiNativeBefore = el.before;
@@ -692,7 +741,7 @@ function __auiDecorateNode(el) {
     el.__auiNativeReplaceWith = el.replaceWith;
     el.replaceWith = function() { return __auiAppendMany(el, arguments, 'replaceWith'); };
     let contains = el.contains;
-    el.contains = function(node) { return contains.call(el, node); };
+    el.contains = function(node) { return contains.call(el, __auiNative(node)); };
     if (typeof el.getClassName === 'function') {
       __auiInstallValueBridge(el, 'innerHTML', () => el.getInnerHTML(), (v) => el.setInnerHTML(v == null ? '' : String(v)));
       __auiInstallValueBridge(el, 'outerHTML', () => el.getOuterHTML(), (v) => el.setOuterHTML(v == null ? '' : String(v)));
@@ -940,8 +989,8 @@ function ResizeObserver(callback) {
     callback(__auiDecorateResizeEntries(entries), observer);
   });
   let observer = {
-    observe: function(target) { nativeObserver.observe(__auiDecorateElement(target)); },
-    unobserve: function(target) { nativeObserver.unobserve(__auiDecorateElement(target)); },
+    observe: function(target) { nativeObserver.observe(__auiNative(__auiDecorateElement(target))); },
+    unobserve: function(target) { nativeObserver.unobserve(__auiNative(__auiDecorateElement(target))); },
     disconnect: function() { nativeObserver.disconnect(); }
   };
   return observer;
@@ -956,7 +1005,7 @@ function MutationObserver(callback) {
     observe: function(target, options) {
       options = options || {};
       let filter = options.attributeFilter && options.attributeFilter.length ? options.attributeFilter.join(',') : null;
-      nativeObserver.observe(__auiDecorateElement(target), !!options.childList, !!options.attributes, !!options.characterData, !!options.subtree, !!options.attributeOldValue, !!options.characterDataOldValue, filter);
+      nativeObserver.observe(__auiNative(__auiDecorateElement(target)), !!options.childList, !!options.attributes, !!options.characterData, !!options.subtree, !!options.attributeOldValue, !!options.characterDataOldValue, filter);
     },
     disconnect: function() { nativeObserver.disconnect(); },
     takeRecords: function() { return __auiDecorateMutationRecords(nativeObserver.takeRecords()); }
@@ -993,7 +1042,7 @@ try {
   let __auiDocGEN = document.getElementsByName;
   document.getElementsByName = function(sel) { return __auiDecorateList(__auiDocGEN.call(document, sel)); };
   let __auiDocAppend = document.appendChild;
-  document.appendChild = function(child) { return __auiDecorateElement(__auiDocAppend.call(document, child)); };
+  document.appendChild = function(child) { return __auiDecorateElement(__auiDocAppend.call(document, __auiNative(child))); };
   document.__auiNativePrepend = document.prepend;
   document.append = function() { return __auiAppendMany(document, arguments, 'append'); };
   document.prepend = function() { return __auiAppendMany(document, arguments, 'prepend'); };

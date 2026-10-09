@@ -3,6 +3,7 @@ package com.sighs.apricityui.client;
 import cc.sirrus.apricityui.compat.cleanroom.CleanroomClientService;
 import cc.sirrus.apricityui.compat.cleanroom.CleanroomInput;
 import cc.sirrus.apricityui.compat.cleanroom.CleanroomRenderService;
+import cc.sirrus.apricityui.compat.cleanroom.CleanroomScriptService;
 import com.mojang.blaze3d.vertex.PoseStack;
 import com.sighs.apricityui.ApricityUI;
 import com.sighs.apricityui.dev.resource.ResourcePreviewDialog;
@@ -48,6 +49,19 @@ public final class CleanroomClientEvents {
     private static int lastHeight = -1;
     private static int lastDisplayWidth = -1;
     private static int lastDisplayHeight = -1;
+    private static Runnable deferredBootstrap;
+    private static int deferredBootstrapDelay;
+    private static int deferredBootstrapTicks;
+    /** The first few bootstrap ticks wait for NekoJS before reporting why they are stalled. */
+    private static final java.util.Set<Integer> BOOTSTRAP_PROGRESS_TICKS =
+            java.util.Set.of(1, 5, 10, 20, 30, 40);
+    /**
+     * NekoJS builds its CLIENT Graal context from its own END-phase client tick,
+     * which always runs after this START-phase handler. Waiting for it keeps the
+     * first page's script globals intact, but the wait is bounded so a stalled or
+     * incompatible runtime can never keep resources and smoke pages from loading.
+     */
+    private static final int BOOTSTRAP_RUNTIME_DEADLINE_TICKS = 40;
 
     private CleanroomClientEvents() {
     }
@@ -56,9 +70,21 @@ public final class CleanroomClientEvents {
         MinecraftForge.EVENT_BUS.register(INSTANCE);
     }
 
+    /** Queue resource/script bootstrap until optional script loaders finish pre-init. */
+    public static void deferBootstrap(Runnable task) {
+        deferredBootstrap = task;
+        deferredBootstrapDelay = 2;
+        deferredBootstrapTicks = 0;
+        ApricityUI.LOGGER.info("[AUI Cleanroom] deferred client bootstrap queued");
+    }
+
     @SubscribeEvent
     public void clientTick(TickEvent.ClientTickEvent event) {
         if (event.phase != TickEvent.Phase.START) return;
+        // Run the deferred bootstrap before anything else on this handler: a
+        // failure in the frame scheduler or in the viewport sync below must not
+        // be able to starve the first resource load / smoke page forever.
+        runDeferredBootstrap();
         FrameScheduler.tick();
         Minecraft mc = Minecraft.getMinecraft();
         if (mc == null) return;
@@ -76,6 +102,66 @@ public final class CleanroomClientEvents {
                 if (document != null && !document.isDisposed()) document.applyViewport(true);
             }
             com.sighs.apricityui.init.Window.window.fireResizeEvent();
+        }
+    }
+
+    /**
+     * Runs the queued resource/script bootstrap as soon as the script runtime is
+     * usable, without ever depending on the rest of the tick handler.
+     */
+    private static void runDeferredBootstrap() {
+        if (deferredBootstrap == null) return;
+        if (--deferredBootstrapDelay > 0) return;
+        deferredBootstrapTicks++;
+        boolean runtimeReady = clientRuntimeReady();
+        if (runtimeReady) {
+            Runnable task = deferredBootstrap;
+            deferredBootstrap = null;
+            ApricityUI.LOGGER.info(
+                    "[AUI Cleanroom] client bootstrap starting after {} tick(s)", deferredBootstrapTicks);
+            try {
+                task.run();
+            } catch (Throwable error) {
+                ApricityUI.LOGGER.warn("[AUI Cleanroom] deferred client bootstrap failed", error);
+            }
+            return;
+        }
+        if (deferredBootstrapTicks >= BOOTSTRAP_RUNTIME_DEADLINE_TICKS) {
+            // The runtime never showed up: bootstrap anyway so the first resource
+            // load and the dev smoke page are never withheld by the script loader.
+            Runnable task = deferredBootstrap;
+            deferredBootstrap = null;
+            ApricityUI.LOGGER.warn(
+                    "[AUI Cleanroom] NekoJS CLIENT runtime still unavailable after {} ticks; bootstrapping anyway",
+                    deferredBootstrapTicks);
+            try {
+                task.run();
+            } catch (Throwable error) {
+                ApricityUI.LOGGER.warn("[AUI Cleanroom] deferred client bootstrap failed", error);
+            }
+            return;
+        }
+        // NekoJS creates the formal CLIENT Graal context from its own client
+        // tick. Poll at a low rate instead of creating a temporary context and
+        // losing the first page's globals.
+        if (BOOTSTRAP_PROGRESS_TICKS.contains(deferredBootstrapTicks)) {
+            ApricityUI.LOGGER.info(
+                    "[AUI Cleanroom] waiting for the NekoJS CLIENT runtime before the first bootstrap (tick {})",
+                    deferredBootstrapTicks);
+        }
+        deferredBootstrapDelay = 5;
+    }
+
+    /**
+     * Probes the script backend. A throwing probe is treated as "not ready" so
+     * the bounded deadline below decides, instead of the exception deciding.
+     */
+    private static boolean clientRuntimeReady() {
+        try {
+            return CleanroomScriptService.INSTANCE.isClientRuntimeReady();
+        } catch (Throwable error) {
+            ApricityUI.LOGGER.warn("[AUI Cleanroom] client script runtime probe failed", error);
+            return false;
         }
     }
 
