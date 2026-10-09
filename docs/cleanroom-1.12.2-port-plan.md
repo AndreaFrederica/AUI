@@ -148,7 +148,36 @@ API 差异和每个模块的处理方式见 `docs/cleanroom-1.12.2-api-matrix.md
 - 已检查 `D:/Projects/sfr/Cleanroom-MMC-instance-0.3.4-alpha(2)/.minecraft/mods`：当前只有 `neofontrender-0.4.1.jar`，没有 KubeJS/Rhino。因此 Cleanroom 不硬编码现代 KubeJS API，也不在缺少依赖时加载脚本类；AUI 的可选脚本服务保持 no-op 降级并继续允许页面/容器/世界窗口 Java API 使用。
 - WebView2/JNI 当前只在现代 Forge target 安装；Cleanroom 不加载 `NativeWebViewService`，iframe 在无后端时走 common 的 disabled/placeholder 路径，不会因为 DLL 或 JNI 缺失导致服务端崩溃。
 
-阶段五仍有待完成项：在带有实际 AUI 页面和容器调用方的整合包中执行真实客户端/服务端交互 smoke test。KubeJS/Rhino 和 WebView2 属于可选外部运行时，待对应 1.12 版本出现后再写平台适配，不把现代 API 猜测性移植进主包。
+阶段五仍有待完成项：在带有实际 AUI 页面和容器调用方的整合包中执行真实客户端/服务端交互 smoke test。WebView2 仍属于可选外部运行时；脚本后端选择和 NekoJS 1.12 实例验证记录在下节。
+
+### 2026-10-09 脚本运行时选择
+
+重新检查 CurseForge 的折叠版本列表后，确认 NekoJS 提供 Cleanroom 1.12.2 文件：
+
+- NekoJS 1.1.0-preview3，CurseForge project `1518701`，file `9048721`；
+- 必需的 Graal 运行时已作为 NekoJS 的 contained dependency 提供；
+- NekoJS 的 1.12 文件是 Forge/Cleanroom 目标，不是 NeoForge 1.21 文件。
+
+Cleanroom target 的 `gradle/scripts/dependencies.gradle` 已接入 CurseMaven，使用
+`aui_script_backend` 选择且只解析一个脚本后端：
+
+```text
+aui_script_backend = nekojs  # curse.maven:nekojs-1518701:9048721
+aui_script_backend = kubejs  # curse.maven:kubejs-238086:3052392
+aui_script_backend = none
+```
+
+NekoJS 后端通过反射创建 GraalJS 上下文并绑定 AUI 的 `event`，因此主 JAR 不硬链接可选运行时；KubeJS 后端通过 1.12 的 Javax ScriptEngine 反射桥接。启动时若同时检测到两个模组，AUI 拒绝静默混用并要求 `-Dapricityui.scriptBackend=nekojs|kubejs`。没有后端时脚本安全降级为 no-op。
+
+Cleanroom 的 NekoJS uber JAR 在重映射后会丢失 `Multi-Release` manifest 标记。开发运行配置已在选择 `nekojs` 时自动加入 Graal 官方兼容开关：
+
+```text
+-Dpolyglotimpl.DisableMultiReleaseCheck=true
+```
+
+测试实例 `D:/Projects/sfr/Cleanroom-MMC-instance-0.3.4-alpha(2)` 已安装 NekoJS 1.1.0-preview3 和当前 AUI JAR；原 mods 已备份到 `mods.backup-20261009-before-aui-script`。实例启动器若未继承 Gradle 的开发参数，需要在其 Java 参数中加入上面的开关。
+
+开发验证结果：`build` 成功；`runClient` 在加入开关后完成 Cleanroom、NekoJS、Graal、AUI 的加载，NekoJS startup/server/client 示例脚本均执行，未再出现 Graal Multi-Release 崩溃。
 
 ## 阶段六：Mixin、AT 和可选能力
 
