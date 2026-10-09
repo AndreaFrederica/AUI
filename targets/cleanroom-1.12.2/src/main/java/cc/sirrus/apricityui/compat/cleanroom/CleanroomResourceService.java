@@ -51,12 +51,23 @@ public final class CleanroomResourceService implements AuiResourceService {
     public Optional<InputStream> openResource(String path) {
         IResourceManager resources = manager();
         ResourceLocation location = location(path);
-        if (resources == null || location == null) return Optional.empty();
-        try {
-            return Optional.of(resources.getResource(location).getInputStream());
-        } catch (Exception ignored) {
-            return Optional.empty();
+        if (resources != null && location != null) {
+            try {
+                return Optional.of(resources.getResource(location).getInputStream());
+            } catch (Exception ignored) {
+                // Cleanroom's development discoverer can expose classes and
+                // resources as separate roots without registering the latter
+                // in IResourceManager. Fall through to the classloader path;
+                // packaged jars still use the normal resource-pack route.
+            }
         }
+        String normalized = path == null ? "" : path.replace('\\', '/').replaceFirst("^/+", "");
+        if (!normalized.isEmpty()) {
+            InputStream direct = CleanroomResourceService.class.getClassLoader()
+                    .getResourceAsStream("assets/apricityui/" + normalized);
+            if (direct != null) return Optional.of(direct);
+        }
+        return Optional.empty();
     }
 
     @Override

@@ -22,6 +22,8 @@ public class JS {
             Pattern.compile("\\[\\.\\.\\.([A-Za-z_$][\\w$]*)\\]");
     private static final Pattern FUNCTION_HEAD_PATTERN =
             Pattern.compile("\\bfunction\\s+([A-Za-z_$][\\w$]*)\\s*\\(");
+    private static final Pattern LEGACY_DECLARATION_PATTERN =
+            Pattern.compile("\\b(?:let|const)\\b");
     /**
      * Rewrites browser-ish ES6 syntax (array spread, default parameters) into
      * ES5 forms understood by the Rhino engine bundled with KubeJS. Loader-independent;
@@ -32,6 +34,24 @@ public class JS {
         code = ARRAY_SPREAD_PATTERN.matcher(code).replaceAll("$1.slice()");
         code = rewriteDefaultParameters(code);
         return code;
+    }
+
+    /**
+     * Additional compatibility pass for the long-lived JavaScript global used
+     * by the Cleanroom 1.12 KubeJS backend.  Modern Rhino callers retain the
+     * lexical declaration semantics of {@link #rewriteForRhino(String)}.
+     */
+    public static String rewriteForLegacyKube(String code) {
+        code = rewriteForRhino(code);
+        if (code == null) return null;
+        // KubeJS 1.12 exposes one long-lived Nashorn/Rhino global scope.  AUI
+        // refreshes a document repeatedly, while page and bootstrap scripts
+        // use `let`/`const`; those declarations cannot be evaluated twice in
+        // the same scope.  `var` has the desired browser-like replaceable
+        // binding semantics and keeps subsequent refreshes isolated from
+        // stale lexical declarations.  This rewrite is used only by the
+        // legacy backend; NekoJS receives the original source unchanged.
+        return LEGACY_DECLARATION_PATTERN.matcher(code).replaceAll("var");
     }
 
     /**

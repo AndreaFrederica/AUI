@@ -36,6 +36,9 @@ dependencies {
     // Never refer to classes or methods in org.lwjglx
     // Remove this only when you know what you are doing
     compileOnly "com.cleanroommc:lwjglx:1.0.0"
+    // The compatibility façade is compiled for every variant but only the
+    // KubeJS selection carries the actual engine at runtime.
+    compileOnly 'org.openjdk.nashorn:nashorn-core:15.7'
 
     // Script runtimes are deliberately selectable.  They are kept outside the
     // ApricityUI jar and are only resolved for the backend requested by the
@@ -47,9 +50,12 @@ dependencies {
         modRuntimeOnly 'curse.maven:nekojs-1518701:9048721'
     } else if (auiScriptBackend == 'kubejs') {
         // Legacy KubeJS for Forge 1.12.2.  It uses the Javax/Nashorn API and
-        // is intentionally not mixed with NekoJS in one run.
+        // is intentionally not mixed with NekoJS in one run. Java 25 no longer
+        // ships the JDK Nashorn package, so include OpenJDK Nashorn plus the
+        // small jdk.nashorn compatibility façade in this target.
         modCompileOnly 'curse.maven:kubejs-238086:3052392'
         modRuntimeOnly 'curse.maven:kubejs-238086:3052392'
+        modRuntimeOnly 'org.openjdk.nashorn:nashorn-core:15.7'
     } else if (auiScriptBackend != 'none') {
         throw new GradleException("aui_script_backend must be one of: nekojs, kubejs, none (was '${auiScriptBackend}')")
     }
