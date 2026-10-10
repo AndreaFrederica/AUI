@@ -234,6 +234,108 @@ public final class ShorthandParser {
         }
     }
 
+    /** Applies the supported CSS {@code font} shorthand to its text longhands. */
+    public static void applyFont(Style style, String raw) {
+        String value = raw == null ? "" : raw.trim();
+        style.font = value.isEmpty() ? "unset" : value;
+        Map<String, String> expanded = expandFont(value);
+        if (expanded.isEmpty()) return;
+        style.fontStyle = expanded.getOrDefault("font-style", "normal");
+        style.fontWeight = expanded.getOrDefault("font-weight", "normal");
+        style.fontSize = expanded.getOrDefault("font-size", "16px");
+        style.lineHeight = expanded.getOrDefault("line-height", "normal");
+        style.fontFamily = expanded.getOrDefault("font-family", "unset");
+    }
+
+    /**
+     * Expands the CSS font shorthand.  The renderer only consumes style,
+     * weight, size, line-height and family, so unsupported variant/stretch
+     * components are accepted as optional pre-size tokens and ignored.
+     */
+    public static Map<String, String> expandFont(String raw) {
+        LinkedHashMap<String, String> result = new LinkedHashMap<>();
+        String value = raw == null ? "" : raw.trim();
+        if (value.isEmpty()) return result;
+        if (isCssWideKeyword(value)) {
+            result.put("font-style", value);
+            result.put("font-weight", value);
+            result.put("font-size", value);
+            result.put("line-height", value);
+            result.put("font-family", value);
+            return result;
+        }
+
+        List<String> tokens = CssString.splitTopLevelTokens(value);
+        if (tokens.isEmpty()) return result;
+        int index = 0;
+        String fontStyle = "normal";
+        String fontWeight = "normal";
+        // CSS permits style, variant, weight and stretch in any order before size.
+        while (index < tokens.size()) {
+            String token = tokens.get(index);
+            String lower = token.toLowerCase(Locale.ROOT);
+            if ("normal".equals(lower) || "italic".equals(lower) || "oblique".equals(lower)) {
+                fontStyle = token;
+                index++;
+                continue;
+            }
+            if (isFontWeightToken(lower)) {
+                fontWeight = token;
+                index++;
+                continue;
+            }
+            // font-variant / font-stretch are not rendered by AUI yet, but
+            // accepting their standard identifiers lets the supported fields
+            // continue to parse instead of discarding the whole declaration.
+            if (isFontVariantOrStretchToken(lower)) {
+                index++;
+                continue;
+            }
+            break;
+        }
+        if (index >= tokens.size() || !isFontSizeToken(tokens.get(index))) return result;
+        String fontSize = tokens.get(index++);
+        String lineHeight = "normal";
+        if (index < tokens.size() && "/".equals(tokens.get(index))) {
+            index++;
+            if (index >= tokens.size()) return new LinkedHashMap<>();
+            lineHeight = tokens.get(index++);
+        }
+        if (index >= tokens.size()) return new LinkedHashMap<>();
+        StringBuilder family = new StringBuilder();
+        for (; index < tokens.size(); index++) {
+            if (family.length() > 0) family.append(' ');
+            family.append(tokens.get(index));
+        }
+        if (family.isEmpty()) return new LinkedHashMap<>();
+
+        result.put("font-style", fontStyle);
+        result.put("font-weight", fontWeight);
+        result.put("font-size", fontSize);
+        result.put("line-height", lineHeight);
+        result.put("font-family", family.toString());
+        return result;
+    }
+
+    private static boolean isFontWeightToken(String token) {
+        if (token == null) return false;
+        if (Set.of("normal", "bold", "bolder", "lighter").contains(token)) return true;
+        return token.matches("[1-9]00");
+    }
+
+    private static boolean isFontVariantOrStretchToken(String token) {
+        return Set.of("small-caps", "all-small-caps", "petite-caps", "unicase", "titling-caps",
+                "ultra-condensed", "extra-condensed", "condensed", "semi-condensed", "semi-expanded",
+                "expanded", "extra-expanded", "ultra-expanded").contains(token);
+    }
+
+    private static boolean isFontSizeToken(String token) {
+        if (token == null || token.isBlank()) return false;
+        String value = token.trim().toLowerCase(Locale.ROOT);
+        if (value.startsWith("var(") || value.startsWith("calc(") || value.equals("0")) return true;
+        return value.matches("[-+]?(?:\\d*\\.)?\\d+(?:px|pt|pc|in|cm|mm|q|em|ex|ch|rem|vw|vh|vmin|vmax|%)");
+    }
+
     /**
      * {@link #applyBackground} 的结果按长写属性名返回，供层叠阶段做简写展开。
      *

@@ -467,6 +467,18 @@ public final class GlyphCache {
         int r = (argb >>> 16) & 0xFF;
         int g = (argb >>> 8) & 0xFF;
         int b = argb & 0xFF;
+        /*
+         * Glyph pages are coverage masks: the glyph is always rasterized in
+         * white and its alpha is the coverage.  Keep RGB white even when the
+         * source pixel is fully transparent.  With linear texture sampling a
+         * transparent black texel next to a partially covered white texel
+         * produces a dark fringe around small glyphs (especially on the
+         * Cleanroom 1.12 bridge).  White RGB + alpha is the correct
+         * straight-alpha representation for this texture.
+         */
+        if (a == 0) {
+            r = g = b = 0xFF;
+        }
         return (a << 24) | (b << 16) | (g << 8) | r;
     }
 
