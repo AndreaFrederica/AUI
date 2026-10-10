@@ -119,7 +119,16 @@ public class Base {
         try (Document.ContextScope ignored = Document.withContext(document)) {
             // screen 直接绘制单个文档时也必须刷新裁剪范围，避免窗口缩放后沿用旧尺寸。
             Mask.resetDepth();
-            drawFlatDocumentInContext(poseStack, document, overlayNodes);
+            // Screen documents use the same monotonically increasing paint depth as
+            // world windows. Without an accumulating cursor every flat paint node
+            // receives the same Z value, so the first opaque root background wins
+            // the depth test and hides the rest of the DOM.
+            pushDepthMode(true);
+            try {
+                drawFlatDocumentInContext(poseStack, document, overlayNodes);
+            } finally {
+                popDepthMode();
+            }
         }
     }
 
