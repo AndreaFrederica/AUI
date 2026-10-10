@@ -112,6 +112,8 @@ public class Style extends AbstractMap<String, String> implements Cloneable {
     public String fontFamily = "unset";
     public String fontWeight = "unset";
     public String fontStyle = "unset";
+    /** CSS font shorthand source value; longhands are expanded by ShorthandParser. */
+    public String font = "unset";
     public String textStroke = "unset";
     public String textShadow = "unset";
     public String textDecoration = "unset";
@@ -438,7 +440,7 @@ public class Style extends AbstractMap<String, String> implements Cloneable {
      */
     private static final Set<String> SHORTHAND_PROPERTIES = Set.of(
             "background", "mask", "flex", "gap", "inset", "margin", "padding", "border",
-            "border-width", "border-color", "animation", "rotate", "overflow", "visibility"
+            "border-width", "border-color", "animation", "rotate", "overflow", "visibility", "font"
     );
 
     private void applyStylesheet(Map<String, CSS.Declaration> stylesheet, boolean important) {
@@ -536,6 +538,10 @@ public class Style extends AbstractMap<String, String> implements Cloneable {
         }
         if ("rotate".equals(styleName)) {
             ShorthandParser.applyRotate(this, value);
+            return;
+        }
+        if ("font".equals(styleName)) {
+            ShorthandParser.applyFont(this, value);
             return;
         }
         if ("overflow".equals(styleName)) {

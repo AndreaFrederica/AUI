@@ -753,6 +753,10 @@ public class CSS {
                     ShorthandParser.expandBackground(declaration.value()).forEach((longhand, value) ->
                             putDeclaration(properties, longhand, new Declaration(value, declaration.important())));
                 }
+                case "font" -> {
+                    ShorthandParser.expandFont(declaration.value()).forEach((longhand, value) ->
+                            putDeclaration(properties, longhand, new Declaration(value, declaration.important())));
+                }
                 default -> {
                 }
             }
