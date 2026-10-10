@@ -103,6 +103,14 @@ unimined.minecraft {
             if (propertyString('aui_script_backend').equalsIgnoreCase('nekojs')) {
                 systemProperty('polyglotimpl.DisableMultiReleaseCheck', 'true')
             }
+            // Keep the smoke-test entry point usable from the same Gradle
+            // command as the backend selector.  Java system properties passed
+            // to Gradle itself are not forwarded by every wrapper/runtime, so
+            // expose the documented -Paui_test_screen form as a run property.
+            def auiTestScreen = project.findProperty('aui_test_screen')?.toString()
+            if (auiTestScreen != null && !auiTestScreen.trim().isEmpty()) {
+                systemProperty('apricityui.testScreen', auiTestScreen.trim())
+            }
             if (propertyBool('enable_foundation_debug')) {
                 systemProperty("foundation.dump", "true")
                 systemProperty("foundation.verbose", "true")
