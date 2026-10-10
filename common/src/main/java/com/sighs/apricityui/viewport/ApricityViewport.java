@@ -109,8 +109,21 @@ public record ApricityViewport(
                                                      Map<String, String> options) {
         GLFWVidMode videoMode = resolveVideoMode(window);
         double cssScale = browserCssScale(window);
-        int physicalWidth = videoMode == null ? DEFAULT_BROWSER_WIDTH : videoMode.width();
-        int physicalHeight = videoMode == null ? DEFAULT_BROWSER_HEIGHT : videoMode.height();
+        // Cleanroom 1.12 exposes the compatibility Window without a GLFW
+        // monitor handle.  Falling back to a desktop-sized 1920 CSS viewport
+        // in that case makes every screen element get multiplied by the
+        // framebuffer/GUI ratio a second time (for example 16px text becomes
+        // roughly 3px at GUI scale 2).  Its GUI dimensions are already the
+        // live, resize-aware logical viewport, so use them when no monitor is
+        // available.  Native targets still use the monitor mode and retain
+        // the fixed browser viewport contract.
+        boolean compatibilityWindow = window != null && window.getWindow() == 0L;
+        int physicalWidth = videoMode == null
+                ? (compatibilityWindow ? window.getGuiScaledWidth() : DEFAULT_BROWSER_WIDTH)
+                : videoMode.width();
+        int physicalHeight = videoMode == null
+                ? (compatibilityWindow ? window.getGuiScaledHeight() : DEFAULT_BROWSER_HEIGHT)
+                : videoMode.height();
         int width = Math.max(1, parseInt(options.get("width"), (int) Math.round(physicalWidth / cssScale)));
         int height = Math.max(1, parseInt(options.get("height"), (int) Math.round(physicalHeight / cssScale)));
         float renderScale = (float) Math.max(0.0001d, cssScale / actualGuiScale);

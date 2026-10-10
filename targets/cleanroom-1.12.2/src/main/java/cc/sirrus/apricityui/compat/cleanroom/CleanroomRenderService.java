@@ -410,6 +410,8 @@ public final class CleanroomRenderService implements AuiRenderService {
     @Override public boolean isOnRenderThread() { return true; }
     @Override public void recordRenderCall(Runnable task) { if (task != null) task.run(); }
     @Override public String getGLVersionString() { return GL11.glGetString(GL11.GL_VERSION); }
+    /** Cleanroom's main 1.12 framebuffer is depth-only; use scissor clips instead. */
+    @Override public boolean currentTargetHasStencil() { return false; }
     @Override public void flushSharedBuffers() { }
     @Override public void setShaderUniformFloat(String name, float value) { uniform(name, location -> GL20.glUniform1f(location, value)); }
     @Override public void setShaderUniform2f(String name, float a, float b) { uniform(name, location -> GL20.glUniform2f(location, a, b)); }
