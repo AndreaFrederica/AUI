@@ -1,6 +1,7 @@
 package com.sighs.apricityui.viewport;
 
 import com.mojang.blaze3d.platform.Window;
+import com.sighs.apricityui.layout.Size;
 import com.sighs.apricityui.parser.HTML;
 import com.sighs.apricityui.spi.AuiServices;
 import org.lwjgl.glfw.GLFW;
@@ -109,20 +110,17 @@ public record ApricityViewport(
                                                      Map<String, String> options) {
         GLFWVidMode videoMode = resolveVideoMode(window);
         double cssScale = browserCssScale(window);
-        // Cleanroom 1.12 exposes the compatibility Window without a GLFW
-        // monitor handle.  Falling back to a desktop-sized 1920 CSS viewport
-        // in that case makes every screen element get multiplied by the
-        // framebuffer/GUI ratio a second time (for example 16px text becomes
-        // roughly 3px at GUI scale 2).  Its GUI dimensions are already the
-        // live, resize-aware logical viewport, so use them when no monitor is
-        // available.  Native targets still use the monitor mode and retain
-        // the fixed browser viewport contract.
-        boolean compatibilityWindow = window != null && window.getWindow() == 0L;
+        // Legacy adapters may not expose a GLFW monitor handle.  They provide
+        // their live GUI viewport through the client SPI instead of requiring
+        // common code to identify a loader by inspecting a synthetic Window.
+        Size adapterReference = AuiServices.client().getBrowserViewportSize();
         int physicalWidth = videoMode == null
-                ? (compatibilityWindow ? window.getGuiScaledWidth() : DEFAULT_BROWSER_WIDTH)
+                ? (adapterReference == null ? DEFAULT_BROWSER_WIDTH :
+                Math.max(1, (int) Math.round(adapterReference.width())))
                 : videoMode.width();
         int physicalHeight = videoMode == null
-                ? (compatibilityWindow ? window.getGuiScaledHeight() : DEFAULT_BROWSER_HEIGHT)
+                ? (adapterReference == null ? DEFAULT_BROWSER_HEIGHT :
+                Math.max(1, (int) Math.round(adapterReference.height())))
                 : videoMode.height();
         int width = Math.max(1, parseInt(options.get("width"), (int) Math.round(physicalWidth / cssScale)));
         int height = Math.max(1, parseInt(options.get("height"), (int) Math.round(physicalHeight / cssScale)));

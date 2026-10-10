@@ -123,6 +123,20 @@ public interface AuiClientService {
         return null;
     }
 
+    /**
+     * Returns a platform-provided browser reference viewport when the target
+     * cannot expose a GLFW monitor/window handle, or {@code null} when the
+     * generic monitor-based viewport resolution should be used.
+     *
+     * <p>Legacy targets can implement this from their adapter using the
+     * current GUI-scaled dimensions.  Keeping this capability here avoids
+     * making common viewport code identify a loader by inspecting a synthetic
+     * compatibility {@link Window}.</p>
+     */
+    default Size getBrowserViewportSize() {
+        return null;
+    }
+
     default String getClipboardText() {
         return "";
     }
