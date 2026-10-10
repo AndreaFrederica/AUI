@@ -336,6 +336,19 @@ public final class CleanroomClientService implements AuiClientService {
                 resolution(mc) == null ? 1.0 : (double) mc.displayWidth / Math.max(1, getScaledWidth()));
     }
 
+    /**
+     * Supplies the live logical viewport used by the common browser mode.
+     * Cleanroom's B3D compatibility Window has no GLFW monitor handle, so the
+     * adapter is the authoritative source for resize-aware dimensions.
+     */
+    @Override
+    public Size getBrowserViewportSize() {
+        ScaledResolution scaled = resolution(minecraft());
+        return scaled == null
+                ? null
+                : new Size(scaled.getScaledWidth(), scaled.getScaledHeight());
+    }
+
     @Override
     public String getClipboardText() {
         Minecraft mc = minecraft();
