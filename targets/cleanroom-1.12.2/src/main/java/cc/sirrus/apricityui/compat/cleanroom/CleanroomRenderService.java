@@ -16,11 +16,14 @@ import org.lwjgl.opengl.GL14;
 import org.lwjgl.opengl.GL13;
 import org.lwjgl.opengl.GL30;
 import org.lwjgl.opengl.GL20;
+import org.lwjgl.opengl.GL15;
 
 import java.io.InputStream;
 import java.nio.FloatBuffer;
 import java.nio.charset.StandardCharsets;
 import java.util.Map;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.concurrent.ConcurrentHashMap;
 import org.lwjgl.BufferUtils;
 
@@ -45,12 +48,19 @@ public final class CleanroomRenderService implements AuiRenderService {
     private volatile ShaderHandle positionColorShader;
     private boolean positionColorShaderAttempted;
     private boolean positionColorDiagnosticLogged;
+    private boolean vertexDiagnosticLogged;
     private final FloatBuffer matrixBuffer = BufferUtils.createFloatBuffer(16);
     private CleanroomRenderService() { }
 
     private static final class Mesh {
         final BufferBuilder buffer;
-        Mesh(BufferBuilder buffer) { this.buffer = buffer; }
+        final int glMode;
+        final MeshFormat format;
+        final List<float[]> vertices = new ArrayList<>();
+        final List<int[]> colors = new ArrayList<>();
+        Mesh(BufferBuilder buffer, int glMode, MeshFormat format) {
+            this.buffer = buffer; this.glMode = glMode; this.format = format;
+        }
     }
 
     @Override public void setProjectionMatrix(Matrix4f matrix) {
@@ -63,12 +73,12 @@ public final class CleanroomRenderService implements AuiRenderService {
     @Override public void enableBlend() { GL11.glEnable(GL11.GL_BLEND); }
     @Override public void setBlendFunc(int srcFactor, int dstFactor) { GL11.glBlendFunc(srcFactor, dstFactor); }
     @Override public MeshBuilder beginMesh(MeshMode mode, MeshFormat format) {
-        BufferBuilder buffer = Tessellator.getInstance().getBuffer();
         int glMode = mode == MeshMode.QUADS ? GL11.GL_QUADS : GL11.GL_TRIANGLES;
-        VertexFormat vertexFormat = format == MeshFormat.POSITION_TEX ? DefaultVertexFormats.POSITION_TEX
-                : format == MeshFormat.POSITION ? DefaultVertexFormats.POSITION : DefaultVertexFormats.POSITION_COLOR;
-        buffer.begin(glMode, vertexFormat);
-        return MeshBuilder.of(new Mesh(buffer));
+        BufferBuilder buffer = Tessellator.getInstance().getBuffer();
+        if (format == MeshFormat.POSITION_TEX) {
+            buffer.begin(glMode, DefaultVertexFormats.POSITION_TEX);
+        }
+        return MeshBuilder.of(new Mesh(buffer, glMode, format));
     }
     private static float[] transform(Matrix4f matrix, float x, float y, float z) {
         if (matrix == null) return new float[]{x, y, z};
@@ -77,10 +87,26 @@ public final class CleanroomRenderService implements AuiRenderService {
     }
     @Override public void emitVertex(Object mesh, Matrix4f mat, float x, float y, float z, int r, int g, int b, int a) {
         Mesh m = (Mesh) mesh; float[] p = transform(mat, x, y, z);
-        m.buffer.pos(p[0], p[1], p[2]).color(r, g, b, a).endVertex();
+        if (!vertexDiagnosticLogged) {
+            vertexDiagnosticLogged = true;
+            com.sighs.apricityui.ApricityUI.LOGGER.info(
+                    "[AUI Cleanroom] first vertex input=({}, {}, {}) transformed=({}, {}, {}) color=({}, {}, {}, {}) matrix={}",
+                    x, y, z, p[0], p[1], p[2], r, g, b, a, mat);
+        }
+        if (m.format == MeshFormat.POSITION_COLOR || m.format == MeshFormat.POSITION) {
+            m.vertices.add(p);
+            m.colors.add(new int[]{r, g, b, a});
+        } else {
+            m.buffer.pos(p[0], p[1], p[2]).color(r, g, b, a).endVertex();
+        }
     }
     @Override public void submitMesh(Object mesh) {
-        Tessellator.getInstance().draw();
+        Mesh m = mesh instanceof Mesh value ? value : null;
+        if (m != null && (m.format == MeshFormat.POSITION_COLOR || m.format == MeshFormat.POSITION)) {
+            drawModernPositionColor(m);
+        } else {
+            Tessellator.getInstance().draw();
+        }
         // BufferBuilder's POSITION_COLOR pass is owned by AUI only.  Restore
         // Minecraft's fixed/texture pipeline before font and texture batches;
         // leaving this program bound makes every subsequent textured draw use
@@ -103,6 +129,34 @@ public final class CleanroomRenderService implements AuiRenderService {
                 com.sighs.apricityui.ApricityUI.LOGGER.debug("[AUI Cleanroom] mesh diagnostic failed", error);
             }
         }
+    }
+
+    private void drawModernPositionColor(Mesh mesh) {
+        if (mesh.vertices.isEmpty()) return;
+        setPositionColorShader();
+        if (activeShader == null) return;
+        java.nio.FloatBuffer data = BufferUtils.createFloatBuffer(mesh.vertices.size() * 7);
+        for (int i = 0; i < mesh.vertices.size(); i++) {
+            float[] p = mesh.vertices.get(i); int[] c = mesh.colors.get(i);
+            data.put(p[0]).put(p[1]).put(p[2]);
+            data.put(c[0] / 255.0f).put(c[1] / 255.0f).put(c[2] / 255.0f).put(c[3] / 255.0f);
+        }
+        data.flip();
+        int vbo = GL15.glGenBuffers();
+        GL15.glBindBuffer(GL15.GL_ARRAY_BUFFER, vbo);
+        GL15.glBufferData(GL15.GL_ARRAY_BUFFER, data, GL15.GL_STREAM_DRAW);
+        int stride = 7 * Float.BYTES;
+        GL20.glEnableVertexAttribArray(0);
+        GL20.glVertexAttribPointer(0, 3, GL11.GL_FLOAT, false, stride, 0L);
+        GL20.glEnableVertexAttribArray(1);
+        GL20.glVertexAttribPointer(1, 4, GL11.GL_FLOAT, false, stride, 3L * Float.BYTES);
+        GL11.glDrawArrays(mesh.glMode, 0, mesh.vertices.size());
+        GL20.glDisableVertexAttribArray(1);
+        GL20.glDisableVertexAttribArray(0);
+        GL15.glBindBuffer(GL15.GL_ARRAY_BUFFER, 0);
+        GL15.glDeleteBuffers(vbo);
+        GL20.glUseProgram(0);
+        activeShader = null;
     }
     @Override public Object beginTextureBatch(RenderHandle render) {
         ResourceLocation location = render == null ? null : render.as();
@@ -379,7 +433,8 @@ public final class CleanroomRenderService implements AuiRenderService {
         if (location < 0) return;
         matrixBuffer.clear();
         projection.get(matrixBuffer);
-        matrixBuffer.flip();
+        // JOML writes absolute buffer indices without advancing position.
+        // flip() here would upload zero matrices and leave ProjMat all zero.
         GL20.glUniformMatrix4(location, false, matrixBuffer);
     }
 
@@ -446,7 +501,7 @@ public final class CleanroomRenderService implements AuiRenderService {
     private ShaderHandle compilePositionColorShader() {
         try {
             int vertexId = compile(GL20.GL_VERTEX_SHADER,
-                    "#version 120\nattribute vec3 Position;\nattribute vec4 Color;\nvarying vec4 vertexColor;\nvoid main(){ gl_Position = gl_ModelViewProjectionMatrix * vec4(Position, 1.0); vertexColor = Color; }\n");
+                    "#version 120\nattribute vec3 Position;\nattribute vec4 Color;\nuniform mat4 ProjMat;\nvarying vec4 vertexColor;\nvoid main(){ gl_Position = ProjMat * vec4(Position, 1.0); vertexColor = Color; }\n");
             int fragmentId = compile(GL20.GL_FRAGMENT_SHADER,
                     "#version 120\nvarying vec4 vertexColor;\nvoid main(){ gl_FragColor = vertexColor; }\n");
             int program = GL20.glCreateProgram();

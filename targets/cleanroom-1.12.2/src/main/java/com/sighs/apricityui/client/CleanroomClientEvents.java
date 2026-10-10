@@ -278,7 +278,7 @@ public final class CleanroomClientEvents {
     private static Matrix4f readCurrentMatrix(int matrixName) {
         MATRIX.clear();
         GL11.glGetFloat(matrixName, MATRIX);
-        MATRIX.flip();
+        // LWJGL fills the buffer without advancing its position.
         return new Matrix4f().set(MATRIX);
     }
 }
