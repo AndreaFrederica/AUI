@@ -74,9 +74,12 @@ public class ApricityContainerMenu extends Container {
             EntityPlayer contextPlayer = owner != null ? owner : (playerInventory == null ? null : playerInventory.player);
             IInventory inventory = contextPlayer == null ? null : resolveInventory(contextPlayer, declaration, argsById);
             if (declaration.capacity() <= 0) continue;
-            if (inventory == null) inventory = new InventoryBasic(declaration.id(), false, declaration.capacity());
+            int slotCount = declaration.capacity();
+            // Keep the server's slot indices even if the client tile is not ready.
+            if (inventory == null || (owner == null && inventory.getSizeInventory() < slotCount)) {
+                inventory = new InventoryBasic(declaration.id(), false, slotCount);
+            }
             customInventories.add(inventory);
-            int slotCount = Math.min(declaration.capacity(), inventory.getSizeInventory());
             for (int index = 0; index < slotCount; index++) {
                 int column = index % 9;
                 int row = index / 9;
@@ -178,9 +181,12 @@ public class ApricityContainerMenu extends Container {
         for (ContainerDeclaration declaration : input) {
             if (declaration == null) continue;
             int capacity = declaration.capacity();
-            if (declaration.bindType() != ContainerBindType.PLAYER && capacity <= 0) {
+            if (declaration.bindType() != ContainerBindType.PLAYER) {
                 IInventory inventory = resolveInventory(owner, declaration, argsById);
-                if (inventory != null) capacity = inventory.getSizeInventory();
+                if (inventory != null) {
+                    int available = inventory.getSizeInventory();
+                    capacity = capacity <= 0 ? available : Math.min(capacity, available);
+                }
             }
             result.add(new ContainerDeclaration(declaration.id(), declaration.bindType(), capacity, declaration.primary()));
         }
