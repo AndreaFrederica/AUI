@@ -194,6 +194,7 @@ public class ClientLoader extends Loader {
         synchronized (STATIC_RESOURCE_CACHE_LOCK) {
             cachedFinalStaticResources = null;
         }
+        Loader.invalidateGlobalJSCache();
     }
 
     public static String readGlobalCSS() {

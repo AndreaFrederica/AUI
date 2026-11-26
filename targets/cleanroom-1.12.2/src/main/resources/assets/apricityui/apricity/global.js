@@ -454,9 +454,17 @@ function __auiInstallValueBridge(target, name, getter, setter) {
 // install browser properties on that facade. Method reads are bound back to the
 // Java object, which preserves identity-sensitive APIs such as form ownership.
 let __auiHostFacades = typeof WeakMap === 'function' ? new WeakMap() : null;
+let __auiHostFacadePairs = [];
 function __auiHostFacade(host) {
   if (!host || !__auiHostFacades) return host;
-  let cached = __auiHostFacades.get(host);
+  let cached;
+  try { cached = __auiHostFacades.get(host); }
+  catch (e) {
+    for (let i = 0; i < __auiHostFacadePairs.length; i++) {
+      if (__auiHostFacadePairs[i][0] === host) return __auiHostFacadePairs[i][1];
+    }
+    cached = null;
+  }
   if (cached) return cached;
   let facade = {};
   Object.defineProperty(facade, '__auiHostObject', { value: host, configurable: false });
@@ -477,7 +485,8 @@ function __auiHostFacade(host) {
       try { return key in host; } catch (e) { return false; }
     }
   }) : facade;
-  __auiHostFacades.set(host, proxy);
+  try { __auiHostFacades.set(host, proxy); }
+  catch (e) { __auiHostFacadePairs.push([host, proxy]); }
   return proxy;
 }
 

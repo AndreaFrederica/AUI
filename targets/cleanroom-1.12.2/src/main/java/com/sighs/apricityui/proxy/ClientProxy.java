@@ -1,12 +1,17 @@
 package com.sighs.apricityui.proxy;
 
 import cc.sirrus.apricityui.compat.cleanroom.CleanroomClientService;
+import cc.sirrus.apricityui.compat.cleanroom.CleanroomConfigService;
+import cc.sirrus.apricityui.compat.cleanroom.CleanroomDocumentExpander;
 import cc.sirrus.apricityui.compat.cleanroom.CleanroomResourceService;
 import cc.sirrus.apricityui.compat.cleanroom.CleanroomRenderService;
 import cc.sirrus.apricityui.compat.cleanroom.CleanroomItemRenderService;
 import cc.sirrus.apricityui.compat.cleanroom.CleanroomNetworkService;
 import cc.sirrus.apricityui.compat.cleanroom.CleanroomAudioService;
+import cc.sirrus.apricityui.compat.cleanroom.CleanroomKeyService;
 import cc.sirrus.apricityui.compat.cleanroom.CleanroomScriptService;
+import com.sighs.apricityui.ApricityUI;
+import com.sighs.apricityui.dev.DevToolsLogBridge;
 import com.sighs.apricityui.spi.AuiServices;
 import com.sighs.apricityui.webview.NativeWebViewService;
 import com.sighs.apricityui.registry.ApricityUIRegistry;
@@ -21,6 +26,8 @@ public class ClientProxy implements IProxy{
     @Override
     public void preInit(FMLPreInitializationEvent event) {
         AuiServices.setClient(CleanroomClientService.INSTANCE);
+        AuiServices.setConfig(CleanroomConfigService.INSTANCE);
+        AuiServices.setExpander(CleanroomDocumentExpander.INSTANCE);
         AuiServices.setResources(CleanroomResourceService.INSTANCE);
         AuiServices.setRender(CleanroomRenderService.INSTANCE);
         AuiServices.setItems(CleanroomItemRenderService.INSTANCE);
@@ -34,6 +41,9 @@ public class ClientProxy implements IProxy{
             }
         }));
         AuiServices.setNetwork(CleanroomNetworkService.INSTANCE);
+        AuiServices.setKeys(CleanroomKeyService.INSTANCE);
+        CleanroomKeyService.INSTANCE.register();
+        DevToolsLogBridge.install(ApricityUI.LOGGER);
         // Cleanroom ships the same optional Windows x64 WebView2 JNI backend as
         // the other targets.  Registration is safe on servers and unsupported
         // platforms because NativeWebViewService reports availability lazily.

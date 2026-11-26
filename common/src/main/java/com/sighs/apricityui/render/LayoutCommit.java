@@ -179,6 +179,16 @@ public final class LayoutCommit {
         TransformFrameCache.disableCommittedFallback();
         LayoutMeasureCache.begin();
         try {
+            // Re-seed this frame's caches with elements already committed by earlier slices
+            // of this same generation so descendants do not recompute ancestor geometry on every slice.
+            if (!visited.isEmpty()) {
+                for (Element committed : visited) {
+                    Rect cachedRect = committed.getRenderer().getCommittedRectIfValid();
+                    if (cachedRect != null) RectFrameCache.put(committed, cachedRect);
+                    Matrix4f cachedTransform = committed.getRenderer().getCommittedWorldTransformIfValid();
+                    if (cachedTransform != null) TransformFrameCache.put(committed, cachedTransform);
+                }
+            }
             for (; cursor < paintList.size(); cursor++) {
                 Element target = RenderNode.getRenderNodeTarget(paintList.get(cursor));
                 if (target == null || target.document != document || !visited.add(target)) continue;

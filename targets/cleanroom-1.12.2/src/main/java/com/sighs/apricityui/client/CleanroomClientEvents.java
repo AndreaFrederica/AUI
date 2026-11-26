@@ -6,18 +6,28 @@ import cc.sirrus.apricityui.compat.cleanroom.CleanroomRenderService;
 import cc.sirrus.apricityui.compat.cleanroom.CleanroomScriptService;
 import com.mojang.blaze3d.vertex.PoseStack;
 import com.sighs.apricityui.ApricityUI;
+import com.sighs.apricityui.client.CursorReleaseController;
+import com.sighs.apricityui.dev.DevTools;
+import com.sighs.apricityui.dev.debug.ExternalDebugServer;
 import com.sighs.apricityui.dev.resource.ResourcePreviewDialog;
+import com.sighs.apricityui.event.MouseEvent;
 import com.sighs.apricityui.init.Document;
+import com.sighs.apricityui.layout.Position;
 import com.sighs.apricityui.screen.AuiLinkedScreen;
 import com.sighs.apricityui.render.Base;
 import com.sighs.apricityui.render.DocumentLayerOrder;
+import com.sighs.apricityui.render.FrameTimingHud;
 import com.sighs.apricityui.render.Operation;
 import com.sighs.apricityui.style.Cursor;
 import com.sighs.apricityui.spi.AuiServices;
 import com.sighs.apricityui.task.FrameScheduler;
 import com.sighs.apricityui.task.MouseMoveEngine;
+import com.sighs.apricityui.ui.Tooltip;
 import com.sighs.apricityui.world.WorldWindow;
 import net.minecraft.client.Minecraft;
+import net.minecraft.client.gui.Gui;
+import net.minecraft.client.renderer.GlStateManager;
+import net.minecraftforge.client.event.GuiScreenEvent;
 import net.minecraftforge.client.event.RenderGameOverlayEvent;
 import net.minecraftforge.client.event.RenderWorldLastEvent;
 import net.minecraftforge.common.MinecraftForge;
@@ -85,7 +95,13 @@ public final class CleanroomClientEvents {
         // failure in the frame scheduler or in the viewport sync below must not
         // be able to starve the first resource load / smoke page forever.
         runDeferredBootstrap();
+        CursorReleaseController.tick();
+        if (AuiServices.config().consumeClientReloadPending()) {
+            ExternalDebugServer.reconcileConfiguration();
+        }
+        ExternalDebugServer.tick();
         FrameScheduler.tick();
+        DevTools.drainLogs();
         Minecraft mc = Minecraft.getMinecraft();
         if (mc == null) return;
         int width = mc.displayWidth;
@@ -208,17 +224,16 @@ public final class CleanroomClientEvents {
         if (event.getType() != RenderGameOverlayEvent.ElementType.ALL) return;
         Minecraft mc = Minecraft.getMinecraft();
         if (mc == null || mc.gameSettings.hideGUI) return;
+        if (mc.currentScreen != null) return;
 
+        DevTools.handleInspectMouseMove(CleanroomClientService.INSTANCE.getMousePositionDirectly());
+        FrameTimingHud.beginFrame();
         PoseStack pose = new PoseStack();
         GL11.glPushAttrib(GL11.GL_ALL_ATTRIB_BITS);
         try {
             Document screenDocument = AuiServices.client().getCurrentScreenDocument();
             for (Document document : DocumentLayerOrder.backToFront(Document.getAll())) {
                 if (document == null || document == screenDocument || document.inWorld || document.isManuallyRendered()) continue;
-                // A vanilla screen gets the same persistent overlay pass as the
-                // modern ScreenEvent bridge. AUI-owned screens draw their linked
-                // document themselves and are excluded above.
-                if (mc.currentScreen != null && !document.isReloadPersistent()) continue;
                 Base.drawOverlayDocument(pose, document);
                 ResourcePreviewDialog.draw(pose, document);
             }
@@ -228,19 +243,135 @@ public final class CleanroomClientEvents {
         } finally {
             GL11.glPopAttrib();
             CleanroomRenderService.INSTANCE.syncCachedStateFromGl();
+            FrameTimingHud.endFrame();
+            drawFrameTimingHud();
+        }
+    }
+
+    @SubscribeEvent
+    public void drawGuiScreenPost(GuiScreenEvent.DrawScreenEvent.Post event) {
+        if (event.getGui() instanceof AuiLinkedScreen) return;
+        Position mousePos = new Position(event.getMouseX(), event.getMouseY());
+        Tooltip.moveActiveFromScreen(mousePos);
+        DevTools.handleInspectMouseMove(mousePos);
+
+        boolean hasPersistent = false;
+        for (Document document : Document.getAll()) {
+            if (document != null && !document.inWorld && !document.isManuallyRendered() && document.isReloadPersistent()) {
+                hasPersistent = true;
+                break;
+            }
+        }
+        if (!hasPersistent && !FrameTimingHud.isEnabled()) return;
+
+        FrameTimingHud.beginFrame();
+        PoseStack pose = new PoseStack();
+        GL11.glPushAttrib(GL11.GL_ALL_ATTRIB_BITS);
+        try {
+            drawPersistentScreenDocuments(pose, null);
+            Cursor.drawPseudoCursor(pose);
+        } catch (Throwable error) {
+            ApricityUI.LOGGER.warn("[AUI Cleanroom] screen overlay render failed", error);
+        } finally {
+            GL11.glPopAttrib();
+            CleanroomRenderService.INSTANCE.syncCachedStateFromGl();
+            FrameTimingHud.endFrame();
+            drawFrameTimingHud();
+        }
+    }
+
+    public static void drawPersistentScreenDocuments(PoseStack pose, Document excludedDocument) {
+        for (Document document : DocumentLayerOrder.backToFront(Document.getAll())) {
+            if (document == null || document == excludedDocument || document.inWorld
+                    || document.isManuallyRendered() || !document.isReloadPersistent()) {
+                continue;
+            }
+            Base.drawOverlayDocument(pose, document);
+            ResourcePreviewDialog.draw(pose, document);
+        }
+    }
+
+    public static void drawFrameTimingHud() {
+        if (!FrameTimingHud.isEnabled()) return;
+        String text = FrameTimingHud.frameStatsText();
+        if (text == null) return;
+        Minecraft mc = Minecraft.getMinecraft();
+        if (mc == null || mc.fontRenderer == null) return;
+        int width = mc.fontRenderer.getStringWidth(text) + 8;
+        GlStateManager.pushMatrix();
+        try {
+            GlStateManager.translate(0.0f, 0.0f, 900.0f);
+            Gui.drawRect(2, 2, 2 + width, 16, 0xCC000000);
+            mc.fontRenderer.drawString(text, 6, 5, 0xFF00FF66, false);
+        } finally {
+            GlStateManager.color(1.0f, 1.0f, 1.0f, 1.0f);
+            GlStateManager.popMatrix();
+        }
+    }
+
+    @SubscribeEvent
+    public void guiMouseInputPre(GuiScreenEvent.MouseInputEvent.Pre event) {
+        if (event.getGui() instanceof AuiLinkedScreen) return;
+        int wheel = Mouse.getEventDWheel();
+        if (wheel != 0 && Operation.scroll(wheel / 120.0d)) {
+            event.setCanceled(true);
+            return;
+        }
+        int button = Mouse.getEventButton();
+        if (button >= 0) {
+            boolean consumed = Mouse.getEventButtonState()
+                    ? Operation.onMouseDown(button)
+                    : Operation.onMouseUp(button);
+            if (consumed) {
+                event.setCanceled(true);
+            }
+        }
+    }
+
+    @SubscribeEvent
+    public void guiKeyboardInputPre(GuiScreenEvent.KeyboardInputEvent.Pre event) {
+        if (event.getGui() instanceof AuiLinkedScreen) return;
+        int key = CleanroomInput.toGlfwKey(Keyboard.getEventKey());
+        int modifiers = CleanroomInput.currentGlfwModifiers();
+        boolean pressed = Keyboard.getEventKeyState();
+        boolean consumed = false;
+        if (key >= 0) {
+            int action = pressed ? org.lwjgl.glfw.GLFW.GLFW_PRESS : org.lwjgl.glfw.GLFW.GLFW_RELEASE;
+            consumed = Operation.handleKeyInput(key, 0, action, modifiers, Keyboard.isRepeatEvent(),
+                    com.sighs.apricityui.event.KeyEvent.Source.SCREEN_EVENT);
+        }
+        if (pressed) {
+            char character = Keyboard.getEventCharacter();
+            if (CleanroomInput.isPrintableChar(character, modifiers)) {
+                consumed |= Operation.onCharTyped(character);
+            }
+        }
+        if (consumed) {
+            event.setCanceled(true);
         }
     }
 
     @SubscribeEvent
     public void mouseInput(InputEvent.MouseInputEvent event) {
         Minecraft mc = Minecraft.getMinecraft();
-        if (mc == null || mc.currentScreen instanceof AuiLinkedScreen) return;
+        if (mc == null || mc.currentScreen != null) return;
         int button = Mouse.getEventButton();
         if (button < 0) return;
-        boolean consumed = Mouse.getEventButtonState()
-                ? Operation.onMouseDown(button)
-                : Operation.onMouseUp(button);
-        if (consumed) {
+        boolean pressed = Mouse.getEventButtonState();
+        boolean consumed = pressed ? Operation.onMouseDown(button) : Operation.onMouseUp(button);
+        if (Operation.wasDevToolsInspectConsumed()) {
+            event.setResult(net.minecraftforge.fml.common.eventhandler.Event.Result.DENY);
+            return;
+        }
+        for (WorldWindow window : new ArrayList<>(WorldWindow.windows)) {
+            Position realPos = window.getRealPos();
+            if (realPos != null) {
+                MouseEvent mouseEvent = new MouseEvent(pressed ? "mousedown" : "mouseup", realPos, button);
+                MouseEvent.tiggerEvent(mouseEvent, window.document);
+                consumed |= mouseEvent.isNativeConsumed();
+            }
+        }
+        if (consumed || CursorReleaseController.isActive()) {
             // InputEvent.MouseInputEvent is not cancellable in Forge 1.12. The
             // AUI event is still dispatched before vanilla handles the same
             // physical input, matching the loader's normal event ordering.
@@ -251,9 +382,23 @@ public final class CleanroomClientEvents {
     @SubscribeEvent
     public void mouseWheel(InputEvent.MouseInputEvent event) {
         Minecraft mc = Minecraft.getMinecraft();
-        if (mc == null || mc.currentScreen instanceof AuiLinkedScreen) return;
+        if (mc == null || mc.currentScreen != null) return;
         int wheel = Mouse.getEventDWheel();
-        if (wheel != 0 && Operation.scroll(wheel)) {
+        if (wheel == 0) return;
+        double delta = wheel / 120.0d;
+        boolean consumed = Operation.scroll(delta);
+        for (WorldWindow window : new ArrayList<>(WorldWindow.windows)) {
+            Position realPos = window.getRealPos();
+            if (realPos != null) {
+                MouseEvent mouseEvent = new MouseEvent("wheel", realPos);
+                mouseEvent.deltaY = -delta * 50;
+                mouseEvent.scrollDelta = mouseEvent.deltaY;
+                mouseEvent.cancelable = true;
+                MouseEvent.tiggerEvent(mouseEvent, window.document);
+                consumed |= mouseEvent.isNativeConsumed();
+            }
+        }
+        if (consumed || CursorReleaseController.isActive()) {
             event.setResult(net.minecraftforge.fml.common.eventhandler.Event.Result.DENY);
         }
     }
@@ -261,17 +406,20 @@ public final class CleanroomClientEvents {
     @SubscribeEvent
     public void keyInput(InputEvent.KeyInputEvent event) {
         Minecraft mc = Minecraft.getMinecraft();
-        if (mc == null || mc.currentScreen instanceof AuiLinkedScreen) return;
+        if (mc == null || mc.currentScreen != null) return;
         int key = CleanroomInput.toGlfwKey(Keyboard.getEventKey());
+        int modifiers = CleanroomInput.currentGlfwModifiers();
         if (key >= 0) {
             int action = Keyboard.getEventKeyState()
                     ? org.lwjgl.glfw.GLFW.GLFW_PRESS : org.lwjgl.glfw.GLFW.GLFW_RELEASE;
-            Operation.handleKeyInput(key, 0, action, 0, false,
+            Operation.handleKeyInput(key, 0, action, modifiers, Keyboard.isRepeatEvent(),
                     com.sighs.apricityui.event.KeyEvent.Source.INPUT_EVENT);
         }
         if (Keyboard.getEventKeyState()) {
             char character = Keyboard.getEventCharacter();
-            if (character != 0) Operation.onCharTyped(character);
+            if (CleanroomInput.isPrintableChar(character, modifiers)) {
+                Operation.onCharTyped(character);
+            }
         }
     }
 

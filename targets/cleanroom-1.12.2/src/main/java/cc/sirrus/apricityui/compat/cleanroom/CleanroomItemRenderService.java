@@ -8,11 +8,16 @@ import net.minecraft.client.renderer.GlStateManager;
 import net.minecraft.client.renderer.RenderHelper;
 import net.minecraft.client.renderer.RenderItem;
 import net.minecraft.item.ItemStack;
-import org.joml.Vector4f;
+import org.lwjgl.BufferUtils;
+import org.lwjgl.opengl.GL11;
+
+import java.nio.FloatBuffer;
 
 /** 1.12 RenderItem backend for AUI item paint nodes and stack overlays. */
 public final class CleanroomItemRenderService implements AuiItemRenderService {
     public static final CleanroomItemRenderService INSTANCE = new CleanroomItemRenderService();
+    private final FloatBuffer poseMatrixBuffer = BufferUtils.createFloatBuffer(16);
+
     private CleanroomItemRenderService() { }
 
     @Override public boolean isEmptyStack(Object stack) {
@@ -26,23 +31,42 @@ public final class CleanroomItemRenderService implements AuiItemRenderService {
         if (renderer == null) return;
         boolean hasStack = !stack.isEmpty();
         String overlay = request.overlayText();
-        if (!hasStack && (overlay == null || overlay.isBlank())) return;
+        boolean hasOverlay = overlay != null && !overlay.isBlank();
+        if (!hasStack && !hasOverlay) return;
 
         PoseStack pose = request.poseStack();
-        Vector4f origin = pose == null
-                ? new Vector4f(0, 0, 0, 1)
-                : pose.last().pose().transform(new Vector4f(0, 0, 0, 1));
         GlStateManager.pushMatrix();
         try {
-            GlStateManager.translate(origin.x, origin.y + request.decorationOffsetY(), origin.z);
-            RenderHelper.enableGUIStandardItemLighting();
-            if (hasStack) renderer.renderItemAndEffectIntoGUI(stack, 0, 0);
-            if (request.decorations() && (overlay != null && !overlay.isBlank() || hasStack)) {
-                renderer.renderItemOverlayIntoGUI(minecraft.fontRenderer, stack, 0, 0,
-                        overlay == null ? "" : overlay);
+            if (pose != null) {
+                // Apply the full PoseStack matrix (translation, viewport renderScale, CSS scale/rotation)
+                // instead of only extracting translation.
+                poseMatrixBuffer.clear();
+                pose.last().pose().get(poseMatrixBuffer);
+                GL11.glMultMatrix(poseMatrixBuffer);
+            }
+            if (hasStack) {
+                RenderHelper.enableGUIStandardItemLighting();
+                try {
+                    renderer.renderItemAndEffectIntoGUI(stack, 0, 0);
+                } finally {
+                    RenderHelper.disableStandardItemLighting();
+                }
+            }
+            if (request.decorations() && (hasOverlay || hasStack)) {
+                GlStateManager.pushMatrix();
+                try {
+                    if (request.decorationOffsetY() != 0.0f) {
+                        GlStateManager.translate(0.0f, request.decorationOffsetY(), 0.0f);
+                    }
+                    // In MC 1.12.2, passing "" suppresses the stack count; null lets RenderItem draw stack.getCount().
+                    renderer.renderItemOverlayIntoGUI(minecraft.fontRenderer, stack, 0, 0,
+                            hasOverlay ? overlay : null);
+                } finally {
+                    GlStateManager.popMatrix();
+                }
             }
         } finally {
-            RenderHelper.disableStandardItemLighting();
+            GlStateManager.color(1.0f, 1.0f, 1.0f, 1.0f);
             GlStateManager.popMatrix();
         }
     }

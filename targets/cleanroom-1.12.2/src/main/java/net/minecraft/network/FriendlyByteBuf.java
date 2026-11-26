@@ -58,8 +58,21 @@ public class FriendlyByteBuf extends PacketBuffer {
     public FriendlyByteBuf writeVector3f(Vector3f value) { writeFloat(value.x()); writeFloat(value.y()); writeFloat(value.z()); return this; }
     public Quaternionf readQuaternion() { return new Quaternionf(readFloat(), readFloat(), readFloat(), readFloat()); }
     public FriendlyByteBuf writeQuaternion(Quaternionf value) { writeFloat(value.x); writeFloat(value.y); writeFloat(value.z); writeFloat(value.w); return this; }
-    public CompoundTag readNbt() { return new CompoundTag(); }
-    public FriendlyByteBuf writeNbt(CompoundTag value) { return this; }
+    public CompoundTag readNbt() {
+        try {
+            net.minecraft.nbt.NBTTagCompound raw = super.readCompoundTag();
+            if (raw == null) return null;
+            CompoundTag tag = new CompoundTag();
+            tag.merge(raw);
+            return tag;
+        } catch (java.io.IOException error) {
+            throw new io.netty.handler.codec.DecoderException(error);
+        }
+    }
+    public FriendlyByteBuf writeNbt(CompoundTag value) {
+        super.writeCompoundTag(value);
+        return this;
+    }
     public ItemStack readItem() { return ItemStack.EMPTY; }
     public FriendlyByteBuf writeItem(ItemStack value) { return this; }
     public Component readComponent() { return Component.literal(readUtf()); }

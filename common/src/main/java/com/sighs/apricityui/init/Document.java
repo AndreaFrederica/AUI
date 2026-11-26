@@ -90,6 +90,7 @@ public class Document {
     private volatile boolean manuallyRendered = false;
     private volatile long refreshGeneration = 0L;
     private volatile long timedLayoutGeneration = -1L;
+    private long domMutationVersion = 0L;
     /**
      * 首次全量几何提交的分片续跑状态，由 {@code LayoutCommit} 驱动；null 表示当前代没有
      * 进行中的分片。放在 Document 实例上而不是静态表，文档销毁后随实例回收，不泄漏元素引用。
@@ -404,14 +405,17 @@ public class Document {
                     style.recomputeSubtree(documentElement);
                 }
                 long initialStyleEndNs = System.nanoTime();
+                long versionBeforeExpand = domMutationVersion;
                 stage = "document expanders";
                 AuiServices.expander().apply(this);
                 long expandersEndNs = System.nanoTime();
 
-                // Final pass: apply styles once after expansion.
+                // Final pass: only recompute styles when an expander actually mutated DOM/styles.
                 stage = "final style calculation";
-                clearRenderCaches(documentElement);
-                style.recomputeSubtree(documentElement);
+                if (domMutationVersion != versionBeforeExpand) {
+                    clearRenderCaches(documentElement);
+                    style.recomputeSubtree(documentElement);
+                }
                 long finalStyleEndNs = System.nanoTime();
                 tree.getElements().forEach(Element::clearDirtyFlags);
                 render.reset();
@@ -632,6 +636,7 @@ public class Document {
     public void requestStyleRecalc(Element element) {
         if (element == null) return;
         if (element.document != this) return;
+        domMutationVersion++;
         style.requestRecalc(element);
     }
 
@@ -849,6 +854,7 @@ public class Document {
     }
 
     public void markDirty(Element element, int mask) {
+        domMutationVersion++;
         render.markDirty(element, mask);
     }
 
@@ -1274,6 +1280,7 @@ public class Document {
     }
 
     public void queueMutation(MutationRecord record) {
+        domMutationVersion++;
         mutationManager.queue(record);
     }
 

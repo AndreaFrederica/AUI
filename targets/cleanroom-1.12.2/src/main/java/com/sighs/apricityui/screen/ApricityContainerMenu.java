@@ -33,7 +33,6 @@ public class ApricityContainerMenu extends Container {
     private final List<IInventory> customInventories = new ArrayList<>();
     private final EntityPlayerMP owner;
     private final Map<String, Map<String, String>> bindingArgs;
-
     /** Server constructor: resolve declarations against real 1.12 world data. */
     public ApricityContainerMenu(EntityPlayerMP owner, String templatePath,
                                  List<ContainerDeclaration> declarations,
@@ -53,6 +52,12 @@ public class ApricityContainerMenu extends Container {
         this(playerInventory, templatePath, declarations, Map.of(), null, Map.of());
     }
 
+    public ApricityContainerMenu(InventoryPlayer playerInventory, String templatePath,
+                                 List<ContainerDeclaration> declarations,
+                                 Map<String, Map<String, String>> argsById) {
+        this(playerInventory, templatePath, declarations, argsById, null, Map.of());
+    }
+
     private ApricityContainerMenu(InventoryPlayer playerInventory, String templatePath,
                                   List<ContainerDeclaration> declarations,
                                   Map<String, Map<String, String>> argsById,
@@ -65,8 +70,10 @@ public class ApricityContainerMenu extends Container {
         Map<String, FilterUtil> usableFilters = filtersById == null ? Map.of() : filtersById;
         int customRow = 0;
         for (ContainerDeclaration declaration : this.declarations) {
-            if (declaration == null || declaration.capacity() <= 0 || declaration.bindType() == ContainerBindType.PLAYER) continue;
-            IInventory inventory = owner == null ? null : resolveInventory(owner, declaration, argsById);
+            if (declaration == null || declaration.bindType() == ContainerBindType.PLAYER) continue;
+            EntityPlayer contextPlayer = owner != null ? owner : (playerInventory == null ? null : playerInventory.player);
+            IInventory inventory = contextPlayer == null ? null : resolveInventory(contextPlayer, declaration, argsById);
+            if (declaration.capacity() <= 0) continue;
             if (inventory == null) inventory = new InventoryBasic(declaration.id(), false, declaration.capacity());
             customInventories.add(inventory);
             int slotCount = Math.min(declaration.capacity(), inventory.getSizeInventory());
@@ -92,7 +99,6 @@ public class ApricityContainerMenu extends Container {
     public String getTemplatePath() { return templatePath; }
     public List<ContainerDeclaration> getDeclarations() { return declarations; }
     public void setWindowId(int windowId) { this.windowId = windowId; }
-
     public Integer resolveGlobalSlotIndex(String id, int localIndex) {
         if (id == null || localIndex < 0) return null;
         int customOffset = 0;
@@ -100,7 +106,10 @@ public class ApricityContainerMenu extends Container {
             if (declaration == null) continue;
             if (declaration.bindType() == ContainerBindType.PLAYER) {
                 if (id.equals(declaration.id()) && localIndex < 36) {
-                    return inventorySlots.size() - 36 + localIndex;
+                    // InventoryPlayer stores hotbar at 0..8 and main inventory at 9..35,
+                    // while Container adds main inventory (0..26) before hotbar (27..35).
+                    int menuOffset = localIndex < 9 ? (27 + localIndex) : (localIndex - 9);
+                    return inventorySlots.size() - 36 + menuOffset;
                 }
                 continue;
             }
@@ -114,6 +123,7 @@ public class ApricityContainerMenu extends Container {
     /** Projects SLOT DOM geometry onto vanilla slot positions after layout. */
     public void updateSlotLayout(Document document, int left, int top) {
         if (document == null) return;
+        float scale = document.getViewport() == null ? 1.0f : document.getViewport().renderScale();
         int declarationIndex = 0;
         for (Element element : document.getElements()) {
             if (!(element instanceof com.sighs.apricityui.element.Slot domSlot)) continue;
@@ -129,21 +139,24 @@ public class ApricityContainerMenu extends Container {
             if (global == null || global < 0 || global >= inventorySlots.size()) continue;
             Element.DOMRect rect = domSlot.getSlotVisualBounds();
             if (rect == null) continue;
+            int scaledX = (int) Math.round(rect.x * scale);
+            int scaledY = (int) Math.round(rect.y * scale);
+            int scaledW = Math.max(1, (int) Math.round(rect.width * scale));
+            int scaledH = Math.max(1, (int) Math.round(rect.height * scale));
+            // Center the 16x16 vanilla item inside the DOM slot's border-box (18x18 -> +1px inset).
+            int insetX = Math.max(0, (scaledW - 16) / 2);
+            int insetY = Math.max(0, (scaledH - 16) / 2);
             Slot slot = inventorySlots.get(global);
             if (slot instanceof UiSlot uiSlot) {
                 domSlot.bindToMenuSlot(domSlot.isExplicitlyDisabled());
                 uiSlot.setUiDisabled(domSlot.isExplicitlyDisabled());
                 uiSlot.setUiHidden(!domSlot.shouldRenderItem());
-                uiSlot.setUiSlotBounds(Math.max(1, (int) Math.round(rect.width)),
-                        Math.max(1, (int) Math.round(rect.height)));
-                // GuiContainer keeps item rendering private in 1.12. Moving a
-                // hidden DOM slot outside the viewport provides the equivalent
-                // of display:none while preserving its server slot index.
-                slot.xPos = uiSlot.isUiHidden() ? -10000 : (int) Math.round(rect.x) - left;
-                slot.yPos = uiSlot.isUiHidden() ? -10000 : (int) Math.round(rect.y) - top;
+                uiSlot.setUiSlotBounds(scaledW, scaledH);
+                slot.xPos = uiSlot.isUiHidden() ? -10000 : scaledX + insetX;
+                slot.yPos = uiSlot.isUiHidden() ? -10000 : scaledY + insetY;
             } else {
-                slot.xPos = (int) Math.round(rect.x) - left;
-                slot.yPos = (int) Math.round(rect.y) - top;
+                slot.xPos = scaledX + insetX;
+                slot.yPos = scaledY + insetY;
             }
         }
     }
@@ -174,7 +187,7 @@ public class ApricityContainerMenu extends Container {
         return List.copyOf(result);
     }
 
-    private static IInventory resolveInventory(EntityPlayerMP owner, ContainerDeclaration declaration,
+    private static IInventory resolveInventory(EntityPlayer owner, ContainerDeclaration declaration,
                                                Map<String, Map<String, String>> argsById) {
         if (owner == null || declaration == null) return null;
         Map<String, String> args = argsById == null ? Map.of() : argsById.getOrDefault(declaration.id(), Map.of());
@@ -248,29 +261,39 @@ public class ApricityContainerMenu extends Container {
     private static final class SavedInventory extends InventoryBasic {
         private final SavedInventoryData data;
         private final String inventoryKey;
+        private boolean loading;
 
         private SavedInventory(SavedInventoryData data, String inventoryKey, int size) {
             super(inventoryKey, false, size);
             this.data = data;
             this.inventoryKey = inventoryKey;
-            NBTTagList list = data.inventoryTag(inventoryKey).getTagList("items", 10);
-            for (int i = 0; i < list.tagCount(); i++) {
-                NBTTagCompound entry = list.getCompoundTagAt(i);
-                int slot = entry.getByte("slot") & 255;
-                if (slot < getSizeInventory()) setInventorySlotContents(slot, new ItemStack(entry));
+            this.loading = true;
+            try {
+                NBTTagList list = data.inventoryTag(inventoryKey).getTagList("items", 10);
+                for (int i = 0; i < list.tagCount(); i++) {
+                    NBTTagCompound entry = list.getCompoundTagAt(i);
+                    int slot = entry.getByte("slot") & 255;
+                    if (slot < getSizeInventory()) setInventorySlotContents(slot, new ItemStack(entry));
+                }
+            } finally {
+                this.loading = false;
             }
         }
 
         static SavedInventory open(World world, String dataName, String id, int size) {
             MapStorage storage = world.getMapStorage();
             if (storage == null) return new SavedInventory(new SavedInventoryData("unused"), id, size);
-            String key = "apricityui:" + dataName;
+            // MapStorage writes <world>/data/<key>.dat; colons are illegal in Windows filenames.
+            String safeName = (dataName == null || dataName.isBlank() ? "apricityui_data" : dataName)
+                    .replaceAll("[^a-zA-Z0-9._-]", "_");
+            String key = "apricityui_" + safeName;
             SavedInventoryData data = (SavedInventoryData) storage.getOrLoadData(SavedInventoryData.class, key);
             if (data == null) { data = new SavedInventoryData(key); storage.setData(key, data); }
             return new SavedInventory(data, id, size);
         }
 
         @Override public void markDirty() {
+            if (loading) return;
             NBTTagList list = new NBTTagList();
             for (int i = 0; i < getSizeInventory(); i++) {
                 ItemStack stack = getStackInSlot(i);
@@ -312,7 +335,9 @@ public class ApricityContainerMenu extends Container {
             super(inventory, index, x, y); this.filter = filter;
         }
         @Override public boolean isItemValid(ItemStack stack) {
-            return !uiDisabled && super.isItemValid(stack) && (filter == null || filter.test(stack));
+            return !uiDisabled && super.isItemValid(stack)
+                    && (inventory == null || inventory.isItemValidForSlot(getSlotIndex(), stack))
+                    && (filter == null || filter.test(stack));
         }
         @Override public boolean canTakeStack(EntityPlayer player) { return !uiDisabled && super.canTakeStack(player); }
         public void setUiDisabled(boolean value) { uiDisabled = value; }
