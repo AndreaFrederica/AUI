@@ -108,4 +108,47 @@ class FirstCreateWarmupTest {
         assertEquals("remote", root.body().getFirstElementChild().getTextContent());
         assertEquals(1, document.JSCache.size());
     }
+
+    @Test
+    void globalJsReadIsCachedAndInvalidated() {
+        com.sighs.apricityui.loader.Loader.invalidateGlobalJSCache();
+        String first = com.sighs.apricityui.loader.Loader.readGlobalJS();
+        String second = com.sighs.apricityui.loader.Loader.readGlobalJS();
+        assertEquals(first, second);
+        if (first != null) {
+            org.junit.jupiter.api.Assertions.assertSame(first, second, "cached global.js should return same String instance");
+        }
+        com.sighs.apricityui.loader.Loader.invalidateGlobalJSCache();
+        String reloaded = com.sighs.apricityui.loader.Loader.readGlobalJS();
+        assertEquals(first, reloaded);
+    }
+
+    @Test
+    void documentRefreshRecomputesStylesWhenExpanderMutatesDom() {
+        String path = "test://expander-restyle";
+        HTML.putTemple(path, """
+                <html>
+                  <head><style>.expanded { color: #ff00aa; }</style></head>
+                  <body><div id="host"></div></body>
+                </html>
+                """);
+        com.sighs.apricityui.dom.DocumentExpander previous = com.sighs.apricityui.spi.AuiServices.expander();
+        try {
+            com.sighs.apricityui.spi.AuiServices.setExpander(document -> {
+                com.sighs.apricityui.init.Element host = document.getElementById("host");
+                if (host == null) return;
+                com.sighs.apricityui.init.Element added = document.createElement("span");
+                added.setAttribute("class", "expanded");
+                added.setTextContent("ok");
+                host.appendChild(added);
+            });
+            Document document = new Document(path, false);
+            document.refresh();
+            com.sighs.apricityui.init.Element added = document.getElementById("host").getFirstElementChild();
+            org.junit.jupiter.api.Assertions.assertNotNull(added);
+            assertEquals("#ff00aa", added.getComputedStyle().color);
+        } finally {
+            com.sighs.apricityui.spi.AuiServices.setExpander(previous);
+        }
+    }
 }

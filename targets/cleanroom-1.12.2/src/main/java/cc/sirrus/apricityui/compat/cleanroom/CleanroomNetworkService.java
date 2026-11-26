@@ -41,6 +41,30 @@ public final class CleanroomNetworkService implements AuiNetworkService {
         channel.registerMessage(OpenScreenMessage.Handler.class, OpenScreenMessage.class, 0, Side.CLIENT);
     }
 
+    /**
+     * Legacy 1.12 bridge for independent mods (e.g. Machine Lib) that do not
+     * compile against AUI's loader-neutral ServerPlayer facade.
+     */
+    public void openLegacyScreen(net.minecraft.entity.player.EntityPlayerMP player, String templatePath,
+                                 int x, int y, int z, int machineSlots) {
+        if (player == null) return;
+        register();
+        List<ContainerDeclaration> declarations = new ArrayList<>();
+        declarations.add(new ContainerDeclaration("block_entity", ContainerBindType.BLOCK_ENTITY,
+                Math.max(0, machineSlots), true));
+        declarations.add(new ContainerDeclaration("player", ContainerBindType.PLAYER, 36, false));
+        Map<String, Map<String, String>> args = new LinkedHashMap<>();
+        args.put("block_entity", Map.of("x", String.valueOf(x), "y", String.valueOf(y), "z", String.valueOf(z)));
+        ApricityContainerMenu menu = new ApricityContainerMenu(player, templatePath, declarations, args);
+        player.getNextWindowId();
+        int windowId = player.currentWindowId;
+        menu.setWindowId(windowId);
+        // Send OpenScreenMessage BEFORE attaching container listener so client installs menu with windowId first.
+        channel.sendTo(new OpenScreenMessage(templatePath, menu.getDeclarations(), windowId, args), player);
+        player.openContainer = menu;
+        menu.addListener(player);
+    }
+
     @Override
     public AuiPendingMenu pendingMenu(ServerPlayer player, String templatePath) {
         return configurator -> {
@@ -69,8 +93,12 @@ public final class CleanroomNetworkService implements AuiNetworkService {
             legacy.getNextWindowId();
             windowId = legacy.currentWindowId;
             menu.setWindowId(windowId);
+            // Send the open-screen packet BEFORE attaching the container listener / sending initial
+            // SPacketWindowItems so the client installs openContainer with windowId first.
+            channel.sendTo(new OpenScreenMessage(templatePath, declarations, windowId, argsById), legacy);
             legacy.openContainer = menu;
-            legacy.sendContainerToPlayer(menu);
+            menu.addListener(legacy);
+            return;
         }
         channel.sendTo(new OpenScreenMessage(templatePath, declarations, windowId, argsById), legacy);
     }
@@ -187,17 +215,18 @@ public final class CleanroomNetworkService implements AuiNetworkService {
         public static final class Handler implements IMessageHandler<OpenScreenMessage, IMessage> {
             @Override public IMessage onMessage(OpenScreenMessage message, MessageContext context) {
                 Minecraft.getMinecraft().addScheduledTask(() -> {
+                    Minecraft mc = Minecraft.getMinecraft();
+                    if (mc == null) return;
                     if (message.declarations.isEmpty()) {
-                        Minecraft.getMinecraft().displayGuiScreen(new ApricityScreen(message.path));
-                    } else {
+                        mc.displayGuiScreen(new ApricityScreen(message.path));
+                    } else if (mc.player != null) {
                         ApricityContainerMenu menu = new ApricityContainerMenu(
-                                Minecraft.getMinecraft().player.inventory, message.path, message.declarations);
+                                mc.player.inventory, message.path, message.declarations, message.argsById);
                         menu.setWindowId(message.windowId);
-                        // Vanilla 1.12 routes subsequent SPacketSetSlot updates through the
-                        // player's openContainer. The screen is opened by our custom packet,
-                        // so install the same menu explicitly before displaying the GUI.
-                        Minecraft.getMinecraft().player.openContainer = menu;
-                        Minecraft.getMinecraft().displayGuiScreen(new ApricityContainerScreen(menu, Minecraft.getMinecraft().player.inventory));
+                        // Vanilla 1.12 routes subsequent SPacketWindowItems/SPacketSetSlot updates through
+                        // the player's openContainer. Install the menu explicitly before displaying the GUI.
+                        mc.player.openContainer = menu;
+                        mc.displayGuiScreen(new ApricityContainerScreen(menu, mc.player.inventory));
                     }
                 });
                 return null;

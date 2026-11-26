@@ -180,13 +180,33 @@ public class Loader {
         return null;
     }
 
+    private static final Object GLOBAL_JS_CACHE_LOCK = new Object();
+    private static boolean globalJsCached = false;
+    private static String cachedGlobalJs = null;
+
     public static String readGlobalJS() {
+        synchronized (GLOBAL_JS_CACHE_LOCK) {
+            if (globalJsCached) return cachedGlobalJs;
+        }
+        String loaded = null;
         try (InputStream stream = getResourceStream("global.js")) {
-            if (stream != null) return new String(stream.readAllBytes(), StandardCharsets.UTF_8);
+            if (stream != null) loaded = new String(stream.readAllBytes(), StandardCharsets.UTF_8);
         } catch (IOException exception) {
             ApricityUI.LOGGER.warn("[AUI Resource] failed to read global.js", exception);
+            return null;
         }
-        return null;
+        synchronized (GLOBAL_JS_CACHE_LOCK) {
+            cachedGlobalJs = loaded;
+            globalJsCached = true;
+        }
+        return loaded;
+    }
+
+    public static void invalidateGlobalJSCache() {
+        synchronized (GLOBAL_JS_CACHE_LOCK) {
+            cachedGlobalJs = null;
+            globalJsCached = false;
+        }
     }
 
     private static boolean isProjectRoot(Path path) {

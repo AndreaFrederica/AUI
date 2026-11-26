@@ -55,7 +55,10 @@ public final class GlyphCache {
      * 都会经过（overlay/浮空物品等），时间窗口能自适应任何调用序列。</p>
      */
     private static final int RASTER_BUDGET_PER_FRAME = 400;
-    private static final long BUDGET_WINDOW_NANOS = 4_000_000L;
+    /** 单帧累计光栅+上传时间上限（4ms）：超限时本帧剩余字形顺延到下一帧，避免首帧冻结。 */
+    private static final long MAX_RASTER_TIME_PER_FRAME_NS = 4_000_000L;
+    /** 未调用 beginFrame() 的路径上，距离上次光栅结束超过此间隔才视为进入新帧并重置预算。 */
+    private static final long IDLE_RESET_WINDOW_NANOS = 12_000_000L;
 
     /** 与 {@link com.sighs.apricityui.style.Text} 的浏览器度量保持一致：灰度 AA + 分数度量。 */
     static final FontRenderContext FRC = new FontRenderContext((AffineTransform) null, true, true);
@@ -73,7 +76,10 @@ public final class GlyphCache {
     };
     private static final List<Page> PAGES = new ArrayList<>();
     private static int rasterBudget = RASTER_BUDGET_PER_FRAME;
-    private static long budgetWindowStart = System.nanoTime();
+    private static int rasteredThisFrame = 0;
+    private static long frameRasterNanos = 0L;
+    private static long lastRasterEndNs = System.nanoTime();
+    private static boolean frameExplicitlyStarted = false;
 
     /** 1×1 纯白纹理：下划线/删除线这类纯色矩形用它拉伸 + 顶点染色绘制。 */
     private static NativeImage whiteTilePixels;
@@ -199,24 +205,51 @@ public final class GlyphCache {
         }
     }
 
-    /** 帧起始调用：重置本帧的光栅预算。 */
+    /** 帧起始调用：重置本帧的光栅预算（计数 + 累计耗时）。 */
     public static void beginFrame() {
         synchronized (LOCK) {
             rasterBudget = RASTER_BUDGET_PER_FRAME;
-            budgetWindowStart = System.nanoTime();
+            rasteredThisFrame = 0;
+            frameRasterNanos = 0L;
+            frameExplicitlyStarted = true;
         }
     }
 
-    /** 预算按时间窗口自动补充：见 {@link #RASTER_BUDGET_PER_FRAME} 的说明。 */
+    /**
+     * 申请一个字形的光栅名额：同时受单帧个数与单帧累计耗时上限约束。
+     * 每帧至少允许光栅 1 个字形以保证推进；一旦本帧累计耗时超过 {@link #MAX_RASTER_TIME_PER_FRAME_NS}，
+     * 不再在帧内重置预算，而是把剩余字形顺延到下一帧。
+     */
     private static boolean claimRasterBudget() {
         long now = System.nanoTime();
-        if (now - budgetWindowStart >= BUDGET_WINDOW_NANOS) {
-            budgetWindowStart = now;
+        if (!frameExplicitlyStarted && rasteredThisFrame > 0
+                && (now - lastRasterEndNs) >= IDLE_RESET_WINDOW_NANOS) {
             rasterBudget = RASTER_BUDGET_PER_FRAME;
+            rasteredThisFrame = 0;
+            frameRasterNanos = 0L;
         }
         if (rasterBudget <= 0) return false;
+        if (rasteredThisFrame > 0 && frameRasterNanos >= MAX_RASTER_TIME_PER_FRAME_NS) {
+            return false;
+        }
         rasterBudget--;
+        rasteredThisFrame++;
         return true;
+    }
+
+    /** 测试辅助：在无 GL 环境下验证单帧光栅预算不会被慢字形在同帧内误重置。 */
+    static boolean claimRasterBudgetForTest() {
+        synchronized (LOCK) {
+            return claimRasterBudget();
+        }
+    }
+
+    /** 测试辅助：向当前帧累计一次模拟的光栅耗时。 */
+    static void recordRasterDurationForTest(long elapsedNs) {
+        synchronized (LOCK) {
+            frameRasterNanos += Math.max(0L, elapsedNs);
+            lastRasterEndNs = System.nanoTime();
+        }
     }
 
     /**
@@ -366,7 +399,12 @@ public final class GlyphCache {
             com.sighs.apricityui.ApricityUI.LOGGER.warn("[AUI Font] glyph raster failed cp=U+{}",
                     Integer.toHexString(codePoint), exception);
         } finally {
-            RenderBatchStats.recordRaster(System.nanoTime() - startNs);
+            long elapsedNs = System.nanoTime() - startNs;
+            synchronized (LOCK) {
+                frameRasterNanos += Math.max(0L, elapsedNs);
+                lastRasterEndNs = System.nanoTime();
+            }
+            RenderBatchStats.recordRaster(elapsedNs);
         }
     }
 

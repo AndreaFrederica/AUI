@@ -71,4 +71,21 @@ class FontRasterStatsTest {
         assertTrue(line.contains("cacheSize="), line);
         assertTrue(line.contains("atlasFull="), line);
     }
+
+    @Test
+    void glyphRasterBudgetEnforcesFrameTimeCapWithoutMidFrameReset() {
+        GlyphCache.beginFrame();
+        // First glyph always allowed for forward progress.
+        assertTrue(GlyphCache.claimRasterBudgetForTest());
+        // Simulate a slow glyph upload exceeding the 4ms per-frame time budget.
+        GlyphCache.recordRasterDurationForTest(10_000_000L);
+        // Must NOT reset mid-frame even after a slow raster; remaining glyphs defer to next frame.
+        assertFalse(GlyphCache.claimRasterBudgetForTest());
+
+        // Starting the next frame resets both count and time budgets.
+        GlyphCache.beginFrame();
+        assertTrue(GlyphCache.claimRasterBudgetForTest());
+        GlyphCache.recordRasterDurationForTest(500_000L);
+        assertTrue(GlyphCache.claimRasterBudgetForTest());
+    }
 }

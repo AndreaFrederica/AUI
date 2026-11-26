@@ -94,7 +94,7 @@ unimined.minecraft {
             }
             def extraArgs = propertyString('extra_jvm_args')
             if (extraArgs != null && !extraArgs.trim().isEmpty()) {
-                jvmArgs += extraArgs.split { "\\s+" }.toList()
+                jvmArgs += extraArgs.trim().split(/\s+/).toList()
             }
             // NekoJS 1.12 is an uber jar containing Graal/Truffle multi-release
             // classes. Cleanroom's mod remapper cannot preserve the manifest

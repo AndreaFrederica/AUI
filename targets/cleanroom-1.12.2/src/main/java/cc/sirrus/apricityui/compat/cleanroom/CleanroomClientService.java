@@ -50,7 +50,13 @@ import java.util.function.Predicate;
 public final class CleanroomClientService implements AuiClientService {
     public static final CleanroomClientService INSTANCE = new CleanroomClientService();
     private volatile boolean mouseGrabbed;
+    private volatile Boolean productionEnvironment;
     private final Set<String> scanPackages = new HashSet<>();
+    private ScaledResolution cachedResolution;
+    private int cachedDisplayWidth = -1;
+    private int cachedDisplayHeight = -1;
+    private int cachedGuiScale = Integer.MIN_VALUE;
+    private boolean cachedUnicode;
 
     private CleanroomClientService() {
     }
@@ -63,8 +69,24 @@ public final class CleanroomClientService implements AuiClientService {
         }
     }
 
-    private static ScaledResolution resolution(Minecraft mc) {
-        return mc == null ? null : new ScaledResolution(mc);
+    private ScaledResolution resolution(Minecraft mc) {
+        if (mc == null) return null;
+        int displayW = mc.displayWidth;
+        int displayH = mc.displayHeight;
+        int guiScale = mc.gameSettings == null ? 0 : mc.gameSettings.guiScale;
+        boolean unicode = mc.isUnicode();
+        ScaledResolution cached = cachedResolution;
+        if (cached != null && displayW == cachedDisplayWidth && displayH == cachedDisplayHeight
+                && guiScale == cachedGuiScale && unicode == cachedUnicode) {
+            return cached;
+        }
+        ScaledResolution fresh = new ScaledResolution(mc);
+        cachedDisplayWidth = displayW;
+        cachedDisplayHeight = displayH;
+        cachedGuiScale = guiScale;
+        cachedUnicode = unicode;
+        cachedResolution = fresh;
+        return fresh;
     }
 
     @Override
@@ -164,8 +186,11 @@ public final class CleanroomClientService implements AuiClientService {
 
     @Override
     public boolean isMouseGrabbed() {
+        if (Mouse.isCreated()) {
+            return Mouse.isGrabbed();
+        }
         Minecraft mc = minecraft();
-        return mouseGrabbed;
+        return mc != null ? mc.inGameHasFocus : mouseGrabbed;
     }
 
     @Override
@@ -198,7 +223,20 @@ public final class CleanroomClientService implements AuiClientService {
 
     @Override
     public boolean isProduction() {
-        return FMLCommonHandler.instance().getSide().isClient();
+        Boolean cached = productionEnvironment;
+        if (cached != null) return cached;
+        boolean prod = true;
+        try {
+            Class<?> launch = Class.forName("net.minecraft.launchwrapper.Launch");
+            Object blackboard = launch.getField("blackboard").get(null);
+            if (blackboard instanceof Map<?, ?> map && Boolean.TRUE.equals(map.get("fml.deobfuscatedEnvironment"))) {
+                prod = false;
+            }
+        } catch (Throwable ignored) {
+            prod = false;
+        }
+        productionEnvironment = prod;
+        return prod;
     }
 
     @Override
@@ -332,8 +370,13 @@ public final class CleanroomClientService implements AuiClientService {
     @Override
     public Window getWindow() {
         Minecraft mc = minecraft();
-        return new Window(0L, (int) getWindowWidth(), (int) getWindowHeight(), getScaledWidth(), getScaledHeight(),
-                resolution(mc) == null ? 1.0 : (double) mc.displayWidth / Math.max(1, getScaledWidth()));
+        ScaledResolution scaled = resolution(mc);
+        int displayW = mc == null ? 1920 : mc.displayWidth;
+        int displayH = mc == null ? 1080 : mc.displayHeight;
+        int scaledW = scaled == null ? displayW : scaled.getScaledWidth();
+        int scaledH = scaled == null ? displayH : scaled.getScaledHeight();
+        double guiScale = scaled == null ? 1.0 : (double) displayW / Math.max(1, scaledW);
+        return new Window(0L, displayW, displayH, scaledW, scaledH, guiScale);
     }
 
     /**

@@ -1,5 +1,7 @@
 package com.sighs.apricityui.proxy;
 
+import cc.sirrus.apricityui.compat.cleanroom.CleanroomConfigService;
+import cc.sirrus.apricityui.compat.cleanroom.CleanroomDocumentExpander;
 import cc.sirrus.apricityui.compat.cleanroom.CleanroomNetworkService;
 import cc.sirrus.apricityui.compat.cleanroom.CleanroomScriptService;
 import com.sighs.apricityui.spi.AuiServices;
@@ -8,6 +10,8 @@ import net.minecraftforge.fml.common.event.FMLPreInitializationEvent;
 public class CommonProxy implements IProxy {
     @Override
     public void preInit(FMLPreInitializationEvent event) {
+        AuiServices.setConfig(CleanroomConfigService.INSTANCE);
+        AuiServices.setExpander(CleanroomDocumentExpander.INSTANCE);
         AuiServices.setNetwork(CleanroomNetworkService.INSTANCE);
         AuiServices.setScript(CleanroomScriptService.INSTANCE);
         CleanroomScriptService.INSTANCE.warmUp();

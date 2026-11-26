@@ -501,6 +501,9 @@ public class WorldWindow {
         float viewportHeight = getHeight();
         resolvedScale = worldScale;
         Quaternionf renderRotation = resolveRenderRotation(cameraPos, renderPosition);
+        boolean previousStencilTest = GL11.glIsEnabled(GL11.GL_STENCIL_TEST);
+        boolean previousScissorTest = GL11.glIsEnabled(GL11.GL_SCISSOR_TEST);
+        boolean previousCull = GL11.glIsEnabled(GL11.GL_CULL_FACE);
 
         poseStack.pushPose();
         poseStack.translate(
@@ -596,6 +599,13 @@ public class WorldWindow {
         if (previousDepthTest) AuiServices.render().enableDepthTest();
         else AuiServices.render().disableDepthTest();
         AuiServices.render().setDepthMask(previousDepthMask);
+        AuiServices.render().setColorMask(true, true, true, true);
+        if (previousStencilTest) AuiServices.render().enableStencilTest();
+        else AuiServices.render().disableStencilTest();
+        if (previousScissorTest) AuiServices.render().enableScissorTest();
+        else AuiServices.render().disableScissorTest();
+        if (previousCull) AuiServices.render().enableCull();
+        else AuiServices.render().disableCull();
 
         poseStack.popPose();
     }

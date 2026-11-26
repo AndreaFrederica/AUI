@@ -7,10 +7,13 @@ import com.sighs.apricityui.spi.AuiScriptService;
 import net.minecraftforge.fml.common.Loader;
 
 import javax.script.Bindings;
+import javax.script.Compilable;
+import javax.script.CompiledScript;
 import javax.script.ScriptContext;
 import javax.script.ScriptEngine;
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
+import java.util.LinkedHashMap;
 import java.util.Locale;
 import java.util.Map;
 import java.util.regex.Pattern;
@@ -24,6 +27,8 @@ import java.util.regex.Pattern;
  */
 public final class CleanroomScriptService implements AuiScriptService {
     public static final CleanroomScriptService INSTANCE = new CleanroomScriptService();
+    private static final String DOCUMENT_UUID_BINDING = "__auiDocumentUuid";
+    private static final int INLINE_SOURCE_CACHE_LIMIT = 256;
 
     private enum Backend { NONE, NEKOJS, KUBEJS }
 
@@ -37,7 +42,30 @@ public final class CleanroomScriptService implements AuiScriptService {
     private int probeMissRepeats;
     private boolean probeSuccessLogged;
     private Method nekoEval;
+    private Method nekoEvalSource;
+    private Method nekoGetBindings;
+    private Class<?> nekoBindingsClass;
+    private Method nekoBindingsHasMember;
+    private Method nekoBindingsGetMember;
+    private Method nekoBindingsPutMember;
+    private Method nekoBindingsRemoveMember;
+    private boolean nekoRegistryChecked;
+    private Method nekoSwitchScriptId;
+    private Method nekoRestoreScriptId;
+    private Class<?> graalSourceClass;
+    private boolean graalSourceChecked;
+    private String cachedGlobalCode;
+    private String cachedPreparedGlobalCode;
+    private Object cachedGlobalGraalSource;
+    private final Map<String, Object> inlineGraalSourceCache = new LinkedHashMap<>(64, 0.75f, true) {
+        @Override
+        protected boolean removeEldestEntry(Map.Entry<String, Object> eldest) {
+            return size() > INLINE_SOURCE_CACHE_LIMIT;
+        }
+    };
     private Object kubeEngine;
+    private String cachedKubeGlobalCode;
+    private CompiledScript cachedKubeGlobalScript;
 
     private CleanroomScriptService() {
     }
@@ -47,7 +75,7 @@ public final class CleanroomScriptService implements AuiScriptService {
         if (code == null || code.isBlank()) return;
         synchronized (lock) {
             switch (selectedBackend()) {
-                case NEKOJS -> evalNeko(code, event);
+                case NEKOJS -> evalNeko(code, event, source);
                 case KUBEJS -> evalKube(code, event);
                 case NONE -> { }
             }
@@ -57,17 +85,20 @@ public final class CleanroomScriptService implements AuiScriptService {
     @Override
     public void evalGlobal(String code, String documentUuid) {
         if (code == null || code.isBlank()) return;
-        // global.js already contains quotes around the UUID placeholder.  The
-        // common service contract replaces the marker with the raw escaped
-        // value; adding a second pair of quotes produces `""uuid""` and
-        // breaks both Nashorn and the legacy KubeJS engine.
-        String uuid = documentUuid == null ? "" : documentUuid.replace("\\", "\\\\").replace("\"", "\\\"");
-        eval(code.replace("__AUI_DOCUMENT_UUID__", uuid), null, "global.js");
+        synchronized (lock) {
+            String uuid = documentUuid == null ? "" : documentUuid;
+            switch (selectedBackend()) {
+                case NEKOJS -> evalNekoGlobal(code, uuid);
+                case KUBEJS -> evalKubeGlobal(code, uuid);
+                case NONE -> { }
+            }
+        }
     }
 
     @Override
     public void reload() {
         synchronized (lock) {
+            clearScriptCaches();
             Backend selected = selectedBackend();
             try {
                 if (selected == Backend.NEKOJS) {
@@ -94,9 +125,30 @@ public final class CleanroomScriptService implements AuiScriptService {
     public void warmUp() {
         synchronized (lock) {
             Backend selected = selectedBackend();
-            if (selected == Backend.NEKOJS) ensureNekoContext();
-            if (selected == Backend.KUBEJS) ensureKubeEngine();
+            if (selected == Backend.NEKOJS) {
+                ensureNekoContext();
+                String globalJs = com.sighs.apricityui.loader.Loader.readGlobalJS();
+                if (globalJs != null && !globalJs.isBlank()) {
+                    prepareGlobalGraalSource(globalJs);
+                }
+            }
+            if (selected == Backend.KUBEJS) {
+                ScriptEngine engine = ensureKubeEngine();
+                String globalJs = com.sighs.apricityui.loader.Loader.readGlobalJS();
+                if (engine != null && globalJs != null && !globalJs.isBlank()) {
+                    compileKubeGlobal(engine, globalJs);
+                }
+            }
         }
+    }
+
+    private void clearScriptCaches() {
+        cachedGlobalCode = null;
+        cachedPreparedGlobalCode = null;
+        cachedGlobalGraalSource = null;
+        inlineGraalSourceCache.clear();
+        cachedKubeGlobalCode = null;
+        cachedKubeGlobalScript = null;
     }
 
     /**
@@ -153,55 +205,216 @@ public final class CleanroomScriptService implements AuiScriptService {
         }
     }
 
-    private void evalNeko(String code, Event event) {
+    private void evalNeko(String code, Event event, String sourceName) {
         try {
             Object context = ensureNekoContext();
             if (context == null) return;
             Class<?> contextClass = context.getClass();
             installNekoGlobals(contextClass, context);
-            Object bindings = contextClass.getMethod("getBindings", String.class).invoke(context, "js");
-            Method putMember = bindings.getClass().getMethod("putMember", String.class, Object.class);
+            Object bindings = getNekoBindings(contextClass, context);
+            ensureBindingsMethods(bindings);
             if (event == null) {
-                try {
-                    bindings.getClass().getMethod("removeMember", String.class).invoke(bindings, "event");
-                } catch (NoSuchMethodException ignored) {
-                    putMember.invoke(bindings, "event", null);
-                }
+                removeBinding(bindings, "event");
             } else {
-                putMember.invoke(bindings, "event", event);
+                nekoBindingsPutMember.invoke(bindings, "event", event);
             }
 
-            // Make AUI snippets first-class NekoJS scripts: this preserves the
-            // runtime's CLIENT globals, module loader and error attribution.
-            String scriptId = "apricityui/" + (event == null ? "global.js" : "inline.js");
-            String previous = null;
-            try {
-                Class<?> registry = Class.forName("com.tkisor.nekojs.script.ScriptContextRegistry");
-                previous = (String) registry.getMethod("switchCurrentScriptId",
-                        contextClass, String.class).invoke(null, context, scriptId);
-            } catch (Throwable ignored) {
-                // Older NekoJS builds do not expose the registry helper.
-            }
+            String scriptId = "apricityui/" + (sourceName != null && !sourceName.isBlank()
+                    ? sourceName : (event == null ? "global.js" : "inline.js"));
+            String previous = switchNekoScriptId(contextClass, context, scriptId);
             try {
                 try {
-                    nekoEval.invoke(context, "js", rewriteDeclarationsForSharedScope(code));
+                    Object graalSource = getOrBuildInlineGraalSource(code, scriptId);
+                    if (graalSource != null && nekoEvalSource != null) {
+                        nekoEvalSource.invoke(context, graalSource);
+                    } else {
+                        nekoEval.invoke(context, "js", rewriteDeclarationsForSharedScope(code));
+                    }
                 } catch (Throwable scoped) {
                     ApricityUI.LOGGER.warn("[AUI Cleanroom] script evaluation unavailable: {}", describe(scoped));
                     throw scoped;
                 }
             } finally {
                 if (previous != null) {
-                    try {
-                        Class<?> registry = Class.forName("com.tkisor.nekojs.script.ScriptContextRegistry");
-                        registry.getMethod("restoreCurrentScriptId", contextClass, String.class)
-                                .invoke(null, context, previous);
-                    } catch (Throwable ignored) {
-                    }
+                    restoreNekoScriptId(contextClass, context, previous);
                 }
             }
         } catch (Throwable error) {
             ApricityUI.LOGGER.error("[AUI Cleanroom] NekoJS evaluation failed", error);
         }
+    }
+
+    /**
+     * Evaluates {@code global.js} using a cached Graal {@code Source} and a
+     * per-call {@code __auiDocumentUuid} binding, matching Forge's
+     * {@code ApricityJS.evalGlobal} so GraalJS can reuse its parsed/compiled AST
+     * across document opens instead of re-parsing 1,100+ lines every time.
+     */
+    private void evalNekoGlobal(String code, String documentUuid) {
+        try {
+            Object context = ensureNekoContext();
+            if (context == null) return;
+            Class<?> contextClass = context.getClass();
+            installNekoGlobals(contextClass, context);
+            Object bindings = getNekoBindings(contextClass, context);
+            ensureBindingsMethods(bindings);
+            removeBinding(bindings, "event");
+
+            boolean hadUuid = hasBinding(bindings, DOCUMENT_UUID_BINDING);
+            Object previousUuid = hadUuid ? nekoBindingsGetMember.invoke(bindings, DOCUMENT_UUID_BINDING) : null;
+            nekoBindingsPutMember.invoke(bindings, DOCUMENT_UUID_BINDING, documentUuid);
+
+            String previousScriptId = switchNekoScriptId(contextClass, context, "apricityui/global.js");
+            try {
+                Object graalSource = prepareGlobalGraalSource(code);
+                if (graalSource != null && nekoEvalSource != null) {
+                    nekoEvalSource.invoke(context, graalSource);
+                } else {
+                    nekoEval.invoke(context, "js", prepareGlobalCode(code));
+                }
+            } finally {
+                if (previousScriptId != null) {
+                    restoreNekoScriptId(contextClass, context, previousScriptId);
+                }
+                if (hadUuid) {
+                    nekoBindingsPutMember.invoke(bindings, DOCUMENT_UUID_BINDING, previousUuid);
+                } else {
+                    removeBinding(bindings, DOCUMENT_UUID_BINDING);
+                }
+            }
+        } catch (Throwable error) {
+            ApricityUI.LOGGER.error("[AUI Cleanroom] NekoJS global evaluation failed", error);
+        }
+    }
+
+    private Object getNekoBindings(Class<?> contextClass, Object context) throws Exception {
+        if (nekoGetBindings == null || nekoGetBindings.getDeclaringClass() != contextClass) {
+            nekoGetBindings = contextClass.getMethod("getBindings", String.class);
+        }
+        return nekoGetBindings.invoke(context, "js");
+    }
+
+    private void ensureBindingsMethods(Object bindings) throws Exception {
+        Class<?> cls = bindings.getClass();
+        if (cls == nekoBindingsClass && nekoBindingsPutMember != null) return;
+        nekoBindingsClass = cls;
+        nekoBindingsGetMember = cls.getMethod("getMember", String.class);
+        nekoBindingsPutMember = cls.getMethod("putMember", String.class, Object.class);
+        try {
+            nekoBindingsHasMember = cls.getMethod("hasMember", String.class);
+        } catch (NoSuchMethodException ignored) {
+            nekoBindingsHasMember = null;
+        }
+        try {
+            nekoBindingsRemoveMember = cls.getMethod("removeMember", String.class);
+        } catch (NoSuchMethodException ignored) {
+            nekoBindingsRemoveMember = null;
+        }
+    }
+
+    private boolean hasBinding(Object bindings, String name) throws Exception {
+        if (nekoBindingsHasMember != null) {
+            return Boolean.TRUE.equals(nekoBindingsHasMember.invoke(bindings, name));
+        }
+        return nekoBindingsGetMember.invoke(bindings, name) != null;
+    }
+
+    private void removeBinding(Object bindings, String name) throws Exception {
+        if (nekoBindingsRemoveMember != null) {
+            nekoBindingsRemoveMember.invoke(bindings, name);
+        } else {
+            nekoBindingsPutMember.invoke(bindings, name, null);
+        }
+    }
+
+    private String switchNekoScriptId(Class<?> contextClass, Object context, String scriptId) {
+        ensureNekoRegistryMethods(contextClass);
+        if (nekoSwitchScriptId == null) return null;
+        try {
+            return (String) nekoSwitchScriptId.invoke(null, context, scriptId);
+        } catch (Throwable ignored) {
+            return null;
+        }
+    }
+
+    private void restoreNekoScriptId(Class<?> contextClass, Object context, String previous) {
+        if (nekoRestoreScriptId == null) return;
+        try {
+            nekoRestoreScriptId.invoke(null, context, previous);
+        } catch (Throwable ignored) {
+        }
+    }
+
+    private void ensureNekoRegistryMethods(Class<?> contextClass) {
+        if (nekoRegistryChecked) return;
+        nekoRegistryChecked = true;
+        try {
+            Class<?> registry = Class.forName("com.tkisor.nekojs.script.ScriptContextRegistry");
+            nekoSwitchScriptId = registry.getMethod("switchCurrentScriptId", contextClass, String.class);
+            nekoRestoreScriptId = registry.getMethod("restoreCurrentScriptId", contextClass, String.class);
+        } catch (Throwable ignored) {
+            nekoSwitchScriptId = null;
+            nekoRestoreScriptId = null;
+        }
+    }
+
+    private String prepareGlobalCode(String code) {
+        if (code.equals(cachedGlobalCode) && cachedPreparedGlobalCode != null) {
+            return cachedPreparedGlobalCode;
+        }
+        String prepared = rewriteDeclarationsForSharedScope(code)
+                .replace("\"__AUI_DOCUMENT_UUID__\"", DOCUMENT_UUID_BINDING)
+                .replace("'__AUI_DOCUMENT_UUID__'", DOCUMENT_UUID_BINDING)
+                .replace("__AUI_DOCUMENT_UUID__", DOCUMENT_UUID_BINDING);
+        cachedGlobalCode = code;
+        cachedPreparedGlobalCode = prepared;
+        cachedGlobalGraalSource = null;
+        return prepared;
+    }
+
+    private Object prepareGlobalGraalSource(String code) {
+        String prepared = prepareGlobalCode(code);
+        if (cachedGlobalGraalSource != null) return cachedGlobalGraalSource;
+        cachedGlobalGraalSource = buildCachedGraalSource(prepared, "apricityui/global.js");
+        return cachedGlobalGraalSource;
+    }
+
+    private Object getOrBuildInlineGraalSource(String code, String name) {
+        Object cached = inlineGraalSourceCache.get(code);
+        if (cached != null) return cached;
+        String rewritten = rewriteDeclarationsForSharedScope(code);
+        Object built = buildCachedGraalSource(rewritten, name);
+        if (built != null) {
+            inlineGraalSourceCache.put(code, built);
+        }
+        return built;
+    }
+
+    private Object buildCachedGraalSource(String sourceText, String name) {
+        Class<?> sourceCls = resolveGraalSourceClass();
+        if (sourceCls == null) return null;
+        try {
+            Method newBuilder = sourceCls.getMethod("newBuilder", String.class, CharSequence.class, String.class);
+            Object builder = newBuilder.invoke(null, "js", sourceText, name);
+            try {
+                builder.getClass().getMethod("cached", boolean.class).invoke(builder, true);
+            } catch (NoSuchMethodException ignored) {
+            }
+            return builder.getClass().getMethod("build").invoke(builder);
+        } catch (Throwable ignored) {
+            return null;
+        }
+    }
+
+    private Class<?> resolveGraalSourceClass() {
+        if (graalSourceChecked) return graalSourceClass;
+        graalSourceChecked = true;
+        try {
+            graalSourceClass = Class.forName("graal.graalvm.polyglot.Source");
+        } catch (Throwable ignored) {
+            graalSourceClass = null;
+        }
+        return graalSourceClass;
     }
 
     private static final Pattern TOP_LEVEL_DECLARATION = Pattern.compile(
@@ -237,7 +450,7 @@ public final class CleanroomScriptService implements AuiScriptService {
                 }
                 nekoContext = formal;
                 nekoTemporary = false;
-                nekoEval = contextClass.getMethod("eval", String.class, CharSequence.class);
+                cacheNekoEvalMethods(contextClass);
                 ApricityUI.LOGGER.info("[AUI Cleanroom] attached to NekoJS CLIENT runtime");
                 installNekoGlobals(contextClass, formal);
                 return formal;
@@ -254,7 +467,7 @@ public final class CleanroomScriptService implements AuiScriptService {
             }
             nekoContext = builder.getClass().getMethod("build").invoke(builder);
             nekoTemporary = true;
-            nekoEval = contextClass.getMethod("eval", String.class, CharSequence.class);
+            cacheNekoEvalMethods(contextClass);
             // The guest global must exist before the very first eval in *any* context,
             // otherwise the first global.js aborts half-way and leaves its `let`
             // declarations bound in the shared context scope.
@@ -265,6 +478,18 @@ public final class CleanroomScriptService implements AuiScriptService {
             ApricityUI.LOGGER.warn("[AUI Cleanroom] NekoJS is present but its Graal context is unavailable", error);
             backend = Backend.NONE;
             return null;
+        }
+    }
+
+    private void cacheNekoEvalMethods(Class<?> contextClass) throws NoSuchMethodException {
+        nekoEval = contextClass.getMethod("eval", String.class, CharSequence.class);
+        Class<?> sourceCls = resolveGraalSourceClass();
+        if (sourceCls != null) {
+            try {
+                nekoEvalSource = contextClass.getMethod("eval", sourceCls);
+            } catch (NoSuchMethodException ignored) {
+                nekoEvalSource = null;
+            }
         }
     }
 
@@ -534,6 +759,55 @@ public final class CleanroomScriptService implements AuiScriptService {
             engine.eval(JS.rewriteForLegacyKube(code), bindings);
         } catch (Throwable error) {
             ApricityUI.LOGGER.error("[AUI Cleanroom] legacy KubeJS evaluation failed", error);
+        }
+    }
+
+    private void evalKubeGlobal(String code, String documentUuid) {
+        try {
+            ScriptEngine engine = ensureKubeEngine();
+            if (engine == null) return;
+            Bindings bindings = engine.getBindings(ScriptContext.ENGINE_SCOPE);
+            bindings.remove("event");
+            boolean hadUuid = bindings.containsKey(DOCUMENT_UUID_BINDING);
+            Object previousUuid = hadUuid ? bindings.get(DOCUMENT_UUID_BINDING) : null;
+            bindings.put(DOCUMENT_UUID_BINDING, documentUuid);
+            try {
+                CompiledScript compiled = compileKubeGlobal(engine, code);
+                if (compiled != null) {
+                    compiled.eval(bindings);
+                } else {
+                    String prepared = JS.rewriteForLegacyKube(code)
+                            .replace("\"__AUI_DOCUMENT_UUID__\"", DOCUMENT_UUID_BINDING)
+                            .replace("'__AUI_DOCUMENT_UUID__'", DOCUMENT_UUID_BINDING)
+                            .replace("__AUI_DOCUMENT_UUID__", DOCUMENT_UUID_BINDING);
+                    engine.eval(prepared, bindings);
+                }
+            } finally {
+                if (hadUuid) bindings.put(DOCUMENT_UUID_BINDING, previousUuid);
+                else bindings.remove(DOCUMENT_UUID_BINDING);
+            }
+        } catch (Throwable error) {
+            ApricityUI.LOGGER.error("[AUI Cleanroom] legacy KubeJS global evaluation failed", error);
+        }
+    }
+
+    private CompiledScript compileKubeGlobal(ScriptEngine engine, String code) {
+        if (!(engine instanceof Compilable compilable)) return null;
+        if (code.equals(cachedKubeGlobalCode) && cachedKubeGlobalScript != null) {
+            return cachedKubeGlobalScript;
+        }
+        try {
+            String prepared = JS.rewriteForLegacyKube(code)
+                    .replace("\"__AUI_DOCUMENT_UUID__\"", DOCUMENT_UUID_BINDING)
+                    .replace("'__AUI_DOCUMENT_UUID__'", DOCUMENT_UUID_BINDING)
+                    .replace("__AUI_DOCUMENT_UUID__", DOCUMENT_UUID_BINDING);
+            cachedKubeGlobalScript = compilable.compile(prepared);
+            cachedKubeGlobalCode = code;
+            return cachedKubeGlobalScript;
+        } catch (Throwable ignored) {
+            cachedKubeGlobalScript = null;
+            cachedKubeGlobalCode = null;
+            return null;
         }
     }
 
