@@ -271,9 +271,9 @@ class CssCompatibilityTest {
         assertEquals("9px 4px", child.getComputedStyle().gap);
 
         child.setAttribute("style", "gap: unset;");
-        assertEquals("0px", child.getComputedStyle().gap);
-        assertEquals("0px", child.getComputedStyle().rowGap);
-        assertEquals("0px", child.getComputedStyle().columnGap);
+        assertEquals("normal", child.getComputedStyle().gap);
+        assertEquals("normal", child.getComputedStyle().rowGap);
+        assertEquals("normal", child.getComputedStyle().columnGap);
     }
 
     @Test
@@ -309,8 +309,9 @@ class CssCompatibilityTest {
         assertEquals("unset", solid.backgroundImage);
 
         Style varColor = new Style();
-        varColor.merge("background: var(--blue-panel);");
-        assertEquals("var(--blue-panel)", varColor.backgroundColor);
+        varColor.merge("--blue-panel: #123456; background: var(--blue-panel);");
+        varColor.resolveVarReferences(null);
+        assertEquals("#123456", varColor.backgroundColor);
         assertEquals("unset", varColor.backgroundImage);
     }
 
@@ -394,13 +395,13 @@ class CssCompatibilityTest {
         assertEquals("inline-grid", element.getComputedStyle().display);
 
         element.setAttribute("style", "display: table;");
-        assertEquals("block", element.getComputedStyle().display);
+        assertEquals("table", element.getComputedStyle().display);
 
         element.setAttribute("style", "display: inline-table;");
         assertEquals("inline-block", element.getComputedStyle().display);
 
         element.setAttribute("style", "display: flow-root;");
-        assertEquals("block", element.getComputedStyle().display);
+        assertEquals("flow-root", element.getComputedStyle().display);
     }
 
     @Test
@@ -577,6 +578,30 @@ class CssCompatibilityTest {
 
         assertEquals("14px", Selector.matchCSS(select).get("padding-left").value());
         assertEquals("14px", select.getRawComputedStyle().paddingLeft);
+    }
+
+    @Test
+    void moreSpecificFlexShorthandOverridesLessSpecificLonghands() {
+        Document document = TestDocumentFactory.createDocument();
+        Map<String, Map<String, CSS.Declaration>> cache = new java.util.LinkedHashMap<>();
+        CSS.readCSS("""
+                #container .item { flex: 2 0 40px; }
+                .item { flex-grow: 7; flex-shrink: 3; flex-basis: 80px; }
+                """, cache, "test://flex-cascade.css");
+        document.CSSCache.putAll(cache);
+        document.rebuildSelectorIndex();
+
+        Element container = new Element(document, "div");
+        container.setAttribute("id", "container");
+        Element item = new Element(document, "div");
+        item.setAttribute("class", "item");
+        container.appendChild(item);
+        document.body.appendChild(container);
+
+        Style style = item.getComputedStyle();
+        assertEquals("2", style.flexGrow);
+        assertEquals("0", style.flexShrink);
+        assertEquals("40px", style.flexBasis);
     }
 
     @Test
@@ -1042,6 +1067,62 @@ class CssCompatibilityTest {
 
         assertEquals("contain", element.getComputedStyle().objectFit);
         assertEquals("right bottom", element.getComputedStyle().objectPosition);
+    }
+
+    @Test
+    void imageRenderingDefaultsToAutoAndIsInherited() {
+        Document document = TestDocumentFactory.createDocument();
+        Element plainParent = new Element(document, "div");
+        Element plainChild = new Element(document, "img");
+        document.body.appendChild(plainParent);
+        plainParent.appendChild(plainChild);
+
+        assertEquals("auto", plainParent.getComputedStyle().imageRendering);
+        assertEquals("auto", plainChild.getComputedStyle().imageRendering);
+
+        Element parent = new Element(document, "div");
+        parent.setAttribute("style", "image-rendering: PIXELATED;");
+        document.body.appendChild(parent);
+        Element child = new Element(document, "img");
+        parent.appendChild(child);
+
+        // 关键字大小写不敏感，计算值归一为小写。
+        assertEquals("pixelated", parent.getComputedStyle().imageRendering);
+        assertEquals("pixelated", child.getComputedStyle().imageRendering);
+
+        // 非法值在浏览器里被丢弃：继承属性回退到父级计算值。
+        Element invalidChild = new Element(document, "img");
+        invalidChild.setAttribute("style", "image-rendering: bogus;");
+        parent.appendChild(invalidChild);
+        assertEquals("pixelated", invalidChild.getComputedStyle().imageRendering);
+    }
+
+    @Test
+    void imageRenderingMapsToBrowserSamplingRules() {
+        // auto 是 UA 默认（浏览器为平滑），smooth/high-quality 同样线性过滤。
+        assertTrue(ImageDrawer.usesLinearFiltering(styleWith("auto"), 2, 2, 1, 1));
+        assertTrue(ImageDrawer.usesLinearFiltering(styleWith("smooth"), 2, 2, 1, 1));
+        assertTrue(ImageDrawer.usesLinearFiltering(styleWith("high-quality"), 0.5, 0.5, 1, 1));
+
+        // crisp-edges 两个方向都保留边缘。
+        assertFalse(ImageDrawer.usesLinearFiltering(styleWith("crisp-edges"), 2, 2, 1, 1));
+        assertFalse(ImageDrawer.usesLinearFiltering(styleWith("crisp-edges"), 0.5, 0.5, 1, 1));
+
+        // pixelated 放大最近邻、缩小等同 auto，1:1 与未知固有尺寸按放大处理。
+        assertFalse(ImageDrawer.usesLinearFiltering(styleWith("pixelated"), 2, 2, 1, 1));
+        assertTrue(ImageDrawer.usesLinearFiltering(styleWith("pixelated"), 0.5, 0.5, 1, 1));
+        assertFalse(ImageDrawer.usesLinearFiltering(styleWith("pixelated"), 1, 1, 1, 1));
+        assertFalse(ImageDrawer.usesLinearFiltering(styleWith("pixelated"), 0));
+
+        // 无法识别的关键字按 auto 处理。
+        assertTrue(ImageDrawer.usesLinearFiltering(styleWith("bogus"), 2, 2, 1, 1));
+    }
+
+    private static Style styleWith(String imageRendering) {
+        Style style = new Style();
+        style.merge("image-rendering: " + imageRendering + ";");
+        style.finalizeComputedValues(null);
+        return style;
     }
 
     @Test

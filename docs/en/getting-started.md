@@ -21,7 +21,9 @@ dependencies {
 }
 ```
 
-This coordinate is for Forge 1.20.1. The repository also contains Fabric 1.20.1, Fabric 1.21.1, NeoForge 1.21.1, Fabric 26.1, and NeoForge 26.1 targets; choose the artifact for your loader and Minecraft version. The current source version is in the root `gradle.properties`.
+The coordinate above is a historical Forge 1.20.1 release example, not a Minecraft 1.16.5 dependency. The `forge-1.16.5` branch maintains only Forge 1.16.5; other targets remain as historical source and are excluded from default builds and CI. Port and release readiness must be verified separately; historical feature descriptions are not a compatibility guarantee.
+
+To build from source on Windows, run `powershell -ExecutionPolicy Bypass -File scripts/build-target.ps1` at the repository root (defaults to and only accepts `forge-1.16.5`). Output is in `targets/forge-1.16.5/build/libs/`. Use the JDK declared in that target's `ci.properties`; see the [repository README](../../README.md#构建与开发) for root orchestration and development commands.
 
 ## 2. Confirm It's Working
 
@@ -74,7 +76,7 @@ It's just an ordinary web page. Only three things need explaining:
 
 **There are no browser default styles**: `h2`, `p`, and `button` come with no appearance at all — font size, color, and spacing are all yours to write. For which CSS works and which gets ignored, see [HTML/CSS Coverage](guide/html-css-coverage).
 
-**Script support depends on the target**: Forge 1.20.1, NeoForge 1.21.1, and NeoForge 26.1 support page scripts; Fabric targets currently do not execute page scripts. KubeJS mod bindings are available only on Forge 1.20.1 and NeoForge 1.21.1. See [Web API](guide/web-api) and [Mod API](guide/apricity-api) for the capabilities and target differences.
+**Script support depends on the target**: Forge 1.20.1, NeoForge 1.21.1, and NeoForge 26.1 support page scripts; KubeJS is used when installed, otherwise the standalone Rhino runtime runs them, and with neither installed scripts are skipped. Fabric targets currently do not execute page scripts. KubeJS mod bindings are available only on Forge 1.20.1 and NeoForge 1.21.1. See [Web API](guide/web-api) and [Mod API](guide/apricity-api) for the capabilities and target differences.
 
 **Paths**: the mod locates files by **logical path**, not disk location. If the file is at `<game directory>/apricity/screens/hello.html`, you write `screens/hello.html` in code — no `assets/...` prefix, no drive letters. Referencing CSS and images from inside a page works the same way. See [Resource Management](guide/resource-manager) for the rules.
 

@@ -40,6 +40,7 @@ public final class AuiServices {
     private static volatile AuiScriptService script = Defaults.SCRIPT;
     private static volatile AuiRenderService render = Defaults.RENDER;
     private static volatile AuiItemRenderService items = Defaults.ITEMS;
+    private static volatile AuiModelRenderService models = source -> null;
     private static volatile AuiAudioService audio = Defaults.AUDIO;
     private static volatile AuiWebViewService webView = Defaults.WEBVIEW;
     private static volatile boolean bootstrapped;
@@ -81,6 +82,14 @@ public final class AuiServices {
 
     public static void setItems(AuiItemRenderService implementation) {
         items = implementation == null ? Defaults.ITEMS : implementation;
+    }
+
+    public static void setModels(AuiModelRenderService implementation) {
+        models = implementation == null ? source -> null : implementation;
+    }
+
+    public static AuiModelRenderService models() {
+        return models;
     }
 
     public static void setAudio(AuiAudioService implementation) {
@@ -158,7 +167,9 @@ public final class AuiServices {
         bootstrapped = true;
     }
 
-    /** Safe headless defaults. */
+    /**
+     * Safe headless defaults.
+     */
     private static final class Defaults {
         static final AuiClientService CLIENT = new AuiClientService() {
             @Override
@@ -299,8 +310,17 @@ public final class AuiServices {
             }
         };
 
-        static final DocumentExpander EXPANDER = document -> {
-            // No loader implementation available; pure expansion is loader-side.
+        static final DocumentExpander EXPANDER = new DocumentExpander() {
+            @Override
+            public void apply(com.sighs.apricityui.init.Document document) {
+                // No loader implementation available; pure expansion is loader-side.
+            }
+
+            @Override
+            public boolean supportsInnerHtmlBatch(com.sighs.apricityui.init.Document document,
+                                                  com.sighs.apricityui.init.Node parent) {
+                return true; // The default has no runtime hierarchy hooks.
+            }
         };
 
         static final AuiConfigService CONFIG = new AuiConfigService() {
@@ -626,12 +646,12 @@ public final class AuiServices {
 
         static final AuiRenderService RENDER = new AuiRenderService() {
             @Override
-            public void setProjectionMatrix(Matrix4f matrix) {
+            public Matrix4f getProjectionMatrix() {
+                return new Matrix4f();
             }
 
             @Override
-            public Matrix4f getProjectionMatrix() {
-                return new Matrix4f();
+            public void setProjectionMatrix(Matrix4f matrix) {
             }
 
             @Override
@@ -847,6 +867,10 @@ public final class AuiServices {
 
             @Override
             public void clearStencilBuffer() {
+            }
+
+            @Override
+            public void clearDepthBuffer() {
             }
 
             @Override

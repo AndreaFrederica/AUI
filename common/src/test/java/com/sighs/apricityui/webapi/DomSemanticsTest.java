@@ -279,9 +279,9 @@ class DomSemanticsTest {
 
         Box box = new Box();
         box.element = element;
-        element.getRenderer().box.set(box);
-        element.getRenderer().size.set(new Size(30, 40));
-        element.getRenderer().position.set(new Position(5, 7));
+        element.getLayout().box.set(box);
+        element.getLayout().size.set(new Size(30, 40));
+        element.getLayout().position.set(new Position(5, 7));
 
         Element.DOMRect rect = element.getBoundingClientRect();
         assertEquals(5, rect.x);
@@ -315,7 +315,9 @@ class DomSemanticsTest {
         host.removeChild(child);
         host.appendChild(textNode);
         host.appendChild(commentNode);
-        assertEquals("text-childcomment-child", host.getTextContent());
+        // DOM 规范：textContent 跳过注释（注释仍留在 innerHTML 与子节点列表里）
+        assertEquals("text-child", host.getTextContent());
+        assertEquals("comment-child", commentNode.getTextContent());
         assertEquals("text-child<!--comment-child-->", host.getInnerHTML());
         assertEquals("<div>text-child<!--comment-child--></div>", host.getOuterHTML());
         assertEquals(List.of(textNode, commentNode), host.getChildNodes());
@@ -486,7 +488,9 @@ class DomSemanticsTest {
         host.appendChild(nested);
         host.appendChild(textNode);
         host.appendChild(commentNode);
-        assertEquals("beforemarker", host.getTextContent());
+        // DOM 规范：element.textContent 只由后代 Text 节点的数据拼成，注释不参与
+        assertEquals("before", host.getTextContent());
+        assertEquals("marker", commentNode.getTextContent());
 
         host.setTextContent("reset");
         assertEquals("reset", host.getTextContent());
@@ -660,11 +664,11 @@ class DomSemanticsTest {
 
         host.getRenderer().text.set(new Text());
         host.getRenderer().wrappedText.set(new Text.WrappedTextCache(1, 2, 3, 4L, new Text.WrappedText(List.of("a"), new int[]{0}, 1)));
-        host.getRenderer().size.set(new Size(10, 10));
+        host.getLayout().size.set(new Size(10, 10));
 
         textNode.setTextContent("alphabet");
 
-        assertNull(host.getRenderer().size.get());
+        assertNull(host.getLayout().size.get());
         assertNull(host.getRenderer().text.get());
         assertNull(host.getRenderer().wrappedText.get());
         assertTrue(document.getDirtyElements().contains(host));

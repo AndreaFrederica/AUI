@@ -2,13 +2,8 @@ package com.sighs.apricityui.event;
 
 import com.sighs.apricityui.element.Select;
 import com.sighs.apricityui.init.*;
-import com.sighs.apricityui.layout.Box;
 import com.sighs.apricityui.layout.Position;
-import com.sighs.apricityui.layout.Size;
-import com.sighs.apricityui.render.AABB;
-import com.sighs.apricityui.render.Base;
-import com.sighs.apricityui.render.Rect;
-import com.sighs.apricityui.render.RenderNode;
+import com.sighs.apricityui.render.CommittedGeometry;
 import com.sighs.apricityui.render.DocumentLayerOrder;
 import com.sighs.apricityui.render.GeometryQueryScope;
 import com.sighs.apricityui.style.*;
@@ -16,22 +11,20 @@ import com.sighs.apricityui.style.*;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
-import java.util.Stack;
 import java.util.concurrent.atomic.AtomicBoolean;
+
 import com.sighs.apricityui.init.Document;
 import com.sighs.apricityui.render.Drawer;
 import com.sighs.apricityui.init.Element;
 import com.sighs.apricityui.event.Event;
 import com.sighs.apricityui.render.Operation;
 import com.sighs.apricityui.style.Cursor;
-import com.sighs.apricityui.style.Interaction;
 
 // 鼠标事件，现在还没有做得很完善
 public class MouseEvent extends Event implements Cloneable {
     public static final int DOM_DELTA_PIXEL = 0;
     public static final int PRIMARY_POINTER_ID = 1;
     private static final long DOUBLE_CLICK_WINDOW_NS = 500_000_000L;
-    private NativeDispatchState nativeDispatchState = new NativeDispatchState();
     public double clientX = 0;
     public double clientY = 0;
     public double pageX = 0;
@@ -43,11 +36,6 @@ public class MouseEvent extends Event implements Cloneable {
     public boolean altKey;
     public boolean shiftKey;
     public boolean controlKey;
-
-    /** 浏览器名称别名：JS 里 e.ctrlKey 访问 controlKey。 */
-    public boolean getCtrlKey() {
-        return controlKey;
-    }
     public double deltaX = 0;
     public double deltaY = 0;
     public int deltaMode = DOM_DELTA_PIXEL;
@@ -58,9 +46,11 @@ public class MouseEvent extends Event implements Cloneable {
     public String pointerType = "mouse";
     public boolean isPrimary = true;
     public int clickCount = 0;
-    /** 由 triggerResolvedEvent 把 mousemove/mouseup 重派发到按下元素（指针已移到其他元素）时置位。 */
+    /**
+     * 由 triggerResolvedEvent 把 mousemove/mouseup 重派发到按下元素（指针已移到其他元素）时置位。
+     */
     public boolean activeElementRedirect = false;
-
+    private NativeDispatchState nativeDispatchState = new NativeDispatchState();
     public MouseEvent(String type, Position mousePosition) {
         this(type, mousePosition, -1);
     }
@@ -92,15 +82,6 @@ public class MouseEvent extends Event implements Cloneable {
         this.button = button;
     }
 
-    /** Prevents the originating Minecraft input event after AUI dispatch completes. */
-    public void consumeNative() {
-        nativeDispatchState.consumed = true;
-    }
-
-    public boolean isNativeConsumed() {
-        return nativeDispatchState.consumed;
-    }
-
     public static boolean tiggerEvent(MouseEvent event) {
         // 游戏未显示鼠标（准星模式）时 overlay/screen 文档完全不接收鼠标事件，
         // 事件透传回游戏本体；世界窗口由按文档派发路径处理，不经过这里
@@ -129,21 +110,30 @@ public class MouseEvent extends Event implements Cloneable {
         }
     }
 
+    /** Hover-style events that may be resolved without forcing deferred geometry to build. */
+    private static boolean isPassiveProbe(String type) {
+        return "mousemove".equals(type) || "mouseover".equals(type) || "mouseout".equals(type);
+    }
+
     // 触发鼠标事件的主体
     public static boolean tiggerEvent(MouseEvent event, Document document) {
         try (GeometryQueryScope geometryScope = GeometryQueryScope.open()) {
             try (Document.ContextScope ignored = Document.withContext(document)) {
-            double originalClientX = event == null ? 0 : event.clientX;
-            double originalClientY = event == null ? 0 : event.clientY;
-            event = adaptToDocumentViewport(event, document);
-            Element activeElement = document.getPressedElement();
-            Position detectionPos = new Position(event.clientX, event.clientY);
-            Element target = document.hitTest(detectionPos);
-            boolean consumed = triggerResolvedEvent(event, document, target, activeElement, true);
-            if (document.interceptsMouseEventsAt(new Position(originalClientX, originalClientY))) {
-                event.consumeNative();
-            }
-            return consumed;
+                double originalClientX = event == null ? 0 : event.clientX;
+                double originalClientY = event == null ? 0 : event.clientY;
+                event = adaptToDocumentViewport(event, document);
+                Element activeElement = document.getPressedElement();
+                Position detectionPos = new Position(event.clientX, event.clientY);
+                // 开屏分片尚未建完几何时，hover/move 这类被动事件不该把整页同步建出来；
+                // 按下/点击/滚轮属于真实意图，仍走强制补几何的 hitTest。
+                Element target = isPassiveProbe(event.type)
+                        ? document.hitTestIfComplete(detectionPos)
+                        : document.hitTest(detectionPos);
+                boolean consumed = triggerResolvedEvent(event, document, target, activeElement, true);
+                if (document.interceptsMouseEventsAt(new Position(originalClientX, originalClientY))) {
+                    event.consumeNative();
+                }
+                return consumed;
             }
         }
     }
@@ -172,7 +162,7 @@ public class MouseEvent extends Event implements Cloneable {
     public static boolean dispatchToTarget(MouseEvent event, Document document, Element target) {
         try (GeometryQueryScope geometryScope = GeometryQueryScope.open()) {
             try (Document.ContextScope ignored = Document.withContext(document)) {
-            return triggerResolvedEvent(event, document, target, document == null ? null : document.getPressedElement(), false);
+                return triggerResolvedEvent(event, document, target, document == null ? null : document.getPressedElement(), false);
             }
         }
     }
@@ -309,9 +299,7 @@ public class MouseEvent extends Event implements Cloneable {
         boolean consumed = false;
 
         if (resolveGeometry && target != null) {
-            Position targetPosition = resolveHitBoxPosition(target);
-            event.offsetX = event.clientX - targetPosition.x;
-            event.offsetY = event.clientY - targetPosition.y;
+            setTargetOffset(event, target);
         }
 
         event.target = target;
@@ -365,9 +353,7 @@ public class MouseEvent extends Event implements Cloneable {
             activeEvent.target = activeElement;
             activeEvent.activeElementRedirect = true;
             if (resolveGeometry) {
-                Position activePosition = resolveHitBoxPosition(activeElement);
-                activeEvent.offsetX = activeEvent.clientX - activePosition.x;
-                activeEvent.offsetY = activeEvent.clientY - activePosition.y;
+                setTargetOffset(activeEvent, activeElement);
             }
             consumed |= Event.triggerSingle(activeEvent);
         }
@@ -466,118 +452,53 @@ public class MouseEvent extends Event implements Cloneable {
 
     // 肥简单的范围检查，看鼠标位置是否在某元素的范围内。
     public static boolean checkCursor(Element element, Position mousePos) {
-        try (GeometryQueryScope geometryScope = GeometryQueryScope.open()) {
-            return checkCursorInScope(element, mousePos);
-        }
-    }
-
-    private static boolean checkCursorInScope(Element element, Position mousePos) {
         if (mousePos == null) return false;
-        Position hitBoxPosition = resolveHitBoxPosition(element);
-        Size hitBoxSize = resolveHitBoxSize(element);
-        // 命中盒是按元素局部坐标算的（cite rect 快照），光标是文档坐标：元素在 transform
-        // 子树里时要先把光标逆变换回去，否则缩放过的画面上鼠标落点会整体偏移。
-        double[] local = Base.toLocalPoint(element, mousePos.x, mousePos.y);
-        double localX = local[0];
-        double localY = local[1];
-        return (localX >= hitBoxPosition.x && localX <= hitBoxPosition.x + hitBoxSize.width()) &&
-                (localY >= hitBoxPosition.y && localY <= hitBoxPosition.y + hitBoxSize.height());
+        var box = CommittedGeometry.hitBox(element);
+        if (box == null) return false;
+        double[] local = CommittedGeometry.toLocalPoint(element, mousePos.x, mousePos.y);
+        return box.contains(local[0], local[1]);
     }
 
-    private static Position resolveHitBoxPosition(Element element) {
-        if (element == null) return Position.ZERO;
-        Rect committed = element.getRenderer().getCommittedRect();
-        if (committed != null) {
-            if (usesBodyHitBox(element)) return committed.getBodyRectPosition();
-            return new Position(
-                    committed.position.x + committed.box.getMarginLeft(),
-                    committed.position.y + committed.box.getMarginTop()
-            );
-        }
-        if (usesBodyHitBox(element)) {
-            return Rect.of(element).getBodyRectPosition();
-        }
-
-        Position position = Position.of(element);
-        Box box = Box.of(element);
-        return new Position(position.x + box.getMarginLeft(), position.y + box.getMarginTop());
+    private static void setTargetOffset(MouseEvent event, Element element) {
+        var box = CommittedGeometry.hitBox(element);
+        if (box == null) return;
+        double[] local = CommittedGeometry.toLocalPoint(element, event.clientX, event.clientY);
+        event.offsetX = local[0] - box.x();
+        event.offsetY = local[1] - box.y();
     }
 
-    private static Size resolveHitBoxSize(Element element) {
-        if (element == null) return Size.ZERO;
-        Rect committed = element.getRenderer().getCommittedRect();
-        if (committed != null) {
-            return usesBodyHitBox(element)
-                    ? committed.getBodyRectSize()
-                    : committed.getElementSize();
-        }
-        if (usesBodyHitBox(element)) {
-            return Rect.of(element).getBodyRectSize();
-        }
-        return Size.of(element);
-    }
-
-    private static boolean usesBodyHitBox(Element element) {
-        return element != null && "IMG".equals(element.tagName);
-    }
-
-    // 用于寻找鼠标事件的目标元素，也就是鼠标正对着的最上层元素，这块一般没啥问题。
-    // 基本逻辑是把绘制队列倒序遍历，看最先命中哪个，写这么多主要是考虑到遮罩和style的影响。
-    public static Element hitTest(List<RenderNode> paintOrder, Position cursorPosition) {
-        try (GeometryQueryScope geometryScope = GeometryQueryScope.open()) {
-            return hitTestInScope(paintOrder, cursorPosition);
+    private static boolean isModifierPressed(String key) {
+        try {
+            return Operation.isKeyPressed(key);
+        } catch (Throwable ignored) {
+            return false;
         }
     }
 
-    private static Element hitTestInScope(List<RenderNode> paintOrder, Position cursorPosition) {
-        if (paintOrder == null || paintOrder.isEmpty()) return null;
-
-        Stack<Element> clipStack = new Stack<>();
-
-        for (int i = paintOrder.size() - 1; i >= 0; i--) {
-            RenderNode node = paintOrder.get(i);
-
-            if (node instanceof RenderNode.MaskPopNode popNode) {
-                clipStack.push(popNode.target());
-            } else if (node instanceof RenderNode.MaskPushNode pushNode) {
-                if (!clipStack.isEmpty() && clipStack.peek() == pushNode.target()) {
-                    clipStack.pop();
-                }
-            } else if (node instanceof RenderNode.ElementPhaseNode phaseNode) {
-                Element element = phaseNode.target();
-
-                if (!Interaction.isDisplayed(element) || !element.isVisible || !element.isPointerEnabled) continue;
-
-                if (checkCursorInScope(element, cursorPosition)) {
-                    boolean isClipped = false;
-                    for (Element mask : clipStack) {
-                        if (!isCursorInsideClip(mask, cursorPosition)) {
-                            isClipped = true;
-                            break;
-                        }
-                    }
-                    if (!isClipped) {
-                        return element;
-                    }
-                }
-            }
+    private static int resolveButtons() {
+        try {
+            return Operation.getMouseButtons();
+        } catch (Throwable ignored) {
+            return 0;
         }
-        return null;
     }
 
     /**
-     * Whether the cursor is inside a mask element's overflow clip.
-     *
-     * <p>The root/body overflow is carried by the viewport (CSS 2.1 §11.1.1), so those
-     * masks clip at the viewport scrollport rather than at their own content-sized box.</p>
+     * 浏览器名称别名：JS 里 e.ctrlKey 访问 controlKey。
      */
-    private static boolean isCursorInsideClip(Element mask, Position cursorPosition) {
-        Rect maskRect = Rect.of(mask);
-        if (!RenderNode.clipsAtViewport(maskRect, mask)) return checkCursorInScope(mask, cursorPosition);
-        AABB box = RenderNode.overflowClipBox(maskRect, mask);
-        return box != null
-                && cursorPosition.x >= box.x() && cursorPosition.x <= box.maxX()
-                && cursorPosition.y >= box.y() && cursorPosition.y <= box.maxY();
+    public boolean getCtrlKey() {
+        return controlKey;
+    }
+
+    /**
+     * Prevents the originating Minecraft input event after AUI dispatch completes.
+     */
+    public void consumeNative() {
+        nativeDispatchState.consumed = true;
+    }
+
+    public boolean isNativeConsumed() {
+        return nativeDispatchState.consumed;
     }
 
     @Override
@@ -612,21 +533,5 @@ public class MouseEvent extends Event implements Cloneable {
 
     private static final class NativeDispatchState {
         private boolean consumed;
-    }
-
-    private static boolean isModifierPressed(String key) {
-        try {
-            return Operation.isKeyPressed(key);
-        } catch (Throwable ignored) {
-            return false;
-        }
-    }
-
-    private static int resolveButtons() {
-        try {
-            return Operation.getMouseButtons();
-        } catch (Throwable ignored) {
-            return 0;
-        }
     }
 }

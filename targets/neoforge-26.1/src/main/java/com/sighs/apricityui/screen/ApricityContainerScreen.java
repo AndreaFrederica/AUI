@@ -38,16 +38,29 @@ import java.util.Set;
  * {@code AbstractContainerScreenMixin}; menu slot items, display slot items
  * and tooltips are all extracted here.</p>
  */
-public class ApricityContainerScreen extends AbstractContainerScreen<ApricityContainerMenu> implements AuiLinkedScreen {
+public class ApricityContainerScreen<M extends ApricityContainerMenu> extends AbstractContainerScreen<M> implements AuiLinkedScreen {
     private Document linkedDocument;
     private SlotDataBinder slotBinder;
     private ApricityUiPipRenderState.FloatingItemBatch floatingItems =
             new ApricityUiPipRenderState.FloatingItemBatch();
 
-    public ApricityContainerScreen(ApricityContainerMenu menu, Inventory inventory, Component title) {
+    public ApricityContainerScreen(M menu, Inventory inventory, Component title) {
         super(menu, inventory, title,
                 Math.max(1, Minecraft.getInstance().getWindow().getGuiScaledWidth()),
                 Math.max(1, Minecraft.getInstance().getWindow().getGuiScaledHeight()));
+    }
+
+    private static boolean isControlModifier(int modifiers) {
+        return (modifiers & GLFW.GLFW_MOD_CONTROL) != 0;
+    }
+
+    /**
+     * Screen.hasControlDown() was removed in 26.1; check the physical Ctrl keys instead.
+     */
+    private static boolean hasControlDown() {
+        long handle = Minecraft.getInstance().getWindow().handle();
+        return GLFW.glfwGetKey(handle, GLFW.GLFW_KEY_LEFT_CONTROL) == GLFW.GLFW_PRESS
+                || GLFW.glfwGetKey(handle, GLFW.GLFW_KEY_RIGHT_CONTROL) == GLFW.GLFW_PRESS;
     }
 
     public Document getLinkedDocument() {
@@ -111,22 +124,23 @@ public class ApricityContainerScreen extends AbstractContainerScreen<ApricityCon
     protected void init() {
         super.init();
 
-        if (linkedDocument != null) {
-            linkedDocument.remove();
-            linkedDocument = null;
+        // Screen.resize() calls init(); keep the live Document so resizing does not
+        // rebuild the page. A closed/disposed Document is recreated normally.
+        if (linkedDocument == null || !linkedDocument.isActive()) {
+            linkedDocument = Document.create(menu.getTemplatePath());
+            if (linkedDocument == null) return;
+            if (slotBinder != null) {
+                slotBinder.clear();
+                slotBinder = null;
+            }
         }
-        if (slotBinder != null) {
-            slotBinder.clear();
-            slotBinder = null;
-        }
-
-        linkedDocument = Document.create(menu.getTemplatePath());
         if (linkedDocument == null) return;
+        if (slotBinder == null) {
+            slotBinder = new SlotDataBinder(menu);
+            slotBinder.setDisplayStateResolver(this::resolveMenuSlotDisplayState);
+            slotBinder.bindSlotsFromDocument(linkedDocument);
+        }
         linkedDocument.applyViewport(false);
-
-        slotBinder = new SlotDataBinder(menu);
-        slotBinder.setDisplayStateResolver(this::resolveMenuSlotDisplayState);
-        slotBinder.bindSlotsFromDocument(linkedDocument);
         slotBinder.syncAllSlotPositions(linkedDocument, leftPos, topPos, true);
     }
 
@@ -329,9 +343,11 @@ public class ApricityContainerScreen extends AbstractContainerScreen<ApricityCon
     public void removed() {
         if (linkedDocument != null) {
             linkedDocument.remove();
+            linkedDocument = null;
         }
         if (slotBinder != null) {
             slotBinder.clear();
+            slotBinder = null;
         }
         Size.clearViewportOverride();
         super.removed();
@@ -351,18 +367,5 @@ public class ApricityContainerScreen extends AbstractContainerScreen<ApricityCon
             slotBinder.syncAllSlotPositions(linkedDocument, leftPos, topPos, true);
         }
         return true;
-    }
-
-    private static boolean isControlModifier(int modifiers) {
-        return (modifiers & GLFW.GLFW_MOD_CONTROL) != 0;
-    }
-
-    /**
-     * Screen.hasControlDown() was removed in 26.1; check the physical Ctrl keys instead.
-     */
-    private static boolean hasControlDown() {
-        long handle = Minecraft.getInstance().getWindow().handle();
-        return GLFW.glfwGetKey(handle, GLFW.GLFW_KEY_LEFT_CONTROL) == GLFW.GLFW_PRESS
-                || GLFW.glfwGetKey(handle, GLFW.GLFW_KEY_RIGHT_CONTROL) == GLFW.GLFW_PRESS;
     }
 }

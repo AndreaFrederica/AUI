@@ -25,6 +25,7 @@ import net.minecraft.client.renderer.MultiBufferSource;
 import net.minecraft.client.renderer.RenderType;
 import net.minecraft.client.renderer.ShaderInstance;
 import net.minecraft.client.renderer.texture.DynamicTexture;
+import net.minecraft.client.gui.GuiGraphics;
 import net.minecraft.resources.ResourceLocation;
 import org.joml.Matrix4f;
 import org.lwjgl.opengl.GL11;
@@ -33,6 +34,7 @@ import org.lwjgl.opengl.GL14;
 import org.lwjgl.opengl.GL20;
 import org.lwjgl.opengl.GL30;
 
+import java.nio.ByteBuffer;
 import java.util.IdentityHashMap;
 import java.util.Map;
 
@@ -47,14 +49,99 @@ public final class RenderService implements AuiRenderService {
     private RenderService() {
     }
 
+    /**
+     * Mixin callback from RenderTarget#createBuffers. Vanilla rebuilds a
+     * target's GL objects on every window resize (destroyBuffers +
+     * createBuffers), which drops the stencil attachment we installed — and
+     * the driver typically reuses the just-freed framebuffer/texture ids, so
+     * the id-based early return in {@link #enableStencil} cannot detect the
+     * loss. Re-apply the reallocation here for every registered target, or
+     * stencil clipping silently stops working after the first resize
+     * (clip-path shapes render unclipped, e.g. triangles become squares).
+     */
+    public static void onTargetBuffersCreated(RenderTarget renderTarget) {
+        if (!STENCIL_TARGETS.containsKey(renderTarget)) return;
+        applyStencilToTarget(renderTarget);
+    }
+
+    private static void applyStencilToTarget(RenderTarget renderTarget) {
+        int framebufferId = renderTarget.frameBufferId;
+        int depthTextureId = ((RenderTargetAccessor) (Object) renderTarget).aui$getDepthBufferId();
+        if (framebufferId < 0 || depthTextureId < 0) return;
+
+        int previousFramebuffer = GlStateManager.getBoundFramebuffer();
+        int previousTexture = GL11.glGetInteger(GL11.GL_TEXTURE_BINDING_2D);
+        try {
+            // Vanilla 1.20.1 creates a depth-only texture. Reallocate that
+            // texture with a combined depth/stencil format so its id remains
+            // valid for code that samples the target depth texture.
+            GlStateManager._glBindFramebuffer(GL30.GL_FRAMEBUFFER, framebufferId);
+            GlStateManager._bindTexture(depthTextureId);
+            GlStateManager._texImage2D(
+                    GL11.GL_TEXTURE_2D,
+                    0,
+                    GL30.GL_DEPTH32F_STENCIL8,
+                    renderTarget.width,
+                    renderTarget.height,
+                    0,
+                    GL30.GL_DEPTH_STENCIL,
+                    GL30.GL_FLOAT_32_UNSIGNED_INT_24_8_REV,
+                    null
+            );
+            GlStateManager._glFramebufferTexture2D(
+                    GL30.GL_FRAMEBUFFER,
+                    GL30.GL_DEPTH_STENCIL_ATTACHMENT,
+                    GL11.GL_TEXTURE_2D,
+                    depthTextureId,
+                    0
+            );
+            renderTarget.checkStatus();
+            STENCIL_TARGETS.put(renderTarget, new StencilState(framebufferId, depthTextureId));
+        } finally {
+            GlStateManager._bindTexture(previousTexture);
+            GlStateManager._glBindFramebuffer(GL30.GL_FRAMEBUFFER, previousFramebuffer);
+        }
+    }
+
+    /**
+     * 当前绑定的 framebuffer 是否就是主渲染目标。
+     */
+    private static boolean isMainFramebuffer(int framebufferId) {
+        try {
+            RenderTarget main = Minecraft.getInstance().getMainRenderTarget();
+            return main != null && main.frameBufferId == framebufferId;
+        } catch (RuntimeException | LinkageError ignored) {
+            return false;
+        }
+    }
+
+    private static void setShaderUniform(String name,
+                                         java.util.function.Consumer<com.mojang.blaze3d.shaders.Uniform> setter) {
+        ShaderInstance shader = RenderSystem.getShader();
+        if (shader == null) return;
+        com.mojang.blaze3d.shaders.Uniform uniform = shader.getUniform(name);
+        if (uniform != null) setter.accept(uniform);
+    }
+
     @Override
-    public void setProjectionMatrix(Matrix4f matrix) {
-        RenderSystem.setProjectionMatrix(matrix, RenderSystem.getVertexSorting());
+    public void setModelViewMatrix(Matrix4f matrix) {
+        RenderSystem.getModelViewStack().last().pose().set(matrix);
+        RenderSystem.applyModelViewMatrix();
+    }
+
+    @Override
+    public Matrix4f getModelViewMatrix() {
+        return RenderSystem.getModelViewMatrix();
     }
 
     @Override
     public Matrix4f getProjectionMatrix() {
         return RenderSystem.getProjectionMatrix();
+    }
+
+    @Override
+    public void setProjectionMatrix(Matrix4f matrix) {
+        RenderSystem.setProjectionMatrix(matrix, RenderSystem.getVertexSorting());
     }
 
     @Override
@@ -85,7 +172,7 @@ public final class RenderService implements AuiRenderService {
         VertexFormat.Mode m = mode == MeshMode.QUADS ? VertexFormat.Mode.QUADS : VertexFormat.Mode.TRIANGLES;
         VertexFormat fmt = format == MeshFormat.POSITION ? DefaultVertexFormat.POSITION
                 : format == MeshFormat.POSITION_TEX ? DefaultVertexFormat.POSITION_TEX
-                : DefaultVertexFormat.POSITION_COLOR;
+                  : DefaultVertexFormat.POSITION_COLOR;
         BufferBuilder buf = Tesselator.getInstance().getBuilder();
         buf.begin(m, fmt);
         return MeshBuilder.of(buf);
@@ -101,7 +188,9 @@ public final class RenderService implements AuiRenderService {
         BufferUploader.drawWithShader(((BufferBuilder) mesh).end());
     }
 
-    /** Bundles the {@link MultiBufferSource.BufferSource} with the render type it batches. */
+    /**
+     * Bundles the {@link MultiBufferSource.BufferSource} with the render type it batches.
+     */
     private record TextureBatchHandle(MultiBufferSource.BufferSource source, RenderType renderType) {
     }
 
@@ -174,21 +263,6 @@ public final class RenderService implements AuiRenderService {
         applyStencilToTarget(renderTarget);
     }
 
-    /**
-     * Mixin callback from RenderTarget#createBuffers. Vanilla rebuilds a
-     * target's GL objects on every window resize (destroyBuffers +
-     * createBuffers), which drops the stencil attachment we installed — and
-     * the driver typically reuses the just-freed framebuffer/texture ids, so
-     * the id-based early return in {@link #enableStencil} cannot detect the
-     * loss. Re-apply the reallocation here for every registered target, or
-     * stencil clipping silently stops working after the first resize
-     * (clip-path shapes render unclipped, e.g. triangles become squares).
-     */
-    public static void onTargetBuffersCreated(RenderTarget renderTarget) {
-        if (!STENCIL_TARGETS.containsKey(renderTarget)) return;
-        applyStencilToTarget(renderTarget);
-    }
-
     @Override
     public void alignDepthFormatForCopy(FboHandle source, FboHandle destination) {
         RenderTarget from = source == null ? null : source.as();
@@ -198,45 +272,6 @@ public final class RenderService implements AuiRenderService {
         // AUI gave a depth-stencil attachment are exactly the ones it registered.
         if (!STENCIL_TARGETS.containsKey(from) || STENCIL_TARGETS.containsKey(to)) return;
         applyStencilToTarget(to);
-    }
-
-    private static void applyStencilToTarget(RenderTarget renderTarget) {
-        int framebufferId = renderTarget.frameBufferId;
-        int depthTextureId = ((RenderTargetAccessor) (Object) renderTarget).aui$getDepthBufferId();
-        if (framebufferId < 0 || depthTextureId < 0) return;
-
-        int previousFramebuffer = GlStateManager.getBoundFramebuffer();
-        int previousTexture = GL11.glGetInteger(GL11.GL_TEXTURE_BINDING_2D);
-        try {
-            // Vanilla 1.20.1 creates a depth-only texture. Reallocate that
-            // texture with a combined depth/stencil format so its id remains
-            // valid for code that samples the target depth texture.
-            GlStateManager._glBindFramebuffer(GL30.GL_FRAMEBUFFER, framebufferId);
-            GlStateManager._bindTexture(depthTextureId);
-            GlStateManager._texImage2D(
-                    GL11.GL_TEXTURE_2D,
-                    0,
-                    GL30.GL_DEPTH32F_STENCIL8,
-                    renderTarget.width,
-                    renderTarget.height,
-                    0,
-                    GL30.GL_DEPTH_STENCIL,
-                    GL30.GL_FLOAT_32_UNSIGNED_INT_24_8_REV,
-                    null
-            );
-            GlStateManager._glFramebufferTexture2D(
-                    GL30.GL_FRAMEBUFFER,
-                    GL30.GL_DEPTH_STENCIL_ATTACHMENT,
-                    GL11.GL_TEXTURE_2D,
-                    depthTextureId,
-                    0
-            );
-            renderTarget.checkStatus();
-            STENCIL_TARGETS.put(renderTarget, new StencilState(framebufferId, depthTextureId));
-        } finally {
-            GlStateManager._bindTexture(previousTexture);
-            GlStateManager._glBindFramebuffer(GL30.GL_FRAMEBUFFER, previousFramebuffer);
-        }
     }
 
     @Override
@@ -257,16 +292,6 @@ public final class RenderService implements AuiRenderService {
         // 主渲染目标的能力由平台 supportsStencil() 代表，此处只需区分不同的
         // 输出目标（如 26.1 的 PIP depth-only 附件）。
         return isMainFramebuffer(framebufferId);
-    }
-
-    /** 当前绑定的 framebuffer 是否就是主渲染目标。 */
-    private static boolean isMainFramebuffer(int framebufferId) {
-        try {
-            RenderTarget main = Minecraft.getInstance().getMainRenderTarget();
-            return main != null && main.frameBufferId == framebufferId;
-        } catch (RuntimeException | LinkageError ignored) {
-            return false;
-        }
     }
 
     @Override
@@ -294,6 +319,26 @@ public final class RenderService implements AuiRenderService {
     }
 
     @Override
+    public void drawOffscreenTexture(Matrix4f matrix, FboHandle target, float width, float height) {
+        RenderStateScope state = pushFilterRenderState();
+        try {
+            bindColorTexture(target, 0);
+            setShader(GameRenderer.getPositionTexShader());
+            enableBlend();
+            setBlendFuncSeparate(GL11.GL_ONE, GL11.GL_ONE_MINUS_SRC_ALPHA,
+                    GL11.GL_ONE, GL11.GL_ONE_MINUS_SRC_ALPHA);
+            MeshBuilder mesh = beginMesh(MeshMode.QUADS, MeshFormat.POSITION_TEX);
+            mesh.vertexUV(matrix, 0, height, 0, 0, 1);
+            mesh.vertexUV(matrix, width, height, 0, 1, 1);
+            mesh.vertexUV(matrix, width, 0, 0, 1, 0);
+            mesh.vertexUV(matrix, 0, 0, 0, 0, 0);
+            mesh.submit();
+        } finally {
+            if (state != null) state.close();
+        }
+    }
+
+    @Override
     public RenderStateScope pushFilterRenderState() {
         return LegacyFilterState.capture();
     }
@@ -318,112 +363,6 @@ public final class RenderService implements AuiRenderService {
         }
     }
 
-    private static final class LegacyFilterState implements RenderStateScope {
-        private static final int SHADER_SAMPLER_COUNT = 12;
-
-        private final ShaderInstance shader;
-        private final int program;
-        private final int[] shaderTextures;
-        private final int[] boundTextures;
-        private final int activeTexture;
-        private final float[] shaderColor;
-        private final boolean blend;
-        private final int srcRgb;
-        private final int dstRgb;
-        private final int srcAlpha;
-        private final int dstAlpha;
-        private final boolean depthTest;
-        private final int depthFunc;
-        private final boolean depthMask;
-        private final boolean cull;
-        private boolean closed;
-
-        private LegacyFilterState(ShaderInstance shader, int program, int[] shaderTextures,
-                                  int[] boundTextures, int activeTexture, float[] shaderColor,
-                                  boolean blend, int srcRgb, int dstRgb, int srcAlpha, int dstAlpha,
-                                  boolean depthTest, int depthFunc, boolean depthMask, boolean cull) {
-            this.shader = shader;
-            this.program = program;
-            this.shaderTextures = shaderTextures;
-            this.boundTextures = boundTextures;
-            this.activeTexture = activeTexture;
-            this.shaderColor = shaderColor;
-            this.blend = blend;
-            this.srcRgb = srcRgb;
-            this.dstRgb = dstRgb;
-            this.srcAlpha = srcAlpha;
-            this.dstAlpha = dstAlpha;
-            this.depthTest = depthTest;
-            this.depthFunc = depthFunc;
-            this.depthMask = depthMask;
-            this.cull = cull;
-        }
-
-        private static LegacyFilterState capture() {
-            int activeTexture = GlStateManager._getActiveTexture();
-            int[] shaderTextures = new int[SHADER_SAMPLER_COUNT];
-            int[] boundTextures = new int[SHADER_SAMPLER_COUNT];
-            for (int unit = 0; unit < SHADER_SAMPLER_COUNT; unit++) {
-                shaderTextures[unit] = RenderSystem.getShaderTexture(unit);
-                GlStateManager._activeTexture(GL13.GL_TEXTURE0 + unit);
-                boundTextures[unit] = GL11.glGetInteger(GL11.GL_TEXTURE_BINDING_2D);
-            }
-            GlStateManager._activeTexture(activeTexture);
-
-            return new LegacyFilterState(
-                    RenderSystem.getShader(),
-                    GL11.glGetInteger(GL20.GL_CURRENT_PROGRAM),
-                    shaderTextures,
-                    boundTextures,
-                    activeTexture,
-                    RenderSystem.getShaderColor().clone(),
-                    GL11.glIsEnabled(GL11.GL_BLEND),
-                    GL11.glGetInteger(GL14.GL_BLEND_SRC_RGB),
-                    GL11.glGetInteger(GL14.GL_BLEND_DST_RGB),
-                    GL11.glGetInteger(GL14.GL_BLEND_SRC_ALPHA),
-                    GL11.glGetInteger(GL14.GL_BLEND_DST_ALPHA),
-                    GL11.glIsEnabled(GL11.GL_DEPTH_TEST),
-                    GL11.glGetInteger(GL11.GL_DEPTH_FUNC),
-                    GL11.glGetBoolean(GL11.GL_DEPTH_WRITEMASK),
-                    GL11.glIsEnabled(GL11.GL_CULL_FACE)
-            );
-        }
-
-        @Override
-        public void close() {
-            if (closed) return;
-            closed = true;
-
-            // Keep ShaderInstance's BlendMode cache synchronized with the GL
-            // state restored below. Vanilla's vignette configures blending
-            // manually before drawing with an otherwise opaque shader.
-            RenderSystem.setShader(() -> shader);
-            if (shader != null) {
-                shader.apply();
-                shader.clear();
-            }
-
-            for (int unit = 0; unit < SHADER_SAMPLER_COUNT; unit++) {
-                RenderSystem.setShaderTexture(unit, shaderTextures[unit]);
-                GlStateManager._activeTexture(GL13.GL_TEXTURE0 + unit);
-                GlStateManager._bindTexture(boundTextures[unit]);
-            }
-            GlStateManager._activeTexture(activeTexture);
-
-            GlStateManager._glUseProgram(program);
-            RenderSystem.setShaderColor(shaderColor[0], shaderColor[1], shaderColor[2], shaderColor[3]);
-            RenderSystem.blendFuncSeparate(srcRgb, dstRgb, srcAlpha, dstAlpha);
-            if (blend) RenderSystem.enableBlend();
-            else RenderSystem.disableBlend();
-            RenderSystem.depthFunc(depthFunc);
-            GlStateManager._depthMask(depthMask);
-            if (depthTest) RenderSystem.enableDepthTest();
-            else RenderSystem.disableDepthTest();
-            if (cull) RenderSystem.enableCull();
-            else RenderSystem.disableCull();
-        }
-    }
-
     @Override
     public Object createDynamicTexture(String name, Object nativeImage, boolean linear) {
         DynamicTexture texture = new DynamicTexture((NativeImage) nativeImage);
@@ -435,6 +374,52 @@ public final class RenderService implements AuiRenderService {
     public void uploadTextureRegion(Object texture, Object nativeImage, int x, int y, int width, int height, boolean linear) {
         ((DynamicTexture) texture).bind();
         ((NativeImage) nativeImage).upload(0, x, y, x, y, width, height, linear, false);
+    }
+
+    @Override
+    public boolean uploadTexturePixels(Object texture, ByteBuffer pixels, int byteOffset,
+                                       int x, int y, int width, int height) {
+        ((DynamicTexture) texture).bind();
+        GlStateManager._pixelStore(GL11.GL_UNPACK_ROW_LENGTH, 0);
+        GlStateManager._pixelStore(GL11.GL_UNPACK_SKIP_ROWS, 0);
+        GlStateManager._pixelStore(GL11.GL_UNPACK_SKIP_PIXELS, 0);
+        GlStateManager._pixelStore(GL11.GL_UNPACK_ALIGNMENT, 4);
+        pixels.position(byteOffset);
+        GL11.glTexSubImage2D(GL11.GL_TEXTURE_2D, 0, x, y, width, height,
+                GL11.GL_RGBA, GL11.GL_UNSIGNED_BYTE, pixels);
+        return true;
+    }
+
+    @Override
+    public Object createDynamicTexture(String name, int width, int height, boolean linear) {
+        DynamicTexture texture = new DynamicTexture(width, height, true);
+        texture.setFilter(linear, false);
+        return texture;
+    }
+
+    @Override
+    public void drawScreenTexture(Object graphics, Object texture, Object location,
+                                  int x, int y, int width, int height, float alpha) {
+        GuiGraphics guiGraphics = (GuiGraphics) graphics;
+        guiGraphics.setColor(1.0f, 1.0f, 1.0f, alpha);
+        guiGraphics.blit((ResourceLocation) location, x, y, width, height,
+                0.0f, 0.0f, width, height, width, height);
+        guiGraphics.setColor(1.0f, 1.0f, 1.0f, 1.0f);
+    }
+
+    @Override
+    public Object getBackgroundShader() {
+        return FabricShaderRegistry.getBackgroundShader();
+    }
+
+    @Override
+    public void destroyBackgroundTarget(FboHandle target) {
+        com.sighs.apricityui.render.LegacyBackgroundTarget.destroy(this, target);
+    }
+
+    @Override
+    public RenderStateScope pushBackgroundTarget(FboHandle target) {
+        return com.sighs.apricityui.render.LegacyBackgroundTarget.open(this, target);
     }
 
     @Override
@@ -619,6 +604,23 @@ public final class RenderService implements AuiRenderService {
     }
 
     @Override
+    public void clearDepthBuffer() {
+        boolean depthWrite = GL11.glGetBoolean(GL11.GL_DEPTH_WRITEMASK);
+        boolean scissor = GL11.glIsEnabled(GL11.GL_SCISSOR_TEST);
+        double clearDepth = GL11.glGetDouble(GL11.GL_DEPTH_CLEAR_VALUE);
+        try {
+            GlStateManager._depthMask(true);
+            GlStateManager._disableScissorTest();
+            GL11.glClearDepth(1.0D);
+            GL11.glClear(GL11.GL_DEPTH_BUFFER_BIT);
+        } finally {
+            GL11.glClearDepth(clearDepth);
+            GlStateManager._depthMask(depthWrite);
+            if (scissor) GlStateManager._enableScissorTest();
+        }
+    }
+
+    @Override
     public void setColorMask(boolean red, boolean green, boolean blue, boolean alpha) {
         GL11.glColorMask(red, green, blue, alpha);
     }
@@ -648,14 +650,6 @@ public final class RenderService implements AuiRenderService {
     private record StencilState(int framebufferId, int depthTextureId) {
     }
 
-    private static void setShaderUniform(String name,
-                                         java.util.function.Consumer<com.mojang.blaze3d.shaders.Uniform> setter) {
-        ShaderInstance shader = RenderSystem.getShader();
-        if (shader == null) return;
-        com.mojang.blaze3d.shaders.Uniform uniform = shader.getUniform(name);
-        if (uniform != null) setter.accept(uniform);
-    }
-
     @Override
     public void setShaderUniformFloat(String name, float value) {
         setShaderUniform(name, uniform -> uniform.set(value));
@@ -679,5 +673,111 @@ public final class RenderService implements AuiRenderService {
     @Override
     public void setShaderUniformI(String name, int value) {
         setShaderUniform(name, uniform -> uniform.set(value));
+    }
+
+    private static final class LegacyFilterState implements RenderStateScope {
+        private static final int SHADER_SAMPLER_COUNT = 12;
+
+        private final ShaderInstance shader;
+        private final int program;
+        private final int[] shaderTextures;
+        private final int[] boundTextures;
+        private final int activeTexture;
+        private final float[] shaderColor;
+        private final boolean blend;
+        private final int srcRgb;
+        private final int dstRgb;
+        private final int srcAlpha;
+        private final int dstAlpha;
+        private final boolean depthTest;
+        private final int depthFunc;
+        private final boolean depthMask;
+        private final boolean cull;
+        private boolean closed;
+
+        private LegacyFilterState(ShaderInstance shader, int program, int[] shaderTextures,
+                                  int[] boundTextures, int activeTexture, float[] shaderColor,
+                                  boolean blend, int srcRgb, int dstRgb, int srcAlpha, int dstAlpha,
+                                  boolean depthTest, int depthFunc, boolean depthMask, boolean cull) {
+            this.shader = shader;
+            this.program = program;
+            this.shaderTextures = shaderTextures;
+            this.boundTextures = boundTextures;
+            this.activeTexture = activeTexture;
+            this.shaderColor = shaderColor;
+            this.blend = blend;
+            this.srcRgb = srcRgb;
+            this.dstRgb = dstRgb;
+            this.srcAlpha = srcAlpha;
+            this.dstAlpha = dstAlpha;
+            this.depthTest = depthTest;
+            this.depthFunc = depthFunc;
+            this.depthMask = depthMask;
+            this.cull = cull;
+        }
+
+        private static LegacyFilterState capture() {
+            int activeTexture = GlStateManager._getActiveTexture();
+            int[] shaderTextures = new int[SHADER_SAMPLER_COUNT];
+            int[] boundTextures = new int[SHADER_SAMPLER_COUNT];
+            for (int unit = 0; unit < SHADER_SAMPLER_COUNT; unit++) {
+                shaderTextures[unit] = RenderSystem.getShaderTexture(unit);
+                GlStateManager._activeTexture(GL13.GL_TEXTURE0 + unit);
+                boundTextures[unit] = GL11.glGetInteger(GL11.GL_TEXTURE_BINDING_2D);
+            }
+            GlStateManager._activeTexture(activeTexture);
+
+            return new LegacyFilterState(
+                    RenderSystem.getShader(),
+                    GL11.glGetInteger(GL20.GL_CURRENT_PROGRAM),
+                    shaderTextures,
+                    boundTextures,
+                    activeTexture,
+                    RenderSystem.getShaderColor().clone(),
+                    GL11.glIsEnabled(GL11.GL_BLEND),
+                    GL11.glGetInteger(GL14.GL_BLEND_SRC_RGB),
+                    GL11.glGetInteger(GL14.GL_BLEND_DST_RGB),
+                    GL11.glGetInteger(GL14.GL_BLEND_SRC_ALPHA),
+                    GL11.glGetInteger(GL14.GL_BLEND_DST_ALPHA),
+                    GL11.glIsEnabled(GL11.GL_DEPTH_TEST),
+                    GL11.glGetInteger(GL11.GL_DEPTH_FUNC),
+                    GL11.glGetBoolean(GL11.GL_DEPTH_WRITEMASK),
+                    GL11.glIsEnabled(GL11.GL_CULL_FACE)
+            );
+        }
+
+        @Override
+        public void close() {
+            if (closed) return;
+            closed = true;
+
+            // Keep ShaderInstance's BlendMode cache synchronized with the GL
+            // state restored below. Vanilla's vignette configures blending
+            // manually before drawing with an otherwise opaque shader.
+            RenderSystem.setShader(() -> shader);
+            if (shader != null) {
+                shader.apply();
+                shader.clear();
+            }
+
+            for (int unit = 0; unit < SHADER_SAMPLER_COUNT; unit++) {
+                RenderSystem.setShaderTexture(unit, shaderTextures[unit]);
+                GlStateManager._activeTexture(GL13.GL_TEXTURE0 + unit);
+                GlStateManager._bindTexture(boundTextures[unit]);
+            }
+            GlStateManager._activeTexture(activeTexture);
+
+            GlStateManager._glUseProgram(program);
+            RenderSystem.setShaderColor(shaderColor[0], shaderColor[1], shaderColor[2], shaderColor[3]);
+            RenderSystem.blendFuncSeparate(srcRgb, dstRgb, srcAlpha, dstAlpha);
+            if (blend) RenderSystem.enableBlend();
+            else RenderSystem.disableBlend();
+            RenderSystem.depthFunc(depthFunc);
+            GlStateManager._depthMask(depthMask);
+            if (depthTest) RenderSystem.enableDepthTest();
+            else RenderSystem.disableDepthTest();
+            if (cull) RenderSystem.enableCull();
+            else RenderSystem.disableCull();
+        }
     }
 }

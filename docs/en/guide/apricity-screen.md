@@ -86,14 +86,14 @@ new ApricityScreen(path)      // only stores the path, doesn't read the HTML
 
 A few easy traps:
 
-- `init()` may be called repeatedly (e.g. on resize), and each call rebuilds the Document;
+- `init()` may be called repeatedly (e.g. on resize); AUI reuses the live Document instead of rebuilding the DOM, so form values, scroll positions, and script state survive. A new Document is only created on first open or after the old one was disposed;
 - `Document.refresh()` keeps the Document itself but rebuilds the DOM and re-runs scripts. After a refresh, all old Element references and event listeners become invalid — use `document.getRefreshGeneration()` / `isCurrentGeneration(gen)` to check the generation;
 - When overriding `init()` / `onClose()` / `removed()`, you must call super, otherwise the Document is never created or never cleaned up;
 - Don't call `Document.create(same path)` again in a subclass — that leaves two Documents alive at once, doubling both rendering and input.
 
 ## Page Meta Configuration
 
-These two meta tags are AUI's page-level configuration, **shared by all hosts** (Screen, Overlay, Container, and WorldWindow all read them). The full explanation is maintained only here and is not repeated in other documents.
+These meta tags are AUI's page-level configuration, **shared by all hosts** (Screen, Overlay, Container, and WorldWindow all read them). The full explanation is maintained only here and is not repeated in other documents.
 
 ### aui-viewport: Logical Viewport
 
@@ -126,7 +126,7 @@ All modes support zoom parameters:
 | `zoom-step` | 0.1 | Zoom step per increment |
 | `user-scalable` | true | Whether shortcut-key zoom is allowed |
 
-When zooming is allowed: Ctrl+wheel and Ctrl+`+`/`-` zoom, Ctrl+`0` resets. The zoom value is stored per page path in `config/apricityui/viewport-zoom.properties`, so reopening the page remembers the last value.
+When zooming is allowed: Ctrl+wheel and Ctrl+`+`/`-` zoom, Ctrl+`0` resets. While zooming, the bottom-right HUD shows the current percentage and a Reset button. The zoom value is stored per page path in `config/apricityui/viewport-zoom.properties`, so reopening the page remembers the last value.
 
 Setting `user-scalable` to `false` disables that shortcut set — Ctrl+wheel falls back to a plain scroll, and Java's `document.setViewportZoom(...)` is unaffected. See [Browser-like Features](browser-features#page-zoom) for details.
 
@@ -154,6 +154,22 @@ For a fullscreen Canvas in an Overlay, size the canvas `width`/`height` from `ge
 `intercept` (also accepts `block`, `true`, `yes`, `on`, `1`) prevents mouse events over hit regions from being passed to the underlying Minecraft input or other Documents. Without it, HTML events are still dispatched — the native input just isn't force-consumed.
 
 Two things to note: interception works per hit region — invisible, clipped, or `pointer-events: none` elements do not gain hits from it; if you want the whole page to consume input, make sure the interactive area covers the viewport. This is a "whether to consume native input" switch, not an event listener switch.
+
+### aui-hyphen-break: Hyphen Line Breaking
+
+```html
+<meta name="aui-hyphen-break" content="none">
+```
+
+Per CSS, `-` (and `‐`) is a line-break opportunity, so English text may wrap there. For numbering, version strings, or dates that should stay intact, this meta turns that opportunity off. `none` (also accepts `off`, `false`, `no`, `0`) disables hyphen breaking; the default `auto` keeps browser behavior. Spaces, CJK, and `word-break: break-all` are unaffected.
+
+### aui-preload: Startup Preload
+
+```html
+<meta name="aui-preload" content="true">
+```
+
+By default an HTML template is parsed, tokenized, and has its styles precompiled only when first opened. Adding this meta makes the page part of the preload pass during game startup and resource rescans, so the first open is faster. The tag's presence is enough (`content` may be omitted); `none` (also accepts `off`, `false`, `no`, `0`) explicitly disables it. Only mark commonly used pages — preloading everything slows startup.
 
 ## Input Events
 

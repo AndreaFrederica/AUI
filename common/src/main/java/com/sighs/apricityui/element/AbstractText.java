@@ -16,25 +16,25 @@ import com.sighs.apricityui.style.*;
 import com.sighs.apricityui.util.TextMetrics;
 
 import java.util.*;
+
 import com.sighs.apricityui.style.Interaction;
 import com.sighs.apricityui.style.Text;
 
 public abstract class AbstractText extends Element {
+    protected static final int MAX_UNDO_STACK = 128;
+    protected final Deque<TextState> undoStack = new ArrayDeque<>();
     protected int maxLength = 256;
     protected int cursor = 0;
     protected long lastBlinkTime = 0;
     protected String placeholder = "";
     protected String cachedValue = "";
-
     protected int selectionStart = 0;
     protected int selectionEnd = 0;
     protected String selectionDirection = "none";
     protected boolean selecting = false;
     protected int selectionAnchor = 0;
-    protected final Deque<TextState> undoStack = new ArrayDeque<>();
     protected boolean restoringUndo = false;
     protected boolean composing = false;
-    protected static final int MAX_UNDO_STACK = 128;
     private String focusValueSnapshot = "";
 
     protected AbstractText(Document document, String tagName) {
@@ -53,6 +53,12 @@ public abstract class AbstractText extends Element {
         });
     }
 
+    private static String normalizeSelectionDirection(String direction) {
+        if ("backward".equalsIgnoreCase(direction)) return "backward";
+        if ("forward".equalsIgnoreCase(direction)) return "forward";
+        return "none";
+    }
+
     private void addSelectionEventListeners() {
         addEventListener("mousedown", event -> {
             if (!(event instanceof MouseEvent mouseEvent)) return;
@@ -64,7 +70,7 @@ public abstract class AbstractText extends Element {
                 if (canEditText() && document != null) {
                     String primary = document.getDocumentSelectedText();
                     if (primary != null && !primary.isEmpty()) {
-                        replaceSelection(primary);
+                        insertText(primary, "insertFromPaste");
                     }
                 }
                 return;
@@ -310,26 +316,44 @@ public abstract class AbstractText extends Element {
     }
 
     public void replaceSelection(String str) {
+        replaceSelection(str, "deleteContentBackward");
+    }
+
+    /**
+     * 用 {@code str} 替换当前选区；空串即删除，删除走 {@code deleteInputType}。
+     * 浏览器按来源区分删除事件的 inputType（Backspace/Delete 用
+     * {@code deleteContentBackward/Forward}，剪切用 {@code deleteByCut}）。
+     */
+    public void replaceSelection(String str, String deleteInputType) {
         if (!canEditText()) return;
         String normalized = str == null ? "" : normalizeInsertedText(str);
         if (normalized.isEmpty()) {
             if (!hasSelection()) return;
-            if (!dispatchBeforeInputEvent("deleteContentBackward", null)) return;
+            if (!dispatchBeforeInputEvent(deleteInputType, null)) return;
             pushUndoState();
-            sliceText(selMin(), selMax(), "deleteContentBackward", false);
+            sliceText(selMin(), selMax(), deleteInputType);
             return;
         }
         insertText(normalized);
     }
 
     public void insertText(String str) {
+        insertText(str, "insertText");
+    }
+
+    /**
+     * 插入文本，{@code inputType} 按浏览器规范区分来源：键入 {@code insertText}、
+     * 粘贴 {@code insertFromPaste}、拖放 {@code insertFromDrop}、中键主选区
+     * {@code insertFromPaste}。
+     */
+    public void insertText(String str, String inputType) {
         if (!canEditText()) return;
         if (str == null || str.isEmpty()) return;
 
         ensureValue();
         str = normalizeInsertedText(str);
         if (str.isEmpty()) return;
-        if (!dispatchBeforeInputEvent("insertText", str)) return;
+        if (!dispatchBeforeInputEvent(inputType, str)) return;
         pushUndoState();
 
         if (hasSelection()) {
@@ -358,7 +382,7 @@ public abstract class AbstractText extends Element {
         clearSelection();
         clampScroll();
         getRenderer().text.clear();
-        dispatchInputEvent("insertText", str);
+        dispatchInputEvent(inputType, str);
     }
 
     private String normalizeInsertedText(String str) {
@@ -416,7 +440,7 @@ public abstract class AbstractText extends Element {
         if (!supportsMultilineInput() || delta == 0) return;
         ensureValue();
 
-        Text.WrappedText wrapped = wrapForNavigation();
+        Text.WrappedText wrapped = controlTextLayout().wrapped();
         List<String> lines = wrapped.lines();
         int[] starts = wrapped.starts();
         if (lines.isEmpty()) return;
@@ -427,30 +451,57 @@ public abstract class AbstractText extends Element {
 
         int columnStart = starts[line];
         int column = clamp(cursor - columnStart, 0, lines.get(line).length());
-        double currentX = column == 0 ? 0 : Size.measureText(this, lines.get(line).substring(0, column));
+        double currentX = controlTextLayout().xAt(line, column);
 
-        // 在目标行中选取与当前光标 X 距离最近的字符列。
-        String targetText = lines.get(targetLine);
-        int best = 0;
-        double bestDistance = Double.MAX_VALUE;
-        double acc = 0;
-        for (int i = 0; i <= targetText.length(); i++) {
-            double distance = Math.abs(acc - currentX);
-            if (distance < bestDistance) {
-                bestDistance = distance;
-                best = i;
-            }
-            if (i < targetText.length()) {
-                acc += Size.measureText(this, String.valueOf(targetText.charAt(i)));
-            }
-        }
+        int best = controlTextLayout().advances().get(targetLine).offsetAt(currentX);
         applyNavigationMove(starts[targetLine] + best, keepSelection);
     }
 
-    private Text.WrappedText wrapForNavigation() {
+    private String controlLayoutContent;
+    private long controlLayoutKey;
+    private ControlTextLayout controlTextLayout;
+
+    /** Shared by control painting, caret navigation, hit testing and scroll extent measurement. */
+    protected final ControlTextLayout controlTextLayout() {
+        String content = getRenderText();
+        if ("password".equalsIgnoreCase(getAttribute("type")) && !supportsMultilineInput()) {
+            content = "*".repeat(content.length());
+        }
+        var layout = getLayout();
+        long key = layout.layoutDependency() * 31 + layout.textDependency();
+        key = key * 31 + com.sighs.apricityui.resource.Font.getMetricsRevision();
+        if (controlTextLayout != null && key == controlLayoutKey && content.equals(controlLayoutContent)) {
+            return controlTextLayout;
+        }
         Text text = Text.of(this);
-        text.content = getRenderText();
-        return Text.wrap(text, Box.of(this).innerSize().width());
+        double width = Box.of(this).innerSize().width();
+        Text.WrappedText wrapped = supportsMultilineInput()
+                ? Text.wrap(TextMetrics.cloneTextForSegment(text, content, com.sighs.apricityui.parser.Color.BLACK), width)
+                : new Text.WrappedText(List.of(content), new int[]{0}, Text.measureLine(text, content));
+        var advances = new ArrayList<com.sighs.apricityui.layout.TextFlowGeometry.Advances>(wrapped.lines().size());
+        double[] alignment = new double[wrapped.lines().size()];
+        for (int i = 0; i < wrapped.lines().size(); i++) {
+            String line = wrapped.lines().get(i);
+            double lineWidth = Text.measureLine(text, line);
+            advances.add(com.sighs.apricityui.layout.TextFlowGeometry.Advances.measure(text, line, lineWidth));
+            alignment[i] = line.isEmpty() || lineWidth > width ? 0 : TextMetrics.computeAlignedX(text, width, lineWidth, i == 0);
+        }
+        controlLayoutContent = content;
+        controlLayoutKey = layout.layoutDependency() * 31 + layout.textDependency();
+        controlLayoutKey = controlLayoutKey * 31 + com.sighs.apricityui.resource.Font.getMetricsRevision();
+        return controlTextLayout = new ControlTextLayout(content, wrapped, List.copyOf(advances), alignment);
+    }
+
+    protected record ControlTextLayout(String content, Text.WrappedText wrapped,
+            List<com.sighs.apricityui.layout.TextFlowGeometry.Advances> advances, double[] alignment) {
+        public double xAt(int line, int offset) { return advances.get(line).xAt(offset); }
+        public double align(int line) { return alignment[line]; }
+    }
+
+    @dev.latvian.mods.rhino.util.HideFromJS
+    public Size measureControlScrollContent() {
+        var wrapped = controlTextLayout().wrapped();
+        return new Size(wrapped.width(), wrapped.height(Text.of(this).lineHeight));
     }
 
     private int resolveNavigationLine(List<String> lines, int[] starts, int index) {
@@ -463,7 +514,7 @@ public abstract class AbstractText extends Element {
 
     private int lineStartIndex() {
         if (!supportsMultilineInput()) return 0;
-        Text.WrappedText wrapped = wrapForNavigation();
+        Text.WrappedText wrapped = controlTextLayout().wrapped();
         List<String> lines = wrapped.lines();
         int[] starts = wrapped.starts();
         if (lines.isEmpty()) return 0;
@@ -473,7 +524,7 @@ public abstract class AbstractText extends Element {
     private int lineEndIndex() {
         ensureValue();
         if (!supportsMultilineInput()) return value.length();
-        Text.WrappedText wrapped = wrapForNavigation();
+        Text.WrappedText wrapped = controlTextLayout().wrapped();
         List<String> lines = wrapped.lines();
         int[] starts = wrapped.starts();
         if (lines.isEmpty()) return value.length();
@@ -504,13 +555,13 @@ public abstract class AbstractText extends Element {
         if (hasSelection()) {
             if (!dispatchBeforeInputEvent("deleteContentBackward", null)) return false;
             pushUndoState();
-            sliceText(selMin(), selMax(), "deleteContentBackward", false);
+            sliceText(selMin(), selMax(), "deleteContentBackward");
             return true;
         }
         if (cursor <= 0) return false;
         if (!dispatchBeforeInputEvent("deleteContentBackward", null)) return false;
         pushUndoState();
-        sliceText(cursor - 1, cursor, "deleteContentBackward", false);
+        sliceText(cursor - 1, cursor, "deleteContentBackward");
         return true;
     }
 
@@ -519,21 +570,27 @@ public abstract class AbstractText extends Element {
         if (hasSelection()) {
             if (!dispatchBeforeInputEvent("deleteContentForward", null)) return false;
             pushUndoState();
-            sliceText(selMin(), selMax(), "deleteContentForward", false);
+            sliceText(selMin(), selMax(), "deleteContentForward");
             return true;
         }
         if (cursor >= value.length()) return false;
         if (!dispatchBeforeInputEvent("deleteContentForward", null)) return false;
         pushUndoState();
-        sliceText(cursor, cursor + 1, "deleteContentForward", false);
+        sliceText(cursor, cursor + 1, "deleteContentForward");
         return true;
     }
 
     public void sliceText(int start, int end) {
-        sliceText(start, end, "deleteContentBackward", true);
+        sliceText(start, end, "deleteContentBackward");
     }
 
-    private void sliceText(int start, int end, String inputType, boolean dispatchInputEvent) {
+    /**
+     * 删除 [start, end) 区间并派发 {@code input}。调用方负责先派发可取消的
+     * {@code beforeinput}（取消时不得走到这里），本方法自己完成值变更与派发，
+     * 与 {@link #insertText(String)} 保持一致——删除同样是值变更，浏览器每次都会发
+     * {@code input}（issue #142：重构时删除路径漏了这次派发，受控输入拿到旧值）。
+     */
+    private void sliceText(int start, int end, String inputType) {
         ensureValue();
         if (start < 0) start = 0;
         if (end > value.length()) end = value.length();
@@ -547,9 +604,7 @@ public abstract class AbstractText extends Element {
         clearSelection();
         clampScroll();
         getRenderer().text.clear();
-        if (dispatchInputEvent) {
-            dispatchInputEvent(inputType, null);
-        }
+        dispatchInputEvent(inputType, null);
     }
 
     public boolean undo() {
@@ -615,27 +670,9 @@ public abstract class AbstractText extends Element {
     protected void locateCursor(double mouseOffsetX) {
         Box box = Box.of(this);
         double contentStartX = box.getBorderLeft() + box.getPaddingLeft();
-        double relativeX = mouseOffsetX - contentStartX + scrollLeft - resolveTextAlignX(getRenderText());
-
-        String text = getRenderText();
-        if (text.isEmpty()) {
-            cursor = 0;
-            return;
-        }
-
-        double currentWidth = 0;
-        int newCursor = 0;
-        for (int i = 0; i < text.length(); i++) {
-            String charStr = String.valueOf(text.charAt(i));
-            double charWidth = Size.measureText(this, charStr);
-            if (relativeX <= currentWidth + charWidth / 2.0) {
-                break;
-            }
-            currentWidth += charWidth;
-            newCursor++;
-        }
-
-        cursor = newCursor;
+        var layout = controlTextLayout();
+        double relativeX = mouseOffsetX - contentStartX + scrollLeft - layout.align(0);
+        cursor = layout.advances().get(0).offsetAt(relativeX);
         clampScroll();
     }
 
@@ -657,20 +694,14 @@ public abstract class AbstractText extends Element {
         else selectionDirection = selectionEnd < selectionStart ? "backward" : "forward";
     }
 
-    private static String normalizeSelectionDirection(String direction) {
-        if ("backward".equalsIgnoreCase(direction)) return "backward";
-        if ("forward".equalsIgnoreCase(direction)) return "forward";
-        return "none";
-    }
-
     protected void clampScroll() {
         String text = getRenderText();
         if (cursor > text.length()) cursor = text.length();
         if (cursor < 0) cursor = 0;
 
-        String textBeforeCursor = text.substring(0, cursor);
-        double cursorX = Size.measureText(this, textBeforeCursor);
-        this.scrollWidth = Size.measureText(this, text);
+        var layout = controlTextLayout();
+        double cursorX = layout.xAt(0, cursor);
+        this.scrollWidth = layout.wrapped().width();
         double visibleWidth = Math.max(0, Box.of(this).innerSize().width());
         double maxScrollLeft = Math.max(0, scrollWidth - visibleWidth);
         double desiredScrollLeft = scrollLeft;
@@ -715,8 +746,9 @@ public abstract class AbstractText extends Element {
 
         Position contentPos = rectRenderer.getContentPosition();
         double alignX = resolveTextAlignX(renderText);
-        double startX = alignX + Size.measureText(this, renderText.substring(0, min)) - scrollLeft;
-        double endX = alignX + Size.measureText(this, renderText.substring(0, max)) - scrollLeft;
+        var layout = controlTextLayout();
+        double startX = alignX + layout.xAt(0, min) - scrollLeft;
+        double endX = alignX + layout.xAt(0, max) - scrollLeft;
 
         float x0 = (float) (contentPos.x + startX);
         float x1 = (float) (contentPos.x + endX);
@@ -727,8 +759,7 @@ public abstract class AbstractText extends Element {
 
     protected void drawSingleLineCursor(PoseStack poseStack, String renderText, float drawX, float drawY, float lineHeight) {
         if (!Element.isElementFocusing(this)) return;
-        String textBefore = renderText.substring(0, Math.min(cursor, renderText.length()));
-        double cursorXOffset = Size.measureText(this, textBefore);
+        double cursorXOffset = controlTextLayout().xAt(0, Math.min(cursor, renderText.length()));
         float renderX = (float) (drawX + cursorXOffset);
         Graph.drawCursor(PoseMatrices.of(poseStack), renderX, drawY, lineHeight, Text.getFontColor(this), this.lastBlinkTime);
     }
@@ -758,11 +789,11 @@ public abstract class AbstractText extends Element {
         if (!Objects.equals(cachedValue, value) && value != null) {
             cachedValue = value;
             getRenderer().text.clear();
-            getRenderer().size.clear();
+            getLayout().size.clear();
             if (document != null) {
                 document.markDirty(this, Drawer.RELAYOUT | Drawer.REPAINT);
                 if (parentElement != null) {
-                    parentElement.getRenderer().size.clear();
+                    parentElement.getLayout().size.clear();
                     document.markDirty(parentElement, Drawer.RELAYOUT | Drawer.REPAINT);
                 }
             }

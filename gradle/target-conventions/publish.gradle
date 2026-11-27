@@ -9,6 +9,74 @@ repositories {
 
 dependencies {
     implementation fileTree(dir: file('libs'), include: ['*.jar'], exclude: ['*-sources.jar', '*-javadoc.jar'])
+
+    // Built-in Markdown parser (Txtmark 0.13, Apache-2.0). Targets compile the
+    // shared common/ source tree directly, so the library has to be on every
+    // target classpath as well.
+    implementation files('../../common/libs/txtmark-0.13.jar')
+}
+
+configurations {
+    // Classes merged into the mod jar instead of relying on jarJar/shadow.
+    embeddedMarkdown {
+        canBeConsumed = false
+        canBeResolved = true
+        transitive = false
+    }
+}
+
+dependencies {
+    embeddedMarkdown files('../../common/libs/txtmark-0.13.jar')
+}
+
+// The target builds have no jarJar/shadow pipeline. Merge the parser classes
+// into the main jar so they exist at runtime on every loader; its META-INF is
+// dropped so the mod manifest is not replaced. The Apache-2.0 license ships in
+// META-INF/licenses/txtmark-LICENSE.txt.
+tasks.named('jar', Jar) {
+    from({ configurations.embeddedMarkdown.collect { zipTree(it) } }) {
+        exclude 'META-INF/**'
+    }
+}
+
+tasks.register('liteJar', Jar) {
+    group = 'build'
+    description = 'Builds a lite mod jar without developer tools, resource-manager content, docs, tests, or bundled themes other than ore.'
+    archiveClassifier = 'lite'
+}
+def productionJarTask = tasks.findByName('remapJar') != null ?
+        tasks.named('remapJar') :
+        (tasks.findByName('reobfJar') != null ? tasks.named('reobfJar') : tasks.named('jar', Jar))
+tasks.named('liteJar', Jar).configure {
+    dependsOn productionJarTask
+    doFirst {
+        new java.util.zip.ZipFile(productionJarTask.get().archiveFile.get().asFile).withCloseable { zip ->
+            zip.getInputStream(zip.getEntry('META-INF/MANIFEST.MF')).withCloseable { input ->
+                def sourceManifest = new java.util.jar.Manifest(input)
+                manifest.attributes(sourceManifest.mainAttributes.collectEntries { key, value ->
+                    [(key.toString()): value.toString()]
+                })
+                sourceManifest.entries.each { name, attributes ->
+                    manifest.attributes(attributes.collectEntries { key, value ->
+                        [(key.toString()): value.toString()]
+                    }, name)
+                }
+            }
+        }
+    }
+    from({ zipTree(productionJarTask.get().archiveFile.get().asFile) }) {
+        exclude 'META-INF/MANIFEST.MF'
+        exclude 'docs/**'
+        exclude 'assets/apricityui/apricity/devtools/**'
+        exclude 'assets/apricityui/apricity/tests/**'
+        exclude 'assets/apricityui/apricity/apricityui/theme/**'
+    }
+    from({ zipTree(productionJarTask.get().archiveFile.get().asFile) }) {
+        include 'assets/apricityui/apricity/apricityui/theme/ore/**'
+    }
+}
+tasks.named('build').configure {
+    dependsOn tasks.named('liteJar')
 }
 
 // AUI: common/ is a shared source tree compiled into this target via source-set
@@ -30,6 +98,7 @@ def publishMinecraftVersion = [
         fabric   : providers.gradleProperty('fabric_minecraft_version'),
         neoforge : providers.gradleProperty('neoforge_121_minecraft_version')
                 .orElse(providers.gradleProperty('neoforge_261_minecraft_version'))
+                .orElse(providers.gradleProperty('neoforge_263_minecraft_version'))
 ][publishLoader]
 
 def publishArtifactTask = tasks.findByName('remapJar') != null ?
@@ -55,7 +124,27 @@ publishMods {
         server = true
     }
 
+    curseforge('curseforgeLite') {
+        file = tasks.named('liteJar', Jar).flatMap { it.archiveFile }
+        version = "${project.version}-lite"
+        displayName = "${project.name} ${project.version} lite"
+        projectId = curseforgeProjectId
+        accessToken = providers.environmentVariable('CURSEFORGE_TOKEN')
+        minecraftVersions.add(publishMinecraftVersion)
+        client = true
+        server = true
+    }
+
     modrinth {
+        projectId = modrinthProjectId
+        accessToken = providers.environmentVariable('MODRINTH_TOKEN')
+        minecraftVersions.add(publishMinecraftVersion)
+    }
+
+    modrinth('modrinthLite') {
+        file = tasks.named('liteJar', Jar).flatMap { it.archiveFile }
+        version = "${project.version}-lite"
+        displayName = "${project.name} ${project.version} lite"
         projectId = modrinthProjectId
         accessToken = providers.environmentVariable('MODRINTH_TOKEN')
         minecraftVersions.add(publishMinecraftVersion)
@@ -94,6 +183,7 @@ publishing {
     publications {
         mavenJava(MavenPublication) {
             from components.java
+            artifact tasks.named('liteJar')
 
             groupId = project.group.toString()
             artifactId = base.archivesName.get()

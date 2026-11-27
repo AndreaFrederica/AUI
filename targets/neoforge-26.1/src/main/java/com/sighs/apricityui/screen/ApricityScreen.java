@@ -3,8 +3,10 @@ package com.sighs.apricityui.screen;
 import com.sighs.apricityui.ApricityUI;
 import com.sighs.apricityui.client.Client;
 import com.sighs.apricityui.init.Document;
+import com.sighs.apricityui.dev.perf.PageOpenTiming;
 import com.sighs.apricityui.event.Event;
 import com.sighs.apricityui.loader.ClientLoader;
+import com.sighs.apricityui.spi.AuiKeyService;
 import com.sighs.apricityui.spi.AuiServices;
 import com.sighs.apricityui.style.Cursor;
 import com.sighs.apricityui.layout.Size;
@@ -36,29 +38,49 @@ public class ApricityScreen extends Screen implements AuiLinkedScreen {
     private Document linkedDocument;
     private boolean loggedInitState = false;
 
+    private PageOpenTiming openTiming;
+
     public ApricityScreen(String templatePath) {
         super(Component.empty());
         this.templatePath = templatePath;
+        this.openTiming = PageOpenTiming.start(templatePath, "screen");
     }
 
-    /** Sets whether Minecraft should pause while this screen is open. */
-    public ApricityScreen setPauseGame(boolean pauseGame) {
-        this.pauseGame = pauseGame;
-        return this;
+    private static boolean isControlModifier(int modifiers) {
+        return (modifiers & GLFW.GLFW_MOD_CONTROL) != 0;
     }
 
-    /** Sets whether Minecraft's standard screen background should be drawn first. */
-    public ApricityScreen setShowDefaultBackground(boolean showDefaultBackground) {
-        this.showDefaultBackground = showDefaultBackground;
-        return this;
+    /**
+     * Screen.hasControlDown() was removed in 26.1; check the physical Ctrl keys instead.
+     */
+    private static boolean hasControlDown() {
+        long handle = Minecraft.getInstance().getWindow().handle();
+        return GLFW.glfwGetKey(handle, GLFW.GLFW_KEY_LEFT_CONTROL) == GLFW.GLFW_PRESS
+                || GLFW.glfwGetKey(handle, GLFW.GLFW_KEY_RIGHT_CONTROL) == GLFW.GLFW_PRESS;
     }
 
     public boolean isPauseGame() {
         return pauseGame;
     }
 
+    /**
+     * Sets whether Minecraft should pause while this screen is open.
+     */
+    public ApricityScreen setPauseGame(boolean pauseGame) {
+        this.pauseGame = pauseGame;
+        return this;
+    }
+
     public boolean isShowDefaultBackground() {
         return showDefaultBackground;
+    }
+
+    /**
+     * Sets whether Minecraft's standard screen background should be drawn first.
+     */
+    public ApricityScreen setShowDefaultBackground(boolean showDefaultBackground) {
+        this.showDefaultBackground = showDefaultBackground;
+        return this;
     }
 
     public Document getLinkedDocument() {
@@ -69,12 +91,14 @@ public class ApricityScreen extends Screen implements AuiLinkedScreen {
     protected void init() {
         super.init();
 
-        if (linkedDocument != null) {
-            linkedDocument.remove();
-            linkedDocument = null;
+        // Screen.resize() calls init(); recreating the Document here would turn a
+        // window resize into a full page reload and wipe form state.
+        if (linkedDocument == null || !linkedDocument.isActive()) {
+            linkedDocument = Document.create(templatePath, openTiming);
+            if (linkedDocument == null && openTiming != null) openTiming.finish("screen-create-failed");
+        } else if (openTiming != null) {
+            openTiming.finish("screen-reused-document");
         }
-
-        linkedDocument = Document.create(templatePath);
         if (linkedDocument != null) {
             linkedDocument.applyViewport(false);
         }
@@ -119,6 +143,7 @@ public class ApricityScreen extends Screen implements AuiLinkedScreen {
         // AuiLinkedScreens submit the UI PIP state themselves (above the
         // vanilla background, below extractor-drawn content); Client.drawScreen
         // skips its own submission for them and only adds the pseudo-cursor.
+        com.sighs.apricityui.render.ScreenDocumentCache.attach(linkedDocument);
         com.sighs.apricityui.client.gui.ApricityGuiLayers.submitUi(guiGraphics);
     }
 
@@ -135,7 +160,7 @@ public class ApricityScreen extends Screen implements AuiLinkedScreen {
         int keyCode = event.key();
         int scanCode = event.scancode();
         int modifiers = event.modifiers();
-        if (keyCode == AuiServices.keys().reloadKey()) {
+        if (AuiKeyService.matches(keyCode, AuiServices.keys().reloadKey())) {
             ClientLoader.reload();
             return true;
         }
@@ -170,6 +195,7 @@ public class ApricityScreen extends Screen implements AuiLinkedScreen {
     public void removed() {
         if (linkedDocument != null) {
             linkedDocument.remove();
+            linkedDocument = null;
         }
         Size.clearViewportOverride();
         super.removed();
@@ -190,16 +216,5 @@ public class ApricityScreen extends Screen implements AuiLinkedScreen {
 
     private ApricityViewport currentViewport() {
         return linkedDocument == null ? new ApricityViewport(1, 1, 1.0f, 1.0d) : linkedDocument.getViewport();
-    }
-
-    private static boolean isControlModifier(int modifiers) {
-        return (modifiers & GLFW.GLFW_MOD_CONTROL) != 0;
-    }
-
-    /** Screen.hasControlDown() was removed in 26.1; check the physical Ctrl keys instead. */
-    private static boolean hasControlDown() {
-        long handle = Minecraft.getInstance().getWindow().handle();
-        return GLFW.glfwGetKey(handle, GLFW.GLFW_KEY_LEFT_CONTROL) == GLFW.GLFW_PRESS
-                || GLFW.glfwGetKey(handle, GLFW.GLFW_KEY_RIGHT_CONTROL) == GLFW.GLFW_PRESS;
     }
 }

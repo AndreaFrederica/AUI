@@ -13,16 +13,20 @@ import com.sighs.apricityui.style.Background;
 import com.sighs.apricityui.parser.CSS;
 
 public class Rect {
+    private final Size elementSize;
+    private final boolean displayed;
     public Element element;
     public Position position;
-    public Box box;
+    public final Box box;
     public String documentPath;
-    public Background background;
-    private final Size elementSize;
+    private Box paintBox;
+    private long paintVersion;
     private AABB visualBounds;
     private AABB transformedBounds;
     private boolean transformedBoundsComputed;
-    /** {@link #transformedBounds} 对应的 transform 依赖；祖先 transform 一变这个缓存就失效。 */
+    /**
+     * {@link #transformedBounds} 对应的 transform 依赖；祖先 transform 一变这个缓存就失效。
+     */
     private long transformedBoundsDependency = Long.MIN_VALUE;
     private Position bodyRectPosition;
     private Size bodyRectSize;
@@ -33,10 +37,12 @@ public class Rect {
 
     public Rect(Element element) {
         this.element = element;
-        position = Position.forRender(element);
+        displayed = Interaction.isDisplayed(element);
+        position = displayed ? Position.forRender(element) : Position.ZERO;
         box = Box.of(element);
-        elementSize = box.elementSize();
-        background = Background.of(element);
+        elementSize = displayed ? box.elementSize() : Size.ZERO;
+        paintBox = box;
+        paintVersion = element.getLayout().paintVersion();
         documentPath = element.document.getPath();
     }
 
@@ -45,7 +51,7 @@ public class Rect {
         if (cached != null) return cached;
         Rect result = createAndCache(element);
         if (element != null) {
-            var renderer = element.getRenderer();
+            var renderer = element.getLayout();
             long dependency = renderer.rectDependency(element.document);
             if (!renderer.hasCommittedRect(dependency)) {
                 renderer.commitRect(result, dependency);
@@ -67,6 +73,124 @@ public class Rect {
         return result;
     }
 
+    /** Paint metadata can change without replacing the committed geometry. */
+    public Box paintBox() {
+        long version = element.getLayout().paintVersion();
+        if (paintVersion != version) {
+            paintBox = Box.of(element);
+            paintVersion = version;
+            visualBounds = null;
+            transformedBoundsComputed = false;
+            bodyRadius = null;
+        }
+        return paintBox;
+    }
+
+    /**
+     * 按边的中线弧长分段；不以背景色覆盖空隙，透明背景也能透出下层。
+     */
+    private static void drawPatternedBorder(PoseStack pose, float x, float y, float w, float h,
+                                            float[] radii, float[] widths, int[] colors, Box.SideBorder[] sides) {
+        var matrix = PoseMatrices.of(pose);
+        for (int side = 0; side < 4; side++) {
+            float thickness = widths[side];
+            if (thickness <= 0 || (colors[side] >>> 24) == 0) continue;
+            float length = side % 2 == 0 ? w : h;
+            float before = widths[(side + 3) % 4], after = widths[(side + 1) % 4];
+            // 将每条边旋转到局部 top，路径从前一圆角中点到后一圆角中点。
+            int first = side, last = (side + 1) % 4;
+            float rx0 = radii[first * 2 + side % 2], ry0 = radii[first * 2 + 1 - side % 2];
+            float rx1 = radii[last * 2 + side % 2], ry1 = radii[last * 2 + 1 - side % 2];
+            java.util.List<float[]> path = new java.util.ArrayList<>();
+            borderHalfCorner(path, 0, rx0, ry0, before, thickness, false);
+            borderHalfCorner(path, length, rx1, ry1, after, thickness, true);
+            float total = 0;
+            float[] distances = new float[path.size()];
+            for (int i = 1; i < path.size(); i++) {
+                float[] a = path.get(i - 1), b = path.get(i);
+                total += (float) Math.hypot((b[0] + b[2] - a[0] - a[2]) / 2,
+                        (b[1] + b[3] - a[1] - a[3]) / 2);
+                distances[i] = total;
+            }
+            if (total <= 0) continue;
+            boolean dashed = "dashed".equals(sides[side].type());
+            int count = Math.max(1, Math.round(total / (5 * thickness)));
+            float period = total / count;
+            // dash:gap = 3:2，首尾半段使相邻边在角点衔接。
+            for (int i = 1; i < path.size(); i++) {
+                float from = distances[i - 1], to = distances[i];
+                if (to - from < 0.0001f) continue;
+                int firstDash = dashed ? Math.max(0, (int) Math.floor(from / period)) : 0;
+                int lastDash = dashed ? Math.min(count, (int) Math.ceil(to / period)) : 0;
+                for (int dash = firstDash; dash <= lastDash; dash++) {
+                    float start = dashed ? Math.max(from, (dash - 0.3f) * period) : from;
+                    float end = dashed ? Math.min(to, (dash + 0.3f) * period) : to;
+                    if (end <= start) continue;
+                    float[] a = borderInterpolate(path.get(i - 1), path.get(i), (start - from) / (to - from));
+                    float[] b = borderInterpolate(path.get(i - 1), path.get(i), (end - from) / (to - from));
+                    boolean doubleLine = "double".equals(sides[side].type()) && thickness >= 3;
+                    float stripe = Math.round(thickness / 3) / thickness;
+                    for (int band = 0; band < (doubleLine ? 2 : 1); band++) {
+                        float outer = !doubleLine || band == 0 ? 0 : 1 - stripe;
+                        float inner = !doubleLine || band == 1 ? 1 : stripe;
+                        float ax = a[0] + (a[2] - a[0]) * outer, ay = a[1] + (a[3] - a[1]) * outer;
+                        float bx = b[0] + (b[2] - b[0]) * outer, by = b[1] + (b[3] - b[1]) * outer;
+                        float cx = a[0] + (a[2] - a[0]) * inner, cy = a[1] + (a[3] - a[1]) * inner;
+                        float dx = b[0] + (b[2] - b[0]) * inner, dy = b[1] + (b[3] - b[1]) * inner;
+                        float[][] points = {{ax, ay}, {cx, cy}, {dx, dy}, {ax, ay}, {dx, dy}, {bx, by}};
+                        for (float[] p : points) {
+                            float px = switch (side) {
+                                case 0 -> p[0];
+                                case 1 -> w - p[1];
+                                case 2 -> w - p[0];
+                                default -> p[1];
+                            };
+                            float py = switch (side) {
+                                case 0 -> p[1];
+                                case 1 -> p[0];
+                                case 2 -> h - p[1];
+                                default -> h - p[0];
+                            };
+                            Graph.vtx(Base.getMesh(), matrix, x + px, y + py, colors[side]);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    private static float[] borderInterpolate(float[] a, float[] b, float t) {
+        float[] result = new float[4];
+        for (int i = 0; i < 4; i++) result[i] = a[i] + (b[i] - a[i]) * t;
+        return result;
+    }
+
+    private static void borderHalfCorner(java.util.List<float[]> path, float edge, float rx, float ry,
+                                         float adjacent, float thickness, boolean end) {
+        if (rx <= 0 || ry <= 0) {
+            float inner = end ? edge - adjacent : adjacent;
+            float[] corner = {edge, 0, inner, thickness};
+            float[] tangent = {inner, 0, inner, thickness};
+            path.add(end ? tangent : corner);
+            path.add(end ? corner : tangent);
+            return;
+        }
+        float cx = end ? edge - rx : rx;
+        float innerRx = Math.max(0, rx - adjacent), innerRy = Math.max(0, ry - thickness);
+        float innerCx = end ? edge - adjacent - innerRx : adjacent + innerRx;
+        float innerCy = thickness + innerRy;
+        for (int step = 0; step <= 6; step++) {
+            double angle = Math.toRadians(end ? -90 + step * 7.5 : -135 + step * 7.5);
+            float cos = (float) Math.cos(angle), sin = (float) Math.sin(angle);
+            path.add(new float[]{cx + rx * cos, ry + ry * sin,
+                    innerCx + innerRx * cos, innerCy + innerRy * sin});
+        }
+    }
+
+    public boolean isDisplayed() {
+        return displayed;
+    }
+
     /**
      * 滚动平移快速路径：滚动只让子树的绘制位置整体偏移，盒模型、尺寸、圆角、
      * 背景都不变。平移 position 并丢弃派生位置缓存（尺寸类缓存与位置无关，保留）。
@@ -84,6 +208,7 @@ public class Rect {
     }
 
     public AABB getVisualBounds() {
+        paintBox();
         if (visualBounds != null) return visualBounds;
         double[] box = visualBox();
         visualBounds = new AABB((float) box[0], (float) box[1], (float) box[2], (float) box[3]);
@@ -100,12 +225,13 @@ public class Rect {
      * （.progress-2-bar 的 translateX(150%)）会不再提交给绘制。</p>
      */
     public AABB getTransformedBounds() {
+        paintBox();
         // 缓存必须挂在 transform 依赖上：Rect 可能是跨帧存活的 committed 实例，
         // 祖先 transform 一变（例如拖动画布）它上面的旧结果就成了过期几何，
         // 拿它做剔除会把还在画面里的元素整片剔掉。
         long dependency = element == null || element.document == null
                 ? Long.MIN_VALUE
-                : element.getRenderer().transformDependency(element.document);
+                : element.getLayout().transformDependency(element.document);
         if (transformedBoundsComputed && transformedBoundsDependency == dependency) return transformedBounds;
         transformedBoundsComputed = true;
         transformedBoundsDependency = dependency;
@@ -131,8 +257,11 @@ public class Rect {
                 (float) transformed[2], (float) transformed[3]);
     }
 
-    /** 元素矩形（含阴影外扩），文档坐标系，不含 transform。 */
+    /**
+     * 元素矩形（含阴影外扩），文档坐标系，不含 transform。
+     */
     private double[] visualBox() {
+        Box box = paintBox();
         double x = position.x + box.getMarginLeft();
         double y = position.y + box.getMarginTop();
         double w = elementSize.width();
@@ -151,6 +280,15 @@ public class Rect {
             maxExtendX = Math.max(maxExtendX, shadow.x() + extent);
             maxExtendY = Math.max(maxExtendY, shadow.y() + extent);
         }
+        // outline 画在边框盒之外，视觉包围盒必须跟着外扩：贴边的元素若只按盒判剔除，
+        // 盒刚好在裁剪框外时整条焦点框会被剔掉。负 offset 落在盒内，不外扩。
+        double outlineReach = box.outline.isVisible() ? box.outline.offset() + box.outline.width() : 0;
+        if (outlineReach > 0) {
+            maxExtendX = Math.max(maxExtendX, outlineReach);
+            maxExtendY = Math.max(maxExtendY, outlineReach);
+            minExtendX = Math.min(minExtendX, -outlineReach);
+            minExtendY = Math.min(minExtendY, -outlineReach);
+        }
         if (minExtendX != 0 || minExtendY != 0 || maxExtendX != 0 || maxExtendY != 0) {
             x += minExtendX;
             y += minExtendY;
@@ -160,11 +298,41 @@ public class Rect {
         return new double[]{x, y, w, h};
     }
 
-    private double getMinBorderSize() {
-        return Math.min(Math.min(box.getBorderLeft(), box.getBorderTop()), Math.min(box.getBorderRight(), box.getBorderBottom()));
+    /**
+     * CSS outline：内边缘 = 边框盒 + outline-offset，带宽 = outline-width，不占布局、不进盒模型。
+     *
+     * <p>复用边框那套圆角带绘制：把矩形外扩 (offset + width)、按同带宽画一圈，画出的带正好落在
+     * [边框盒+offset, 边框盒+offset+width]。offset 为负时外扩量为负，带随之落到盒内侧；圆角半径
+     * 同样按外扩量放大（外边缘半径 = border-radius + offset + width），三者都与浏览器一致。</p>
+     */
+    public void drawOutline(PoseStack poseStack) {
+        Box box = paintBox();
+        if (!box.outline.isVisible()) return;
+
+        float expand = (float) (box.outline.offset() + box.outline.width());
+        float outerWidth = (float) elementSize.width() + expand * 2;
+        float outerHeight = (float) elementSize.height() + expand * 2;
+        if (outerWidth <= 0 || outerHeight <= 0) return;
+
+        float width = (float) box.outline.width();
+        float[] radii = Box.insetRadii(box.getCalculatedRadii((float) elementSize.width(), (float) elementSize.height()),
+                -expand, -expand, -expand, -expand);
+        int color = box.outline.color();
+
+        Graph.beginBatch();
+        Graph.drawComplexRoundedBorder(
+                PoseMatrices.of(poseStack),
+                (float) (position.x + box.getMarginLeft()) - expand,
+                (float) (position.y + box.getMarginTop()) - expand,
+                outerWidth,
+                outerHeight,
+                radii,
+                new float[]{width, width, width, width},
+                new int[]{color, color, color, color});
     }
 
     public void drawBorder(PoseStack poseStack) {
+        Box box = paintBox();
         Box.SideBorder topBorder = box.getBorderTopSide();
         Box.SideBorder rightBorder = box.getBorderRightSide();
         Box.SideBorder bottomBorder = box.getBorderBottomSide();
@@ -187,10 +355,17 @@ public class Rect {
         double w = elementSize.width();
         double h = elementSize.height();
 
-        float[] radii = box.getCalculatedRadii((float) w, (float) h, 0);
+        float[] radii = box.getCalculatedRadii((float) w, (float) h);
         float[] borders = new float[]{topW, rightW, bottomW, leftW};
         int[] colors = new int[]{topC, rightC, bottomC, leftC};
-        Graph.drawComplexRoundedBorder(PoseMatrices.of(poseStack), (float) x, (float) y, (float) w, (float) h, radii, borders, colors);
+        Box.SideBorder[] sides = {topBorder, rightBorder, bottomBorder, leftBorder};
+        boolean patterned = false;
+        for (Box.SideBorder side : sides) patterned |= "dashed".equals(side.type()) || "double".equals(side.type());
+        if (patterned) {
+            drawPatternedBorder(poseStack, (float) x, (float) y, (float) w, (float) h, radii, borders, colors, sides);
+        } else {
+            Graph.drawComplexRoundedBorder(PoseMatrices.of(poseStack), (float) x, (float) y, (float) w, (float) h, radii, borders, colors);
+        }
 
         if (box.borderImage != null && WorldWindowRenderContext.shouldRenderBackgroundDetails()) {
             if (box.borderImage.gradient != null) {
@@ -202,7 +377,7 @@ public class Rect {
             Size s = getShadowSize();
             String path = Loader.resolve(documentPath, box.borderImage.source);
             Base.commitDraws();
-            ImageDrawer.drawNineSlice(poseStack, path, (int) p.x, (int) p.y, (int) s.width(), (int) s.height(), box.borderImage);
+            ImageDrawer.drawNineSlice(poseStack, path, (int) p.x, (int) p.y, (int) s.width(), (int) s.height(), box.borderImage, element);
             return;
         }
     }
@@ -228,10 +403,17 @@ public class Rect {
     }
 
     public float[] getBodyRadius() {
+        Box box = paintBox();
         if (bodyRadius != null) return bodyRadius;
-        Size s = getBodyRectSize();
-        bodyRadius = box.getCalculatedRadii((float) s.width(), (float) s.height(), (float) getMinBorderSize());
+        bodyRadius = Box.insetRadii(box.getCalculatedRadii((float) elementSize.width(), (float) elementSize.height()),
+                (float) box.getBorderTop(), (float) box.getBorderRight(),
+                (float) box.getBorderBottom(), (float) box.getBorderLeft());
         return bodyRadius;
+    }
+
+    public float[] getContentRadius() {
+        return Box.insetRadii(getBodyRadius(), (float) box.getPaddingTop(), (float) box.getPaddingRight(),
+                (float) box.getPaddingBottom(), (float) box.getPaddingLeft());
     }
 
     public void drawBody(PoseStack poseStack) {
@@ -240,9 +422,10 @@ public class Rect {
     }
 
     public void drawBody(PoseStack poseStack, Size s) {
+        Background background = Background.of(element);
         Position p = getBodyRectPosition();
         float[] radii = getBodyRadius();
-        Background.Layer imageOnlyLayer = resolveImageOnlyLayer();
+        Background.Layer imageOnlyLayer = resolveImageOnlyLayer(background);
         if (imageOnlyLayer != null && WorldWindowRenderContext.shouldRenderBackgroundDetails()) {
             ImageDrawer.drawComplexBackground(
                     poseStack,
@@ -254,6 +437,17 @@ public class Rect {
                     element
             );
             return;
+        }
+
+        if (WorldWindowRenderContext.shouldRenderBackgroundDetails()) {
+            if (BackgroundPainter.draw(PoseMatrices.of(poseStack), (float) p.x, (float) p.y,
+                    (float) s.width(), (float) s.height(), radii, background)) return;
+            if (Boolean.parseBoolean(System.getProperty("apricityui.background.batch", "true"))
+                    && background.getLayers().size() > 1 && background.getLayers().stream()
+                    .allMatch(layer -> layer == null || "unset".equals(layer.imagePath))) {
+                drawLayeredGradientBackground(poseStack, p, s, radii, background);
+                return;
+            }
         }
 
         boolean layeredBackground = background.getLayers().size() > 1;
@@ -300,7 +494,41 @@ public class Rect {
         }
     }
 
-    private Background.Layer resolveImageOnlyLayer() {
+    private void drawLayeredGradientBackground(PoseStack poseStack, Position p, Size s, float[] radii, Background background) {
+        Graph.endBatch();
+        Mask.pushMask(poseStack, (float) p.x, (float) p.y, (float) s.width(), (float) s.height(), radii);
+        Graph.beginLayeredBatch();
+        try {
+            if (!"unset".equals(background.color)) {
+                Graph.drawFillRect(PoseMatrices.of(poseStack), (float) p.x, (float) p.y,
+                        (float) (p.x + s.width()), (float) (p.y + s.height()), new Color(background.color).getValue());
+            }
+            for (int i = background.getLayers().size() - 1; i >= 0; i--) {
+                Background.Layer layer = background.getLayers().get(i);
+                if (layer == null || layer.gradient == null) continue;
+                ImageDrawer.GradientTile tile = ImageDrawer.resolveGradientTile(layer, (float) s.width(), (float) s.height());
+                Gradient scaled = layer.gradient.scaledTo(tile.width(), tile.height());
+                float startX = tile.repeats() ? tile.startX() : tile.x();
+                float startY = tile.repeats() ? tile.startY() : tile.y();
+                float endX = tile.repeats() ? tile.endX() : startX + 1;
+                float endY = tile.repeats() ? tile.endY() : startY + 1;
+                for (float ix = startX; ix < endX; ix += tile.width()) {
+                    for (float iy = startY; iy < endY; iy += tile.height()) {
+                        float x = (float) p.x + ix, y = (float) p.y + iy;
+                        if (!Graph.drawAxisAlignedHardStopGradientRect(PoseMatrices.of(poseStack), x, y, tile.width(), tile.height(), scaled)
+                                && !Graph.drawAxisAlignedStopGradientRect(PoseMatrices.of(poseStack), x, y, tile.width(), tile.height(), scaled)) {
+                            Graph.drawGradientRect(PoseMatrices.of(poseStack), x, y, tile.width(), tile.height(), scaled);
+                        }
+                    }
+                }
+            }
+        } finally {
+            Graph.endBatch();
+            Mask.popMask(poseStack, (float) p.x, (float) p.y, (float) s.width(), (float) s.height(), radii);
+        }
+    }
+
+    private Background.Layer resolveImageOnlyLayer(Background background) {
         if (!"unset".equals(background.color)) return null;
 
         if (background.getLayers().size() == 1) {
@@ -332,20 +560,25 @@ public class Rect {
             float x = (float) p.x + tile.x();
             float y = (float) p.y + tile.y();
             Gradient scaled = layer.gradient.scaledTo(tile.width(), tile.height());
-            if (!Graph.requiresStopGeometry(scaled)) {
+            boolean fillsClip = tile.x() == 0 && tile.y() == 0
+                    && tile.width() == (float) s.width() && tile.height() == (float) s.height();
+            if (fillsClip && !Graph.requiresStopGeometry(scaled)) {
                 Graph.drawUnifiedRoundedRect(PoseMatrices.of(poseStack), x, y, tile.width(), tile.height(), radii, scaled);
                 return;
             }
 
-            // Complex stop geometry is emitted as clipped triangles.  Reuse the
-            // normal background mask so hard stops remain correct at rounded corners.
+            // CSS rounds the background painting area, not each positioned image.
+            // Keep the tile rectangular and clip it against the element's corners.
             Graph.endBatch();
-            Mask.pushMask(poseStack, x, y, tile.width(), tile.height(), radii);
+            Mask.pushMask(poseStack, (float) p.x, (float) p.y, (float) s.width(), (float) s.height(), radii);
             if (layered) Graph.beginLayeredBatch();
             else Graph.beginBatch();
-            Graph.drawGradientRect(PoseMatrices.of(poseStack), x, y, tile.width(), tile.height(), scaled);
+            if (!Graph.drawAxisAlignedHardStopGradientRect(PoseMatrices.of(poseStack), x, y, tile.width(), tile.height(), scaled)
+                    && !Graph.drawAxisAlignedStopGradientRect(PoseMatrices.of(poseStack), x, y, tile.width(), tile.height(), scaled)) {
+                Graph.drawGradientRect(PoseMatrices.of(poseStack), x, y, tile.width(), tile.height(), scaled);
+            }
             Graph.endBatch();
-            Mask.popMask(poseStack, x, y, tile.width(), tile.height(), radii);
+            Mask.popMask(poseStack, (float) p.x, (float) p.y, (float) s.width(), (float) s.height(), radii);
             if (layered) Graph.beginLayeredBatch();
             else Graph.beginBatch();
             return;
@@ -393,6 +626,7 @@ public class Rect {
     }
 
     public void drawShadow(PoseStack poseStack) {
+        Box box = paintBox();
         if (box.shadows.isEmpty()) return;
         Size s = getShadowSize();
         // 逐帧路径用索引循环而非 stream()：流管道对象在 JFR 采样里是明显的分配源。
@@ -431,14 +665,20 @@ public class Rect {
                         shadow.color().getValue()
                 );
             } else {
-                float[] shadowRadii = box.getCalculatedRadii((float) width, (float) height, (float) -spread);
-                Graph.drawUnifiedShadow(PoseMatrices.of(poseStack), (float) x, (float) y, (float) width, (float) height, shadowRadii, (float) shadow.size(), shadow.color().getValue(), 0x00000000);
+                // 外阴影只画在 border box 之外（CSS 规定，与背景是否透明无关），
+                // 偏移与扩散改变的是高斯衰减的参考位置，不再有"阴影形状内部"的填充。
+                float[] shadowRadii = box.getCalculatedRadii((float) s.width(), (float) s.height());
+                Graph.drawUnifiedShadow(PoseMatrices.of(poseStack), (float) sourceX, (float) sourceY,
+                        (float) s.width(), (float) s.height(), shadowRadii,
+                        (float) shadow.x(), (float) shadow.y(), (float) spread, (float) shadow.size(),
+                        shadow.color().getValue(), 0x00000000);
             }
         }
         if (layered) Graph.endBatch();
     }
 
     private void drawInsetShadow(PoseStack poseStack) {
+        Box box = paintBox();
         boolean hasInset = false;
         for (int i = 0; i < box.shadows.size(); i++) {
             if (box.shadows.get(i).inset()) {
@@ -493,6 +733,21 @@ public class Rect {
                                          float sourceX, float sourceY, float sourceWidth, float sourceHeight,
                                          float shadowX, float shadowY, float shadowWidth, float shadowHeight,
                                          int color) {
+        float spreadX = (shadowWidth - sourceWidth) / 2;
+        float spreadY = (shadowHeight - sourceHeight) / 2;
+        float[] radii = paintBox().getCalculatedRadii(sourceWidth, sourceHeight);
+        boolean rounded = false;
+        for (float radius : radii) rounded |= radius > 0;
+        if (rounded && spreadX > 0 && Math.abs(spreadX - spreadY) < 0.0001f
+                && Math.abs(shadowX - (sourceX - spreadX)) < 0.0001f
+                && Math.abs(shadowY - (sourceY - spreadY)) < 0.0001f) {
+            for (int i = 0; i < radii.length; i++) {
+                if (radii[i] > 0) radii[i] += spreadX;
+            }
+            Graph.drawComplexRoundedBorder(PoseMatrices.of(poseStack), shadowX, shadowY, shadowWidth, shadowHeight,
+                    radii, new float[]{spreadX, spreadX, spreadX, spreadX}, new int[]{color, color, color, color});
+            return;
+        }
         float shadowRight = shadowX + shadowWidth;
         float shadowBottom = shadowY + shadowHeight;
         float sourceRight = sourceX + sourceWidth;

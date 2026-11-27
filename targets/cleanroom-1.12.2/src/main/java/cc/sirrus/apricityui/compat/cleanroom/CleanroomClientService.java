@@ -348,6 +348,12 @@ public final class CleanroomClientService implements AuiClientService {
     }
 
     @Override
+    public boolean hasClientWorld() {
+        Minecraft mc = minecraft();
+        return mc != null && mc.world != null;
+    }
+
+    @Override
     public boolean isClientGameplayActive() {
         Minecraft mc = minecraft();
         return mc != null && mc.world != null && mc.currentScreen == null;

@@ -35,6 +35,7 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
+
 import com.sighs.apricityui.style.Style;
 import com.sighs.apricityui.style.InlineStyleDeclaration;
 
@@ -46,50 +47,17 @@ public final class DevToolsController {
             "inspectPaddingTop", "inspectPaddingRight", "inspectPaddingBottom", "inspectPaddingLeft",
             "inspectContent"
     };
-
-    enum InspectorTab {
-        ATTRIBUTES("attributes"), STYLES("styles"), BOXMODEL("boxmodel");
-
-        final String id;
-
-        InspectorTab(String id) {
-            this.id = id;
-        }
-
-        static InspectorTab parse(String value) {
-            if (value != null) {
-                for (InspectorTab tab : values()) {
-                    if (tab.id.equalsIgnoreCase(value.trim())) return tab;
-                }
-            }
-            return ATTRIBUTES;
-        }
-    }
-
-    record RuleStyle(String value, boolean important, boolean overridden, boolean disabled) {
-        String displayValue() {
-            return value + (important ? " !important" : "");
-        }
-    }
-
-    private record RuleDeclarationKey(int ruleOrder, String property) {
-    }
-
-    private record StylesheetSnapshot(List<CSS.DebugRule> rules,
-                                      Map<RuleDeclarationKey, CSS.Declaration> disabled) {
-    }
-
     private final Set<UUID> expandedNodes = new LinkedHashSet<>();
     private final Map<UUID, LinkedHashMap<String, String>> disabledStyles = new LinkedHashMap<>();
     private final Map<UUID, LinkedHashMap<RuleDeclarationKey, CSS.Declaration>> disabledRuleStyles = new LinkedHashMap<>();
     private final DevToolsDomTree tree = new DevToolsDomTree(this);
+    private final DevToolsDepthView depthView = new DevToolsDepthView(this);
     private final DevToolsInspector inspector = new DevToolsInspector(this);
     private final DevToolsConsole console = new DevToolsConsole(this);
     private final DevToolsEditHistory editHistory = new DevToolsEditHistory();
     private final DevToolsSaveDialog saveDialog = new DevToolsSaveDialog();
     private final DevToolsConfigDialog configDialog = new DevToolsConfigDialog();
     private final ResourceMetaDialog metaDialog = new ResourceMetaDialog();
-
     private Document toolDocument;
     private Document targetDocument;
     private Document inspectShellCacheDocument;
@@ -108,6 +76,7 @@ public final class DevToolsController {
     private double panelDragOffsetX;
     private boolean resizingInspector;
     private boolean consoleMode;
+    private boolean depthMode;
     private boolean refreshQueued;
     private boolean skipSaveConfirmation;
     private long toastTicket;
@@ -116,12 +85,116 @@ public final class DevToolsController {
     private Element consoleTooltipTarget;
     private String consoleTooltipKey;
 
+    private static String cssSelector(Element element) {
+        if (element.id != null && !element.id.isBlank()) return "#" + escapeSelectorToken(element.id);
+        ArrayList<String> parts = new ArrayList<>();
+        for (Element current = element; current != null && current.document != null; current = current.parentElement) {
+            String tag = current.tagName.toLowerCase(Locale.ROOT);
+            if (current.id != null && !current.id.isBlank()) {
+                parts.add("#" + escapeSelectorToken(current.id));
+                break;
+            }
+            StringBuilder part = new StringBuilder(tag);
+            for (String className : current.getClassNames()) part.append('.').append(escapeSelectorToken(className));
+            if (current.parentElement != null) {
+                int index = 1;
+                for (Element sibling : current.parentElement.children) {
+                    if (sibling == current) break;
+                    if (tag.equalsIgnoreCase(sibling.tagName)) index++;
+                }
+                part.append(":nth-of-type(").append(index).append(')');
+            }
+            parts.add(part.toString());
+            if (current == current.document.documentElement) break;
+        }
+        java.util.Collections.reverse(parts);
+        return String.join(" > ", parts);
+    }
+
+    private static String escapeSelectorToken(String value) {
+        return value.replaceAll("[^a-zA-Z0-9_-]", "\\\\$0");
+    }
+
+    private static String inspectLabel(Element element, Element.DOMRect rect) {
+        StringBuilder label = new StringBuilder(element.tagName.toLowerCase(Locale.ROOT));
+        if (element.id != null && !element.id.isBlank()) label.append('#').append(element.id);
+        for (String className : element.getClassNames()) label.append('.').append(className);
+        label.append(' ').append(Math.round(rect.width)).append(" x ").append(Math.round(rect.height));
+        return label.toString();
+    }
+
+    private static CSS.DebugRule findDebugRule(Document document, int ruleOrder) {
+        if (document == null) return null;
+        for (CSS.DebugRule rule : document.CSSDebugRules) {
+            if (rule != null && rule.order() == ruleOrder) return rule;
+        }
+        return null;
+    }
+
+    private static CSS.DebugRule copyDebugRule(CSS.DebugRule rule) {
+        return new CSS.DebugRule(rule.selector(), rule.properties(), rule.sourcePath(), rule.order());
+    }
+
+    private static void rebuildStylesheet(Document document) {
+        CSS.rebuildCacheFromDebugRules(document.CSSDebugRules, document.CSSCache);
+        document.rebuildSelectorIndex();
+        document.reapplyStylesFromCache();
+    }
+
+    private static CSS.Declaration parseRuleDeclaration(String raw) {
+        String value = raw == null ? "" : raw.trim();
+        String lower = value.toLowerCase(Locale.ROOT);
+        boolean important = lower.endsWith("!important");
+        if (important) value = value.substring(0, value.length() - "!important".length()).trim();
+        return new CSS.Declaration(value, important);
+    }
+
+    private static void syncRuntimeInlineStyleCache(Element target) {
+        if (target == null) return;
+        String raw = target.getAttribute("style");
+        if (target.getRuntimeCache("bound-base-inline-style") != null) {
+            target.putRuntimeCache("bound-base-inline-style", raw == null ? "" : raw);
+        }
+        if (target.getRuntimeCache("bound-last-inline-style") != null) {
+            target.putRuntimeCache("bound-last-inline-style", raw == null ? "" : raw);
+        }
+    }
+
+    private static String documentLabel(Document document) {
+        String uuid = document.getUuid().toString();
+        return document.getPath() + " [" + uuid.substring(0, 4) + "]";
+    }
+
+    private static boolean isInternalCursorOverlay(Document document) {
+        if (document == null || document.body == null) return false;
+        if (document.body.getClassNames().contains("cursor-overlay-body")) return true;
+        return document.querySelector("#baeffect-cursor-layer.cursor-layer") != null;
+    }
+
+    private static Element findElement(Document document, UUID uuid) {
+        if (document == null || uuid == null) return null;
+        if (document.documentElement != null && uuid.equals(document.documentElement.uuid))
+            return document.documentElement;
+        if (document.head != null && uuid.equals(document.head.uuid)) return document.head;
+        if (document.body != null && uuid.equals(document.body.uuid)) return document.body;
+        for (Element element : document.getElements()) {
+            if (element != null && uuid.equals(element.uuid)) return element;
+        }
+        return null;
+    }
+
     public synchronized boolean isOpen() {
         return toolDocument != null && toolDocument.isActive() && Document.get(PATH).contains(toolDocument);
     }
 
     public synchronized Document getToolDocument() {
         return isOpen() ? toolDocument : null;
+    }
+
+    public synchronized boolean prepareRender(Document document) {
+        if (document != toolDocument || !isOpen()) return false;
+        if (depthMode) return depthView.prepareRender();
+        return !consoleMode && tree.prepareRender();
     }
 
     public synchronized boolean ensureOpen() {
@@ -212,20 +285,13 @@ public final class DevToolsController {
         if (button != 0 || !isOpen() || !pickMode || !isDebuggable(targetDocument)
                 || isOverToolPanel(screenPosition)) return false;
         Element hit = inspectHit(screenPosition);
-        if (hit != null) {
-            selectedElementUuid = hit.uuid;
-            revealAncestors(hit);
-        }
         consumeInspectMouseUp = true;
         pickMode = false;
         Cursor.resetToDefault();
-        if (hit != null) {
-            refresh();
-            scheduleTreeReveal(hit.uuid);
-        } else {
+        if (!selectFromView(hit, true)) {
             updateShellState();
+            hideInspectHighlight();
         }
-        hideInspectHighlight();
         return true;
     }
 
@@ -253,6 +319,7 @@ public final class DevToolsController {
 
         tree.render(domTree, nodeCount, targetDocument, selected);
         inspector.render(targetDocument, selected, inspectorTab);
+        depthView.invalidate();
         updateShellState();
         DevToolsDom.markDirty(toolDocument);
     }
@@ -291,7 +358,9 @@ public final class DevToolsController {
     }
 
     void toggleConsoleMode() {
+        depthView.clearHover();
         consoleMode = !consoleMode;
+        depthMode = false;
         if (consoleMode && pickMode) {
             pickMode = false;
             Cursor.resetToDefault();
@@ -306,6 +375,20 @@ public final class DevToolsController {
             Element input = toolDocument == null ? null : toolDocument.querySelector("#consoleInput");
             if (input != null) input.focus();
         }
+        DevToolsDom.markDirty(toolDocument);
+    }
+
+    private void toggleDepthMode() {
+        depthView.refreshSnapshot();
+        depthMode = !depthMode;
+        consoleMode = false;
+        if (pickMode) {
+            pickMode = false;
+            Cursor.resetToDefault();
+            hideInspectHighlight();
+        }
+        clearToolFocus();
+        updateShellState();
         DevToolsDom.markDirty(toolDocument);
     }
 
@@ -328,21 +411,30 @@ public final class DevToolsController {
     void toggleCollapsed(Element element) {
         if (!DevToolsDomTree.hasInspectableChildren(element)) return;
         if (!expandedNodes.remove(element.uuid)) expandedNodes.add(element.uuid);
-        refreshTree();
+        if (!isOpen()) return;
+        Element domTree = toolDocument.querySelector("#domTree");
+        if (domTree == null) return;
+        tree.toggle(domTree, element, selectedElement());
     }
 
-    void selectFromView(Element element) {
-        if (element == null || element.document != targetDocument) return;
+    boolean selectFromView(Element element, boolean revealInTree) {
+        if (!isCurrentTarget(element)) return false;
+        if (depthMode) {
+            depthView.clearHover();
+            depthMode = false;
+            clearToolFocus();
+        }
         treeHoverElementUuid = null;
         selectedElementUuid = element.uuid;
         revealAncestors(element);
         refresh();
+        if (revealInTree) scheduleTreeReveal(element.uuid);
         hideInspectHighlight();
+        return true;
     }
 
     void showElementContextMenu(Element element, MouseEvent event) {
-        if (element == null || event == null || element.document != targetDocument || !element.isConnected()) return;
-        selectFromView(element);
+        if (event == null || !selectFromView(element, false)) return;
         boolean canChangeStructure = canChangeStructure(element);
         List<ContextMenu.Item> items = new ArrayList<>();
         items.add(ContextMenu.Item.header(DevToolsTranslations.translate("devtools.apricityui.element_menu", element.tagName.toLowerCase(Locale.ROOT))));
@@ -519,36 +611,6 @@ public final class DevToolsController {
 
     private boolean isCurrentTarget(Element element) {
         return element != null && element.document == targetDocument && element.isConnected();
-    }
-
-    private static String cssSelector(Element element) {
-        if (element.id != null && !element.id.isBlank()) return "#" + escapeSelectorToken(element.id);
-        ArrayList<String> parts = new ArrayList<>();
-        for (Element current = element; current != null && current.document != null; current = current.parentElement) {
-            String tag = current.tagName.toLowerCase(Locale.ROOT);
-            if (current.id != null && !current.id.isBlank()) {
-                parts.add("#" + escapeSelectorToken(current.id));
-                break;
-            }
-            StringBuilder part = new StringBuilder(tag);
-            for (String className : current.getClassNames()) part.append('.').append(escapeSelectorToken(className));
-            if (current.parentElement != null) {
-                int index = 1;
-                for (Element sibling : current.parentElement.children) {
-                    if (sibling == current) break;
-                    if (tag.equalsIgnoreCase(sibling.tagName)) index++;
-                }
-                part.append(":nth-of-type(").append(index).append(')');
-            }
-            parts.add(part.toString());
-            if (current == current.document.documentElement) break;
-        }
-        java.util.Collections.reverse(parts);
-        return String.join(" > ", parts);
-    }
-
-    private static String escapeSelectorToken(String value) {
-        return value.replaceAll("[^a-zA-Z0-9_-]", "\\\\$0");
     }
 
     void clearHoverFromView(Element element) {
@@ -759,6 +821,8 @@ public final class DevToolsController {
     }
 
     private void close() {
+        depthView.refreshSnapshot();
+        tree.clear();
         disconnectTargetObserver();
         saveDialog.close();
         configDialog.close();
@@ -780,6 +844,7 @@ public final class DevToolsController {
         editHistory.clear();
         pickMode = false;
         consoleMode = false;
+        depthMode = false;
         treeHoverElementUuid = null;
         consumeInspectMouseUp = false;
         draggingPanel = false;
@@ -825,6 +890,7 @@ public final class DevToolsController {
     }
 
     private void bindTarget(Document target) {
+        depthView.refreshSnapshot();
         metaDialog.close();
         disconnectTargetObserver();
         pickMode = false;
@@ -864,6 +930,7 @@ public final class DevToolsController {
         Element reloadDocumentButton = toolDocument.querySelector("#reloadDocumentBtn");
         Element metaButton = toolDocument.querySelector("#metaButton");
         Element consoleButton = toolDocument.querySelector(".console-btn");
+        Element depthButton = toolDocument.querySelector("#depthViewBtn");
         Element settingsButton = toolDocument.querySelector("#settingsButton");
         Element dragHandle = toolDocument.querySelector("#panelDragHandle");
         Element closeDevToolsButton = toolDocument.querySelector("#closeDevToolsBtn");
@@ -891,6 +958,8 @@ public final class DevToolsController {
         bindOnce(reloadDocumentButton, event -> reloadTargetDocument());
         bindOnce(metaButton, event -> openMetaEditor());
         bindOnce(consoleButton, event -> toggleConsoleMode());
+        bindOnce(depthButton, event -> toggleDepthMode());
+        depthView.bind();
         bindOnce(settingsButton, event -> configDialog.open(toolDocument));
         bindOnce(closeDevToolsButton, event -> close());
         bindOnce(closeDocumentButton, event -> closeTargetDocument());
@@ -899,6 +968,7 @@ public final class DevToolsController {
         bindTooltipOnce(reloadDocumentButton, "tooltip.apricityui.devtools.reload_document");
         bindTooltipOnce(metaButton, "tooltip.apricityui.devtools.meta");
         bindConsoleTooltip(consoleButton);
+        bindTooltipOnce(depthButton, "devtools.apricityui.depth_view");
         bindTooltipOnce(settingsButton, "tooltip.apricityui.devtools.settings");
         bindTooltipOnce(closeDevToolsButton, "tooltip.apricityui.devtools.close");
         bindTooltipOnce(closeDocumentButton, "tooltip.apricityui.devtools.close_document");
@@ -949,6 +1019,8 @@ public final class DevToolsController {
         setAttribute("#reloadDocumentBtn", "aria-label", "devtools.apricityui.reload_document");
         setAttribute("#metaButton", "aria-label", "devtools.apricityui.edit_meta");
         setAttribute("#pickBtn", "aria-label", "devtools.apricityui.inspect_elements");
+        setAttribute("#depthViewBtn", "aria-label", "devtools.apricityui.depth_view");
+        setAttribute("#depthReset", "aria-label", "devtools.apricityui.depth_reset");
         setAttribute(".console-btn", "aria-label",
                 consoleMode ? "devtools.apricityui.inspect_elements" : "devtools.apricityui.console");
         setAttribute("#settingsButton", "aria-label", "tooltip.apricityui.devtools.settings");
@@ -1268,9 +1340,15 @@ public final class DevToolsController {
             bindConsoleTooltip(consoleButton);
         }
         setPanelVisibility(".document-selector-bar", !consoleMode);
-        setPanelVisibility("#domSection", !consoleMode);
-        setPanelVisibility("#inspectorSection", !consoleMode);
+        setPanelVisibility("#domSection", !consoleMode && !depthMode);
+        setPanelVisibility("#inspectorSection", !consoleMode && !depthMode);
         setPanelVisibility("#consoleContent", consoleMode);
+        setPanelVisibility("#depthView", depthMode);
+        Element depthButton = toolDocument.querySelector("#depthViewBtn");
+        if (depthButton != null) {
+            depthButton.setAttribute("class", depthMode ? "top-btn active" : "top-btn");
+            depthButton.setAttribute("aria-pressed", Boolean.toString(depthMode));
+        }
         Element pickButton = toolDocument.querySelector("#pickBtn");
         if (pickButton != null) pickButton.setAttribute("class", pickMode ? "top-btn active" : "top-btn");
         Element saveButton = toolDocument.querySelector("#saveBtn");
@@ -1502,14 +1580,6 @@ public final class DevToolsController {
         hideInspectHighlight();
     }
 
-    private static String inspectLabel(Element element, Element.DOMRect rect) {
-        StringBuilder label = new StringBuilder(element.tagName.toLowerCase(Locale.ROOT));
-        if (element.id != null && !element.id.isBlank()) label.append('#').append(element.id);
-        for (String className : element.getClassNames()) label.append('.').append(className);
-        label.append(' ').append(Math.round(rect.width)).append(" x ").append(Math.round(rect.height));
-        return label.toString();
-    }
-
     private DevToolsEditHistory.Snapshot editSnapshot(Element target) {
         return editHistory.snapshot(target, target == null ? Map.of() : disabledStyleMap(target));
     }
@@ -1547,14 +1617,6 @@ public final class DevToolsController {
                 && findDebugRule(target.document, ruleOrder) != null;
     }
 
-    private static CSS.DebugRule findDebugRule(Document document, int ruleOrder) {
-        if (document == null) return null;
-        for (CSS.DebugRule rule : document.CSSDebugRules) {
-            if (rule != null && rule.order() == ruleOrder) return rule;
-        }
-        return null;
-    }
-
     private LinkedHashMap<RuleDeclarationKey, CSS.Declaration> disabledRuleStyleMap(Document document) {
         if (document == null) return new LinkedHashMap<>();
         return disabledRuleStyles.computeIfAbsent(document.getUuid(), ignored -> new LinkedHashMap<>());
@@ -1567,10 +1629,6 @@ public final class DevToolsController {
         }
         return new StylesheetSnapshot(List.copyOf(rules),
                 Map.copyOf(document == null ? Map.of() : disabledRuleStyleMap(document)));
-    }
-
-    private static CSS.DebugRule copyDebugRule(CSS.DebugRule rule) {
-        return new CSS.DebugRule(rule.selector(), rule.properties(), rule.sourcePath(), rule.order());
     }
 
     private void afterStylesheetEdit(Document document, StylesheetSnapshot before, String toast) {
@@ -1597,31 +1655,6 @@ public final class DevToolsController {
         return true;
     }
 
-    private static void rebuildStylesheet(Document document) {
-        CSS.rebuildCacheFromDebugRules(document.CSSDebugRules, document.CSSCache);
-        document.rebuildSelectorIndex();
-        document.reapplyStylesFromCache();
-    }
-
-    private static CSS.Declaration parseRuleDeclaration(String raw) {
-        String value = raw == null ? "" : raw.trim();
-        String lower = value.toLowerCase(Locale.ROOT);
-        boolean important = lower.endsWith("!important");
-        if (important) value = value.substring(0, value.length() - "!important".length()).trim();
-        return new CSS.Declaration(value, important);
-    }
-
-    private static void syncRuntimeInlineStyleCache(Element target) {
-        if (target == null) return;
-        String raw = target.getAttribute("style");
-        if (target.getRuntimeCache("bound-base-inline-style") != null) {
-            target.putRuntimeCache("bound-base-inline-style", raw == null ? "" : raw);
-        }
-        if (target.getRuntimeCache("bound-last-inline-style") != null) {
-            target.putRuntimeCache("bound-last-inline-style", raw == null ? "" : raw);
-        }
-    }
-
     private Document resolvePreferredTarget() {
         try {
             Document current = com.sighs.apricityui.spi.AuiServices.client().getCurrentScreenDocument();
@@ -1644,32 +1677,10 @@ public final class DevToolsController {
         return documents;
     }
 
-    private static String documentLabel(Document document) {
-        String uuid = document.getUuid().toString();
-        return document.getPath() + " [" + uuid.substring(0, 4) + "]";
-    }
-
     private boolean isDebuggable(Document document) {
         return document != null && document != toolDocument && document.isActive()
                 && document.body != null && !PATH.equals(document.getPath())
                 && !isInternalCursorOverlay(document);
-    }
-
-    private static boolean isInternalCursorOverlay(Document document) {
-        if (document == null || document.body == null) return false;
-        if (document.body.getClassNames().contains("cursor-overlay-body")) return true;
-        return document.querySelector("#baeffect-cursor-layer.cursor-layer") != null;
-    }
-
-    private static Element findElement(Document document, UUID uuid) {
-        if (document == null || uuid == null) return null;
-        if (document.documentElement != null && uuid.equals(document.documentElement.uuid)) return document.documentElement;
-        if (document.head != null && uuid.equals(document.head.uuid)) return document.head;
-        if (document.body != null && uuid.equals(document.body.uuid)) return document.body;
-        for (Element element : document.getElements()) {
-            if (element != null && uuid.equals(element.uuid)) return element;
-        }
-        return null;
     }
 
     private void revealAncestors(Element element) {
@@ -1692,30 +1703,42 @@ public final class DevToolsController {
         FrameTaskScheduler.scheduleAfterFrames(1, deadlineNs -> {
             synchronized (DevToolsController.this) {
                 if (!isOpen() || !elementUuid.equals(selectedElementUuid)) return true;
-                revealTreeRow(elementUuid);
+                tree.reveal(elementUuid);
             }
             return true;
         });
     }
 
-    private void revealTreeRow(UUID elementUuid) {
-        Element domTree = toolDocument == null ? null : toolDocument.querySelector("#domTree");
-        Element row = domTree == null ? null : domTree.querySelector(".dom-node[data-node-id=\""
-                + elementUuid + "\"]");
-        if (domTree == null || row == null) return;
-        Element.DOMRect treeRect = domTree.getBoundingClientRect();
-        Element.DOMRect rowRect = row.getBoundingClientRect();
-        double rowCenter = rowRect.top + rowRect.height / 2;
-        double viewportCenter = treeRect.top + treeRect.height / 2;
-        domTree.setScrollTop(domTree.getScrollTop() + rowCenter - viewportCenter);
+    enum InspectorTab {
+        ATTRIBUTES("attributes"), STYLES("styles"), BOXMODEL("boxmodel");
+
+        final String id;
+
+        InspectorTab(String id) {
+            this.id = id;
+        }
+
+        static InspectorTab parse(String value) {
+            if (value != null) {
+                for (InspectorTab tab : values()) {
+                    if (tab.id.equalsIgnoreCase(value.trim())) return tab;
+                }
+            }
+            return ATTRIBUTES;
+        }
     }
 
-    private void refreshTree() {
-        if (!isOpen()) return;
-        Element domTree = toolDocument.querySelector("#domTree");
-        Element nodeCount = toolDocument.querySelector("#nodeCount");
-        if (domTree == null || nodeCount == null) return;
-        tree.render(domTree, nodeCount, targetDocument, selectedElement());
-        toolDocument.markDirty(domTree, Drawer.RELAYOUT | Drawer.REPAINT | Drawer.REORDER | Drawer.HITTEST);
+    record RuleStyle(String value, boolean important, boolean overridden, boolean disabled) {
+        String displayValue() {
+            return value + (important ? " !important" : "");
+        }
     }
+
+    private record RuleDeclarationKey(int ruleOrder, String property) {
+    }
+
+    private record StylesheetSnapshot(List<CSS.DebugRule> rules,
+                                      Map<RuleDeclarationKey, CSS.Declaration> disabled) {
+    }
+
 }

@@ -31,8 +31,9 @@ ApricityUI 是一个 Minecraft 模组：用 HTML、CSS、JavaScript 写游戏 UI
 | NeoForge | 1.21.1 | 支持 | 提供 | 21 |
 | Fabric | 26.1 | 当前不执行 | 不提供 | 25 |
 | NeoForge | 26.1 | 支持 | 不提供 | 25 |
+| NeoForge | 26.3 | 支持 | 不提供 | 25 |
 
-Java 的 common API 与 HTML/CSS 渲染在这些 target 中共用。Fabric target 当前不执行页面脚本；没有页面脚本支持时，页面仍可渲染，但 `<script>` 不运行。依赖脚本的交互可改用 Java 或选择支持页面脚本的 target。游戏内的资源管理器、DevTools 和资源重载按键默认未绑定，需在 MC 控制设置中自行绑定。
+Java 的 common API 与 HTML/CSS 渲染在这些 target 中共用。页面脚本需要运行时有 KubeJS 或 Rhino：装有 KubeJS 时用 KubeJS 的上下文与绑定，只有 Rhino 时用 AUI 自带的独立 Rhino 运行时，两者都没有时脚本跳过（页面仍渲染）。Fabric target 当前不执行页面脚本；依赖脚本的交互可改用 Java 或选择支持页面脚本的 target。游戏内的资源管理器、DevTools 和资源重载按键默认未绑定，需在 MC 控制设置中自行绑定。
 
 ## 页面里能用什么
 
@@ -45,8 +46,6 @@ Java 的 common API 与 HTML/CSS 渲染在这些 target 中共用。Fabric targe
 **浏览器式辅助行为**：Ctrl+滚轮缩放、文字选择复制、剪贴板、表单默认按键、滚动：[浏览器辅助功能](browser-features)。
 
 **Ore 主题**：内置的 MC 风格纯 CSS 主题（像素边框、深色表面、绿紫金强调色），引一行 CSS 就有成套的按钮、卡片、表单、表格、徽章样式，另有配套的**可视化编辑器**在游戏里拖页面、调 token、导出 HTML：[Ore 主题](ore-theme)。
-
-**McUI 主题**：另一套使用同一组件类与 token 契约的纯 CSS 主题，切换时只需更换样式表和根作用域类：[McUI 主题](mcui-theme)。
 
 ## 容器：和真实物品打交道
 
@@ -84,7 +83,7 @@ Java 的 common API 与 HTML/CSS 渲染在这些 target 中共用。Fabric targe
 
 ## 工程结构
 
-仓库是 `common + targets` 多加载器结构：`common/` 是 loader 无关的共享代码（可独立编译测试），`targets/<loader>-<mc版本>/` 是独立 Gradle 工程（Forge 1.18.2 / 1.19.2 / 1.20.1、Fabric 1.20.1 / 1.21.1 / 26.1、NeoForge 1.21.1 / 26.1），loader 绑定通过 SPI 下沉。构建命令、CI、发布流程见根目录 [README](../../README)。
+仓库是 `common + targets` 多加载器结构：`common/` 是 loader 无关的共享代码（可独立编译测试），`targets/<loader>-<mc版本>/` 是独立 Gradle 工程（Forge 1.18.2 / 1.19.2 / 1.20.1、Fabric 1.20.1 / 1.21.1 / 26.1、NeoForge 1.21.1 / 26.1 / 26.3），loader 绑定通过 SPI 下沉。构建命令、CI、发布流程见根目录 [README](../../README)。
 
 ## 文档地图
 
@@ -99,11 +98,11 @@ Java 的 common API 与 HTML/CSS 渲染在这些 target 中共用。Fabric targe
 | HTML/CSS 支持度 | [html-css-coverage.md](html-css-coverage) |
 | 扩展标签 | [extension-elements.md](extension-elements) |
 | WebView / iframe | [webview.md](webview) |
+| 启动阶段 / 启动加载屏 | [startup.md](startup) |
 | 缩放、选择、剪贴板等辅助行为 | [browser-features.md](browser-features) |
 | 资源路径和资源管理器 | [resource-manager.md](resource-manager) |
 | KJS / Java 模组 API | [apricity-api.md](apricity-api) |
 | Ore 主题和可视化编辑器 | [ore-theme.md](ore-theme) |
-| McUI 主题 | [mcui-theme.md](mcui-theme) |
 | Java 组件库 | [ui-library.md](ui-library) |
 | 游戏内 DevTools | [devtools.md](devtools) |
 | 自定义元素 / KJS 绑定 / 帧耗时 | [secondary-development.md](secondary-development) |

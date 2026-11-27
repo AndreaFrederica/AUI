@@ -5,8 +5,10 @@ import com.sighs.apricityui.screen.ApricityContainerScreen;
 import net.minecraft.client.gui.screens.MenuScreens;
 
 public final class ClientMenuScreens {
-    private ClientMenuScreens() { }
+    private ClientMenuScreens() {
+    }
+
     public static void register() {
-        MenuScreens.register(ApricityMenus.APRICITY_CONTAINER, ApricityContainerScreen::new);
+        MenuScreens.register(ApricityMenus.APRICITY_CONTAINER, ApricityContainerScreen<ApricityContainerMenu>::new);
     }
 }

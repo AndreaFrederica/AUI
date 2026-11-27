@@ -16,22 +16,22 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfoReturnable;
 
 @Mixin(value = AbstractContainerScreen.class)
 public abstract class AbstractContainerScreenMixin {
+    @Inject(method = "renderSlotHighlight(Lnet/minecraft/client/gui/GuiGraphics;IIII)V", at = @At("HEAD"), cancellable = true, remap = false)
+    private static void apricityui$cancelVanillaSlotHighlightLegacy(CallbackInfo ci) {
+        if (Minecraft.getInstance().screen instanceof ApricityContainerScreen<?>) {
+            ci.cancel();
+        }
+    }
+
     @Invoker("recalculateQuickCraftRemaining")
     protected abstract void apricityui$recalculateQuickCraftRemaining();
 
     @Inject(method = "renderSlot", at = @At("HEAD"), cancellable = true)
     private void apricityui$cancelVanillaRenderSlot(GuiGraphics guiGraphics, Slot slot, CallbackInfo ci) {
-        if ((Object) this instanceof ApricityContainerScreen screen) {
+        if ((Object) this instanceof ApricityContainerScreen<?> screen) {
             if (screen.pruneInvalidQuickCraftSlot(slot)) {
                 apricityui$recalculateQuickCraftRemaining();
             }
-            ci.cancel();
-        }
-    }
-
-    @Inject(method = "renderSlotHighlight(Lnet/minecraft/client/gui/GuiGraphics;IIII)V", at = @At("HEAD"), cancellable = true, remap = false)
-    private static void apricityui$cancelVanillaSlotHighlightLegacy(CallbackInfo ci) {
-        if (Minecraft.getInstance().screen instanceof ApricityContainerScreen) {
             ci.cancel();
         }
     }
@@ -49,7 +49,7 @@ public abstract class AbstractContainerScreenMixin {
             String overlayText,
             CallbackInfo ci
     ) {
-        if ((Object) this instanceof ApricityContainerScreen screen) {
+        if ((Object) this instanceof ApricityContainerScreen<?> screen) {
             screen.captureFloatingItem(stack, x, y, overlayText);
             ci.cancel();
         }
@@ -57,7 +57,7 @@ public abstract class AbstractContainerScreenMixin {
 
     @Inject(method = "isHovering(Lnet/minecraft/world/inventory/Slot;DD)Z", at = @At("HEAD"), cancellable = true)
     private void apricityui$injectSlotHovering(Slot slot, double mouseX, double mouseY, CallbackInfoReturnable<Boolean> cir) {
-        if (!((Object) this instanceof ApricityContainerScreen screen)) {
+        if (!((Object) this instanceof ApricityContainerScreen<?> screen)) {
             return;
         }
         if (!screen.isSlotPointerInteractable(slot)) {

@@ -7,14 +7,6 @@ import java.util.IdentityHashMap;
 import java.util.Map;
 
 public final class TransformFrameCache {
-    // 与 RectFrameCache 同构：单 State ThreadLocal + 常驻 map clear 复用，
-    // 避免逐帧 3 个 ThreadLocal 的 set/remove 与 IdentityHashMap 重建。
-    private static final class State {
-        int depth = 0;
-        int committedFallbackDisabled = 0;
-        final Map<Element, Matrix4f> map = new IdentityHashMap<>();
-    }
-
     private static final ThreadLocal<State> STATE = ThreadLocal.withInitial(State::new);
 
     private TransformFrameCache() {
@@ -46,7 +38,7 @@ public final class TransformFrameCache {
         Matrix4f cached = getFrame(element);
         if (cached != null) return cached;
         if (STATE.get().committedFallbackDisabled > 0) return null;
-        return element == null ? null : element.getRenderer().getCommittedWorldTransformIfValid();
+        return element == null ? null : element.getLayout().getCommittedWorldTransformIfValid();
     }
 
     static Matrix4f getFrame(Element element) {
@@ -59,5 +51,13 @@ public final class TransformFrameCache {
         if (state.depth > 0) {
             state.map.put(element, matrix);
         }
+    }
+
+    // 与 RectFrameCache 同构：单 State ThreadLocal + 常驻 map clear 复用，
+    // 避免逐帧 3 个 ThreadLocal 的 set/remove 与 IdentityHashMap 重建。
+    private static final class State {
+        final Map<Element, Matrix4f> map = new IdentityHashMap<>();
+        int depth = 0;
+        int committedFallbackDisabled = 0;
     }
 }

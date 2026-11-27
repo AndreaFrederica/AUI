@@ -12,18 +12,22 @@ import com.sighs.apricityui.render.RenderNode;
 import com.sighs.apricityui.render.Operation;
 import com.sighs.apricityui.parser.CSS;
 import com.sighs.apricityui.parser.HTML;
+import com.sighs.apricityui.parser.ResourceUsageIndex;
 import com.sighs.apricityui.resource.async.image.ImageAsyncHandler;
 import com.sighs.apricityui.resource.async.style.StyleAsyncHandler;
 import com.sighs.apricityui.viewport.ApricityViewport;
+import com.sighs.apricityui.ui.ZoomHudManager;
 import com.sighs.apricityui.layout.Box;
+import com.sighs.apricityui.layout.Layout;
+import com.sighs.apricityui.layout.LayoutInvalidation;
 import com.sighs.apricityui.layout.Position;
 import com.sighs.apricityui.layout.Size;
-import net.minecraft.client.Minecraft;
 
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.function.Consumer;
+
 import com.sighs.apricityui.util.BrowserLocation;
 import com.sighs.apricityui.event.Event;
 import com.sighs.apricityui.parser.Selector;
@@ -45,8 +49,11 @@ import com.sighs.apricityui.behavior.TextSelection;
 import com.sighs.apricityui.dom.CommentNode;
 import com.sighs.apricityui.dom.DocumentFragment;
 import com.sighs.apricityui.dom.DocumentRegistry;
+import com.sighs.apricityui.dev.perf.PageOpenTiming;
 import com.sighs.apricityui.dom.ElementTree;
 import com.sighs.apricityui.dom.RenderElement;
+import com.sighs.apricityui.layout.LayoutLifecycle;
+import com.sighs.apricityui.layout.LayoutCommit;
 import com.sighs.apricityui.dom.TextNode;
 import com.sighs.apricityui.dom.MutationObserverManager;
 import com.sighs.apricityui.style.Animation;
@@ -54,48 +61,69 @@ import com.sighs.apricityui.style.Transition;
 
 public class Document {
 
-    private enum LifecycleState {
-        LOADING("loading"),
-        INTERACTIVE("interactive"),
-        COMPLETE("complete"),
-        DISPOSED("complete");
-
-        private final String readyStateValue;
-
-        LifecycleState(String readyStateValue) {
-            this.readyStateValue = readyStateValue;
-        }
-    }
-
     private static final String MOUSE_EVENTS_META_NAME = "aui-mouse-events";
+    private static final String HYPHEN_BREAK_META_NAME = "aui-hyphen-break";
     private static final long SLOW_REFRESH_LOG_THRESHOLD_NS = 50_000_000L;
-    /** 连续点击视为序列的最大按下位移（浏览器双击的按下容差，拖拽后序列重置）。 */
+    /**
+     * 连续点击视为序列的最大按下位移（浏览器双击的按下容差，拖拽后序列重置）。
+     */
     private static final double CLICK_PRESS_SLOP_PX = 4.0d;
-    /** 文本拖拽候选视为真正拖拽的最小移动距离（与双击按下容差一致）。 */
+    /**
+     * 文本拖拽候选视为真正拖拽的最小移动距离（与双击按下容差一致）。
+     */
     private static final double TEXT_DRAG_SLOP_PX = 4.0d;
-    private final ElementTree tree = new ElementTree(this);
-    private final RenderQueue render = new RenderQueue(this);
-    private final String path;
     public final Map<String, Map<String, CSS.Declaration>> CSSCache = new LinkedHashMap<>();
     public final List<CSS.DebugRule> CSSDebugRules = new ArrayList<>();
     public final List<String> JSCache = new ArrayList<>();
+    public final boolean inWorld;
+    private final ElementTree tree = new ElementTree(this);
+    private final LayoutLifecycle layout = new LayoutLifecycle(this);
+    private final RenderQueue render = new RenderQueue(this);
+    private final String path;
+    private final UUID uuid = UUID.randomUUID();
+    private final ApricityViewport.State viewportState;
+    private final MutationObserverManager mutationManager = new MutationObserverManager(this);
+    /**
+     * 运行时插入的样式表元素 → 它在 {@link StyleAsyncHandler} 里占用 entry 的 order。
+     *
+     * <p>只登记样式表元素（{@code <link rel="stylesheet">} / {@code <style>}），元素离开文档树
+     * 或文档 refresh 时移除。主线程读写；async handler 的 apply 也发生在主线程，靠它判断
+     * 「这张表还归当初那个元素所有吗」。</p>
+     */
+    private final IdentityHashMap<Element, Integer> runtimeStylesheetOrders = new IdentityHashMap<>();
+    private final StyleScope style = new StyleScope(this);
+    private final MotionTrack motion = new MotionTrack(this);
+    private final FocusRing focus = new FocusRing(this);
+    private final DocumentSelection documentSelection = new DocumentSelection(this);
+    private final RichTextSelection richTextSelection = new RichTextSelection(this);
+    /**
+     * 文档级文字选择单元的计算缓存：扁平文本/原始文本/run 绘制判定在 DOM 与样式不变时是稳定的，
+     * 按元素实例（IdentityHashMap）缓存；任何影响单元判定或文本内容的变更点都会调用
+     * {@link #bumpSelectionCache()} 整体失效。
+     */
+    private final IdentityHashMap<Element, SelectionCacheEntry> selectionCache = new IdentityHashMap<>();
+    private final Set<Element> activeScrollElements = ConcurrentHashMap.newKeySet();
+    private final Set<Element> mutableInlineStyleElements =
+            Collections.newSetFromMap(new WeakHashMap<>());
+    /**
+     * 文本拖拽（从选区内部按下后拖动）的文档级状态。
+     */
+    private final TextDragState textDrag = new TextDragState();
+    private final ArrayList<ScrollShift> scrollShifts = new ArrayList<>();
     public Html documentElement;
     public Head head;
     public Body body;
-    private final UUID uuid = UUID.randomUUID();
-    public final boolean inWorld;
     private volatile boolean reloadPersistent = false;
     private volatile boolean interceptMouseEvents;
-    /** A document rendered by an owning surface instead of the global document pass. */
+    /**
+     * 文档 meta {@code aui-hyphen-break}：false 时 '-' 不再作为换行机会。
+     */
+    private volatile boolean hyphenBreak = true;
+    /**
+     * A document rendered by an owning surface instead of the global document pass.
+     */
     private volatile boolean manuallyRendered = false;
     private volatile long refreshGeneration = 0L;
-    private volatile long timedLayoutGeneration = -1L;
-    private long domMutationVersion = 0L;
-    /**
-     * 首次全量几何提交的分片续跑状态，由 {@code LayoutCommit} 驱动；null 表示当前代没有
-     * 进行中的分片。放在 Document 实例上而不是静态表，文档销毁后随实例回收，不泄漏元素引用。
-     */
-    private volatile InitialCommitSlice initialCommitSlice;
     private volatile LifecycleState lifecycleState = LifecycleState.LOADING;
     private volatile String readyState = LifecycleState.LOADING.readyStateValue;
     private volatile Element lastClickTarget = null;
@@ -109,47 +137,52 @@ public class Document {
     private volatile double viewportOffsetX = 0.0d;
     private volatile double viewportOffsetY = 0.0d;
     private volatile long viewportVersion = 1L;
-    private final ApricityViewport.State viewportState;
     private volatile ApricityViewport viewport = new ApricityViewport(1, 1, 1.0f, 1.0d);
-    private final MutationObserverManager mutationManager = new MutationObserverManager(this);
-
-    private final StyleScope style = new StyleScope(this);
-    private final MotionTrack motion = new MotionTrack(this);
-    private final FocusRing focus = new FocusRing(this);
-    private final DocumentSelection documentSelection = new DocumentSelection(this);
-    private final RichTextSelection richTextSelection = new RichTextSelection(this);
     /**
-     * 文档级文字选择单元的计算缓存：扁平文本/原始文本/run 绘制判定在 DOM 与样式不变时是稳定的，
-     * 按元素实例（IdentityHashMap）缓存；任何影响单元判定或文本内容的变更点都会调用
-     * {@link #bumpSelectionCache()} 整体失效。
+     * 文档内选择单元列表缓存（enumerateUnits 结果）；null 表示尚未计算。
      */
-    private final IdentityHashMap<Element, SelectionCacheEntry> selectionCache = new IdentityHashMap<>();
-    /** 文档内选择单元列表缓存（enumerateUnits 结果）；null 表示尚未计算。 */
     private List<Element> selectionUnitsCache = null;
-    private final Set<Element> activeScrollElements = ConcurrentHashMap.newKeySet();
-    private final Set<Element> mutableInlineStyleElements =
-            Collections.newSetFromMap(new WeakHashMap<>());
-    /** 文本拖拽（从选区内部按下后拖动）的文档级状态。 */
-    private final TextDragState textDrag = new TextDragState();
 
+    private volatile PageOpenTiming pageOpenTiming;
     /**
-     * 一次「首次全量几何提交」跨帧分片的续跑状态：游标 + 累计 visited 集合 + 起始纳秒。
-     * 每个字段都只在渲染/主线程被 LayoutCommit 读写。
+     * UI 开屏路径（屏幕/预览）选择把“本代首次全量几何提交”交给渲染帧分片，
+     * 避免 tick 单帧同步重建整页。默认关闭：需要 tick 后立刻拿到完整几何的调用方
+     * （测试、无头文档、世界文档）保持原同步语义。
      */
-    public static final class InitialCommitSlice {
-        /** 分片过程中累计访问过的元素（去重），也是日志里 elements 的来源。 */
-        public final Set<Element> visited = Collections.newSetFromMap(new IdentityHashMap<>());
-        /** paintList 中下一个待提交的下标。 */
-        public int cursor;
-        /** 第一片开始的纳秒时间戳：日志里的 total 从它算起，是跨帧墙钟时间。 */
-        public final long startNs = System.nanoTime();
-        /** 本片所属的 refreshGeneration，换代后不再匹配即丢弃重来。 */
-        public long generation;
-        /**
-         * 自上一次渲染帧开始（{@link com.sighs.apricityui.render.LayoutCommit#beginInitialCommitFrame}）
-         * 以来是否已推进过一片。渲染门控每帧都会重置它，因此分片实际上是「每个渲染帧一片」。
-         */
-        public boolean advancedThisFrame;
+    private volatile boolean initialCommitDeferred;
+
+    public boolean isInitialCommitDeferred() {
+        return initialCommitDeferred;
+    }
+
+    public void deferInitialCommit(boolean deferred) {
+        this.initialCommitDeferred = deferred;
+    }
+
+    public PageOpenTiming getPageOpenTiming() {
+        return pageOpenTiming;
+    }
+
+    public PageOpenTiming activePageOpenTiming() {
+        PageOpenTiming timing = pageOpenTiming;
+        return timing != null && timing.isActive() ? timing : null;
+    }
+
+    public void setPageOpenTiming(PageOpenTiming timing) {
+        if (pageOpenTiming != null && pageOpenTiming != timing) pageOpenTiming.finish("replaced");
+        pageOpenTiming = timing;
+    }
+
+    public void recordOpenPaint(PageOpenTiming timing, long expectedGeneration, boolean painted, long elapsedNs) {
+        if (timing == null || timing != pageOpenTiming || expectedGeneration != refreshGeneration || !timing.isActive()) return;
+        var handle = StyleAsyncHandler.peekHandle(this);
+        int cssPending = handle == null ? 0 : handle.pendingCss();
+        int fontsPending = handle == null ? 0 : handle.pendingFonts();
+        boolean pending = style.hasPendingUpdates() || render.hasPendingWork() || layout.needsInitialFullCommit();
+        if (handle != null && handle.pendingCount() > cssPending + fontsPending) pending = true;
+        timing.rendered(painted, pending, handle, handle == null ? 0 : handle.revision(),
+                handle == null ? 0 : handle.cssRevision(), cssPending, fontsPending,
+                handle == null ? 0 : handle.failures(), elapsedNs);
     }
 
     public Document(String path, boolean inWorld) {
@@ -157,6 +190,105 @@ public class Document {
         this.inWorld = inWorld;
         this.viewportState = ApricityViewport.spec(path).createState(path);
         this.interceptMouseEvents = parseMouseEventInterception(HTML.findMetaContent(path, MOUSE_EVENTS_META_NAME));
+        this.hyphenBreak = parseHyphenBreak(HTML.findMetaContent(path, HYPHEN_BREAK_META_NAME));
+    }
+
+    private static boolean parseMouseEventInterception(String raw) {
+        if (raw == null || raw.isBlank()) return false;
+        return switch (raw.trim().toLowerCase(Locale.ROOT)) {
+            case "intercept", "block", "true", "yes", "on", "1" -> true;
+            default -> false;
+        };
+    }
+
+    private static boolean parseHyphenBreak(String raw) {
+        if (raw == null || raw.isBlank()) return true;
+        return switch (raw.trim().toLowerCase(Locale.ROOT)) {
+            case "none", "off", "false", "no", "0", "disable", "disabled" -> false;
+            default -> true;
+        };
+    }
+
+    private static boolean isUnavailableClientRuntime(NoClassDefFoundError error) {
+        String missing = error.getMessage();
+        if (missing == null) return false;
+        String className = missing.replace('.', '/');
+        return className.startsWith("net/minecraft/client/")
+                || className.equals("com/mojang/blaze3d/platform/Window");
+    }
+
+    /**
+     * HTML 属性名大小写不敏感（{@code setAttribute} 保留原样写入的写法）。
+     */
+    private static String attributeIgnoreCase(Element element, String name) {
+        String direct = element.getAttribute(name);
+        if (direct != null) return direct;
+        for (Map.Entry<String, String> entry : element.getAttributes().entrySet()) {
+            if (entry.getKey() != null && entry.getKey().equalsIgnoreCase(name)) return entry.getValue();
+        }
+        return null;
+    }
+
+    private static boolean isStylesheetRel(String rel) {
+        if (rel == null || rel.isBlank()) return false;
+        for (String token : Layout.splitTopLevelWhitespace(rel.trim())) {
+            if ("stylesheet".equalsIgnoreCase(token)) return true;
+        }
+        return false;
+    }
+
+    public static void refreshAll() {
+        DocumentRegistry.refreshAll();
+    }
+
+    // 这俩是创建UI用的，如果refresh放在构造函数里，那创建时就不会执行内嵌js，所以挪到了这里。
+    public static Document create(String path) {
+        return DocumentRegistry.create(path);
+    }
+
+    public static Document create(String path, PageOpenTiming timing) {
+        return DocumentRegistry.create(path, timing);
+    }
+
+    public static Document createInWorld(String path) {
+        return DocumentRegistry.createInWorld(path);
+    }
+
+    public static ArrayList<Document> get(String path) {
+        return DocumentRegistry.get(path);
+    }
+
+    public static Document getByUUID(String uuid) {
+        return DocumentRegistry.getByUUID(uuid);
+    }
+
+    public static List<Document> getAll() {
+        return DocumentRegistry.getAll();
+    }
+
+    public static Document getContextDocument() {
+        return DocumentRegistry.getContext();
+    }
+
+    public static void runWithContext(Document document, Runnable runnable) {
+        if (runnable == null) return;
+        try (ContextScope ignored = withContext(document)) {
+            runnable.run();
+        }
+    }
+
+    public static ContextScope withContext(Document document) {
+        Document previous = DocumentRegistry.getContext();
+        DocumentRegistry.setContext(document);
+        return new ContextScope(previous);
+    }
+
+    public static void remove(String path) {
+        DocumentRegistry.remove(path);
+    }
+
+    public static void remove(UUID uuid) {
+        DocumentRegistry.remove(uuid);
     }
 
     public boolean interceptsMouseEvents() {
@@ -167,12 +299,12 @@ public class Document {
         return interceptMouseEvents && hitTest(screenToDocumentPosition(screenPosition)) != null;
     }
 
-    private static boolean parseMouseEventInterception(String raw) {
-        if (raw == null || raw.isBlank()) return false;
-        return switch (raw.trim().toLowerCase(Locale.ROOT)) {
-            case "intercept", "block", "true", "yes", "on", "1" -> true;
-            default -> false;
-        };
+    /**
+     * 文档是否允许在 '-' / '‐' 之后换行。由 {@code aui-hyphen-break} meta 控制，
+     * 缺省为 true；编号、版本号等不希望被连字符拆开的文本可在页面上关闭。
+     */
+    public boolean allowsHyphenBreak() {
+        return hyphenBreak;
     }
 
     public UUID getUuid() {
@@ -206,7 +338,9 @@ public class Document {
         );
     }
 
-    /** Inverse of {@link #screenToDocumentPosition(Position)}. */
+    /**
+     * Inverse of {@link #screenToDocumentPosition(Position)}.
+     */
     public Position documentToScreenPosition(Position documentPosition) {
         if (documentPosition == null) return Position.ZERO;
         return new Position(
@@ -285,11 +419,12 @@ public class Document {
     public void applyViewport(boolean relayout) {
         ApricityViewport previous = viewport;
         try {
-            if (AuiServices.client().getWindow() == null) {
+            var window = AuiServices.client().getWindow();
+            if (window == null) {
                 Size fallback = Size.getHeadlessWindowSize();
                 viewport = viewportState.resolveHeadless((int) Math.round(fallback.width()), (int) Math.round(fallback.height()));
             } else {
-                viewport = viewportState.resolve(AuiServices.client().getWindow());
+                viewport = viewportState.resolve(window);
             }
         } catch (NoClassDefFoundError unavailableClientRuntime) {
             if (!isUnavailableClientRuntime(unavailableClientRuntime)) throw unavailableClientRuntime;
@@ -306,19 +441,12 @@ public class Document {
         }
     }
 
-    private static boolean isUnavailableClientRuntime(NoClassDefFoundError error) {
-        String missing = error.getMessage();
-        if (missing == null) return false;
-        String className = missing.replace('.', '/');
-        return className.startsWith("net/minecraft/client/")
-                || className.equals("com/mojang/blaze3d/platform/Window");
-    }
-
     public boolean handleViewportZoom(boolean zoomIn) {
         if (!viewportState.canUserScale()) return false;
         boolean changed = zoomIn ? viewportState.zoomIn() : viewportState.zoomOut();
         if (!changed) return false;
         DocumentRegistry.applyViewportForPath(path, true);
+        ZoomHudManager.show(this);
         ApricityUI.LOGGER.debug(
                 "[AUI Viewport] zoom path={} zoom={} viewport={}x{}",
                 path,
@@ -333,10 +461,13 @@ public class Document {
         if (!viewportState.canUserScale()) return false;
         if (!viewportState.resetZoom()) return false;
         DocumentRegistry.applyViewportForPath(path, true);
+        ZoomHudManager.show(this);
         return true;
     }
 
-    /** Applies an editor-controlled zoom value without requiring user-scalable metadata. */
+    /**
+     * Applies an editor-controlled zoom value without requiring user-scalable metadata.
+     */
     public boolean setViewportZoom(double zoom) {
         boolean changed = viewportState.setZoom(zoom);
         if (!changed) return false;
@@ -353,23 +484,92 @@ public class Document {
     }
 
     /**
-     * 只重新加载样式：从模板重新提取 CSS 并异步重挂，不重建 DOM、不重跑脚本。
-     * 用于热重载中纯 CSS 变化的场景，页面状态完整保留。
+     * 只重新加载样式：从模板重新提取 CSS，仅重挂当前 DOM 中仍存在的模板 link，
+     * 不重建 DOM、不重跑脚本。用于热重载中纯 CSS 变化的场景，页面状态完整保留。
+     *
+     * <p>脚本运行时插进 DOM 的 {@code <link>}/{@code <style>} 也按浏览器语义留在原地：它们仍在
+     * 文档里就重新挂到新 handle 上继续生效，已经移除的则不占槽位。</p>
      */
     public void refreshStyles() {
         String rawHtml = HTML.getTemple(path);
         if (rawHtml == null) return;
         CSS.Extractor cssExtractor = new CSS.Extractor(path);
         cssExtractor.handle(rawHtml);
-        cssExtractor.pushToDocument(this);
+        List<CSS.StylesheetSource> sources = cssExtractor.orderedStylesheetSources();
+        if (documentElement != null) {
+            Map<String, Integer> connectedLinks = new HashMap<>();
+            ArrayDeque<Element> pending = new ArrayDeque<>();
+            pending.push(documentElement);
+            while (!pending.isEmpty()) {
+                Element element = pending.pop();
+                if ("LINK".equals(element.tagName) && isStylesheetRel(attributeIgnoreCase(element, "rel"))) {
+                    String href = attributeIgnoreCase(element, "href");
+                    if (href != null && !href.isBlank()) {
+                        String resolved = Loader.resolve(path, href);
+                        if (resolved != null) connectedLinks.merge(resolved, 1, Integer::sum);
+                    }
+                }
+                for (Element child : element.children) pending.push(child);
+            }
+            List<CSS.StylesheetSource> retained = new ArrayList<>();
+            for (CSS.StylesheetSource source : sources) {
+                if (source.external()) {
+                    String resolved = Loader.resolve(path, source.value());
+                    int count = connectedLinks.getOrDefault(resolved, 0);
+                    if (count == 0) continue;
+                    connectedLinks.put(resolved, count - 1);
+                }
+                retained.add(source);
+            }
+            sources = retained;
+        }
+        List<String> external = new ArrayList<>();
+        List<String> inline = new ArrayList<>();
+        for (CSS.StylesheetSource source : sources) {
+            (source.external() ? external : inline).add(source.value());
+        }
+        ResourceUsageIndex.recordCss(path, external);
+        StyleAsyncHandler.INSTANCE.attach(this, path, external, inline, sources);
+        // 新 handle 的 order 与旧 handle 无关：模板 link 重新登记到模板槽位，
+        // 运行时插入的表按文档顺序重新挂一遍（它们在新 handle 上必然排在模板表之后）。
+        runtimeStylesheetOrders.clear();
+        StyleAsyncHandler.INSTANCE.bindTemplateLinks(this, documentElement);
+        reattachRuntimeStylesheets();
         reapplyStylesFromCache();
+    }
+
+    /**
+     * 重新登记刷新前后都还在文档里的运行时样式表。
+     *
+     * <p>模板期 {@link CSS.Extractor} 会把 {@code <style>} 标签连同正文从标记里剥掉、只把
+     * {@code <link>} 留给 DOM，所以此刻树里的 {@code <style>} 必然是脚本插入的，
+     * {@code <link>} 里则有一部分刚被 {@link StyleAsyncHandler#bindTemplateLinks} 绑到模板槽位。
+     * 两者都由 {@link #attachRuntimeStylesheet} 按文档顺序处理：已登记的模板 link 会被跳过，
+     * 剩下的重新走运行时路径，于是移除元素时 {@link #detachRuntimeStylesheet} 仍能释放它。
+     * 这正是浏览器里「重新加载样式后，文档中现存的表继续生效」的那条路径。</p>
+     */
+    private void reattachRuntimeStylesheets() {
+        if (documentElement == null) return;
+        ArrayDeque<Element> pending = new ArrayDeque<>();
+        pending.push(documentElement);
+        while (!pending.isEmpty()) {
+            Element element = pending.pop();
+            if ("STYLE".equals(element.tagName) || "LINK".equals(element.tagName)) {
+                attachRuntimeStylesheet(element);
+            }
+            for (int i = element.children.size() - 1; i >= 0; i--) {
+                pending.push(element.children.get(i));
+            }
+        }
     }
 
     public void refresh() {
         long refreshStartNs = System.nanoTime();
         beginRefreshLifecycle();
+        PageOpenTiming opening = activePageOpenTiming();
         ApricityViewport.spec(path).createState(path);
         interceptMouseEvents = parseMouseEventInterception(HTML.findMetaContent(path, MOUSE_EVENTS_META_NAME));
+        hyphenBreak = parseHyphenBreak(HTML.findMetaContent(path, HYPHEN_BREAK_META_NAME));
         applyViewport(false);
         ContextScope contextScope = withContext(this);
         long resetEndNs = System.nanoTime();
@@ -388,6 +588,7 @@ public class Document {
             HTML.DocumentRoot root = HTML.create(this, path);
             try {
                 if (root == null || root.body() == null) {
+                    if (opening != null) opening.finish("missing-body");
                     ApricityUI.LOGGER.error("[AUI Document] refresh produced no body path={} stage={}", path, stage);
                     return;
                 }
@@ -397,48 +598,54 @@ public class Document {
                 body = root.body();
                 rebuildElementIndexFromBody();
                 long extractionEndNs = System.nanoTime();
+                if (opening != null) opening.mark(PageOpenTiming.Stage.EXTRACTION);
 
                 stage = "initial style calculation";
                 if (documentElement != null) {
                     Size.setRootFontOverride(resolveRootFontSize());
-                    clearRenderCaches(documentElement);
+                    LayoutInvalidation.refreshMetrics(documentElement);
                     style.recomputeSubtree(documentElement);
                 }
                 long initialStyleEndNs = System.nanoTime();
-                long versionBeforeExpand = domMutationVersion;
+                if (opening != null) opening.mark(PageOpenTiming.Stage.INITIAL_STYLE);
                 stage = "document expanders";
-                AuiServices.expander().apply(this);
+                boolean expansionChanged = AuiServices.expander().applyAndReportChanges(this);
                 long expandersEndNs = System.nanoTime();
+                if (opening != null) opening.mark(PageOpenTiming.Stage.EXPANDERS);
 
-                // Final pass: only recompute styles when an expander actually mutated DOM/styles.
                 stage = "final style calculation";
-                if (domMutationVersion != versionBeforeExpand) {
-                    clearRenderCaches(documentElement);
+                if (expansionChanged) {
+                    LayoutInvalidation.refreshMetrics(documentElement);
                     style.recomputeSubtree(documentElement);
                 }
                 long finalStyleEndNs = System.nanoTime();
+                if (opening != null) opening.mark(PageOpenTiming.Stage.FINAL_STYLE);
                 tree.getElements().forEach(Element::clearDirtyFlags);
                 render.reset();
                 render.rebuildPaintList();
                 ImageAsyncHandler.prefetchImages(this);
                 enterInteractive();
                 long paintPrefetchEndNs = System.nanoTime();
+                if (opening != null) opening.mark(PageOpenTiming.Stage.PAINT_LIST);
 
                 stage = "global javascript";
                 String globalJS = Loader.readGlobalJS();
                 if (globalJS != null && !globalJS.isBlank()) {
                     AuiServices.script().evalGlobal(globalJS, uuid.toString());
                 }
+                if (opening != null) opening.mark(PageOpenTiming.Stage.GLOBAL_SCRIPT);
                 stage = "document javascript";
                 for (String js : JSCache) {
                     AuiServices.script().eval(js, null, path + "#script");
                 }
                 long scriptsEndNs = System.nanoTime();
+                if (opening != null) opening.mark(PageOpenTiming.Stage.PAGE_SCRIPTS);
                 stage = "lifecycle events";
                 fireLifecycleEvent("DOMContentLoaded", false);
                 enterComplete();
                 fireLifecycleEvent("load", false);
                 long lifecycleEndNs = System.nanoTime();
+                if (opening != null) opening.mark(PageOpenTiming.Stage.LIFECYCLE);
                 ApricityUI.LOGGER.debug(
                         "[AUI Document] refresh complete path={} elements={} cssRules={} scripts={}",
                         path,
@@ -457,9 +664,14 @@ public class Document {
                         scriptsEndNs,
                         lifecycleEndNs
                 );
+                if (opening != null) opening.mark(PageOpenTiming.Stage.REFRESH_COMPLETE);
             } catch (Exception exception) {
+                if (opening != null) opening.finish("refresh-failed");
                 ApricityUI.LOGGER.error("[AUI Document] refresh failed path={} stage={}", path, stage, exception);
             }
+        } catch (RuntimeException | LinkageError failure) {
+            if (opening != null) opening.finish("refresh-failed");
+            throw failure;
         } finally {
             contextScope.close();
         }
@@ -509,45 +721,43 @@ public class Document {
         return parsed == null || parsed <= 0 ? defaultFontSize : parsed;
     }
 
-    private void clearRenderCaches(Element root) {
-        if (root == null) return;
-        ArrayDeque<Element> stack = new ArrayDeque<>();
-        stack.push(root);
-        while (!stack.isEmpty()) {
-            Element current = stack.pop();
-            if (current == null) continue;
-            RenderElement renderer = current.getRenderer();
-            renderer.text.clear();
-            renderer.wrappedText.clear();
-            renderer.size.clear();
-            renderer.box.clear();
-            renderer.position.clear();
-            List<Element> children = current.children;
-            for (int i = children.size() - 1; i >= 0; i--) {
-                Element child = children.get(i);
-                if (child != null) {
-                    stack.push(child);
-                }
-            }
-        }
-    }
-
     private void beginRefreshLifecycle() {
         refreshGeneration++;
+        if (pageOpenTiming == null || pageOpenTiming.isBound()) {
+            if (pageOpenTiming != null) pageOpenTiming.finish("refreshed");
+            pageOpenTiming = PageOpenTiming.start(path, "document.refresh");
+        }
+        if (pageOpenTiming != null) {
+            pageOpenTiming.bind(uuid, refreshGeneration);
+            pageOpenTiming.mark(PageOpenTiming.Stage.REFRESH_BEGIN);
+        }
         // 换代：旧元素实例全部失效，进行中的首次提交分片必须丢弃，按新一代重新开始。
-        endInitialCommitSlice();
+        layout.endInitialCommitSlice();
         lifecycleState = LifecycleState.LOADING;
         readyState = lifecycleState.readyStateValue;
+        Window.window.clearIntersectionObservers(this);
         clearMutationObservers();
         // refresh 会重建整棵 DOM，旧元素实例全部失效，选择单元缓存一并清空
         bumpSelectionCache();
+        // refresh 后 DOM 由模板重建，运行时插入的样式表元素已不在树上（其 order 也不再有效）
+        runtimeStylesheetOrders.clear();
     }
+
+    /**
+     * 在 Document 层统一调度“样式重算的子树递归”。
+     * <p>
+     * Element 只负责 recompute 自己（无递归），避免任何零散路径随手 children.forEach(...) 扩散计算量。
+     */
 
     private void enterInteractive() {
         if (lifecycleState == LifecycleState.DISPOSED) return;
         lifecycleState = LifecycleState.INTERACTIVE;
         readyState = lifecycleState.readyStateValue;
     }
+
+    // ------------------------------------------------------------------
+    // 选区/文本拖拽的容器边缘自动滚动
+    // ------------------------------------------------------------------
 
     private void enterComplete() {
         if (lifecycleState == LifecycleState.DISPOSED) return;
@@ -558,6 +768,7 @@ public class Document {
     public void disposeLifecycle() {
         if (lifecycleState == LifecycleState.DISPOSED) return;
         lifecycleState = LifecycleState.DISPOSED;
+        if (pageOpenTiming != null) pageOpenTiming.finish("closed");
         // A document that goes away takes its elements with it, and an element that holds a
         // resource outside the DOM has to hear about it: <iframe> owns an offscreen browser
         // view, <select> owns a popup. Removing an element already reports this
@@ -570,6 +781,7 @@ public class Document {
                 // One element failing to clean up must not strand the rest.
             }
         }
+        Window.window.clearIntersectionObservers(this);
         clearMutationObservers();
         // 文档关闭：停止并释放本文档全部音频（含 new Audio() 游离实例）
         com.sighs.apricityui.media.AudioEngine.releaseDocument(this);
@@ -600,13 +812,14 @@ public class Document {
         tree.rebuildFromRoot(documentElement);
     }
 
-
     // 绘制队列，详见Drawer类
     public ArrayList<RenderNode> getPaintList() {
         return render.getPaintList();
     }
 
-    /** DOM 结构变更后失效命中缓存（替换/增删子节点后点击必须命中新节点）。 */
+    /**
+     * DOM 结构变更后失效命中缓存（替换/增删子节点后点击必须命中新节点）。
+     */
     public void markHitTestDirtyAll() {
         render.markHitTestDirty();
     }
@@ -617,11 +830,37 @@ public class Document {
             // DOM 变更(页面 JS replaceChildren 等)后布局可能尚未提交(布局提交在 20Hz tick),
             // paintList 仍引用被替换的旧节点 —— 点击会命中已移除节点,导致焦点/选区锚在
             // 旧节点上,输入后旧节点被移除触发 clearRemovedFocusState 失焦。命中前提交 pending 布局。
-            if (render.hasPendingWork()) {
-                render.commit();
-            }
+            // 初始几何提交被交给渲染分片后，tick 不会同步建完几何；命中测试必须拿完整几何，
+            // 否则会按半成品 rect 命中错误元素。
+            ensureGeometryForInput();
             return render.hitTest(documentPosition);
         }
+    }
+
+    private boolean synchronizingGeometry;
+
+    void ensureGeometryForInput() {
+        if (!isActive() || synchronizingGeometry) return;
+        synchronizingGeometry = true;
+        try (ContextScope ignored = withContext(this)) {
+            commitStyleRecalc();
+            if (render.hasPendingWork() || layout.needsInitialFullCommit()) render.commitForHitTest();
+        } finally {
+            synchronizingGeometry = false;
+        }
+    }
+
+    /**
+     * Passive probe for hover/cursor styling.
+     *
+     * <p>Unlike {@link #hitTest(Position)} this never forces the deferred initial geometry to be
+     * built synchronously: while the render-frame slicer is still working it reports "nothing here",
+     * so a mouse move right after opening a page cannot turn the sliced build into one long frame.
+     * Real input (press/click/wheel) must keep using {@link #hitTest(Position)}.</p>
+     */
+    public Element hitTestIfComplete(Position documentPosition) {
+        if (!isActive() || getLayout().needsInitialFullCommit()) return null;
+        return hitTest(documentPosition);
     }
 
     // 用来将某个元素更新成另一个元素，比如创建的时候用转换成对应类的元素替换掉原来通用的
@@ -636,8 +875,12 @@ public class Document {
     public void requestStyleRecalc(Element element) {
         if (element == null) return;
         if (element.document != this) return;
-        domMutationVersion++;
         style.requestRecalc(element);
+    }
+
+    public void requestInlineStyleRecalc(Element element, Style previousStyle) {
+        if (element == null || element.document != this) return;
+        style.requestInlineRecalc(element, previousStyle);
     }
 
     public void requestPseudoStyleRecalc(Element element, String pseudoName) {
@@ -649,17 +892,12 @@ public class Document {
     /**
      * 统一在 tick 阶段刷新样式，避免输入事件/渲染路径反复重算 CSS。
      * <p>
-     * 当前策略较保守：当某个元素的交互态（hover/active/focus）变化时，刷新该元素及其子树。
+     * 根据选择器依赖选择局部或子树刷新；局部重算发现继承值、自定义属性等变化时继续传播。
      */
     public void flushPendingStyleUpdates() {
         style.flushPendingUpdates();
     }
 
-    /**
-     * 在 Document 层统一调度“样式重算的子树递归”。
-     * <p>
-     * Element 只负责 recompute 自己（无递归），避免任何零散路径随手 children.forEach(...) 扩散计算量。
-     */
     /**
      * 单 Document 的 tick 生命周期入口。
      * <p>
@@ -680,13 +918,21 @@ public class Document {
             } finally {
                 StyleFrameCache.end();
             }
+            tickOpenTiming();
         }
     }
 
-    // ------------------------------------------------------------------
-    // 选区/文本拖拽的容器边缘自动滚动
-    // ------------------------------------------------------------------
-
+    private void tickOpenTiming() {
+        PageOpenTiming timing = activePageOpenTiming();
+        if (timing == null) return;
+        var handle = StyleAsyncHandler.peekHandle(this);
+        boolean pending = style.hasPendingUpdates() || render.hasPendingWork() || layout.needsInitialFullCommit();
+        timing.tick(pending, handle, handle == null ? 0 : handle.revision(),
+                handle == null ? 0 : handle.cssRevision(),
+                handle == null ? 0 : handle.pendingCss(),
+                handle == null ? 0 : handle.pendingFonts(),
+                handle == null ? 0 : handle.failures());
+    }
 
     /**
      * Style Recalc 阶段：统一在 tick 中重算样式。
@@ -720,16 +966,27 @@ public class Document {
         }
     }
 
-    /**
-     * Transition/Animation 阶段（占位）。
-     * <p>
-     * tick 阶段目前不搞 motion；推进逻辑在 render 阶段执行以保持稳定 60 帧。
-     * TODO：如需让 layout 随动画变化，需要引入更严格的 commit 机制。
-     */
+    /** Samples motion after preparing pending styles, also for callers outside the paint frame. */
     public boolean stepMotionRender() {
+        commitPendingStyleRecalcForRender();
+        return sampleMotion();
+    }
+
+    private boolean sampleMotion() {
         boolean requiresGeometryCommit = motion.stepRender();
         if (motion.hasVisualChanges()) render.markVisualDirty();
         return requiresGeometryCommit;
+    }
+
+    /** Prepares the inputs for a paint frame, then publishes its geometry. */
+    @dev.latvian.mods.rhino.util.HideFromJS
+    public boolean prepareRender() {
+        LayoutCommit.beginInitialCommitFrame(this);
+        boolean styleChanged = commitPendingStyleRecalcForRender();
+        boolean queuedGeometry = (styleChanged || render.hasPendingWork()) && commitRenderStateForMotion();
+        boolean motionGeometry = sampleMotion();
+        boolean scrollChanged = stepScrollRender();
+        return layout.commitFrame(queuedGeometry, motionGeometry, scrollChanged);
     }
 
     public void commitMotionHitTest() {
@@ -740,21 +997,18 @@ public class Document {
         return motion.drainLayoutRoots();
     }
 
+    /** Out-of-flow 的布局动画根：只需要重建这些子树，不必整页提交。 */
+    public Set<Element> drainMotionSubtreeLayoutRoots() {
+        return motion.drainSubtreeLayoutRoots();
+    }
+
     public Set<Element> drainMotionGeometryRoots() {
         return motion.drainGeometryRoots();
     }
 
     /**
-     * 最近一次 {@code commitRenderStateForMotion()} 收集的「仅变换」几何根：
-     * 这些元素的 transformVersion 变了，需要刷新自己与后代的 committed world
-     * transform，但没有任何元素要求重排。返回 {@code null} 表示必须走全量
-     * {@code LayoutCommit.commit(document)}；空集表示无需几何提交。
+     * Advances smooth scrolling once per paint frame and reports whether a visible offset changed.
      */
-    public Set<Element> drainStyleTransformRoots() {
-        return render.drainStyleTransformRoots();
-    }
-
-    /** Advances smooth scrolling once per paint frame and reports whether a visible offset changed. */
     public boolean stepScrollRender() {
         scrollShifts.clear();
         if (!isActive()) return false;
@@ -767,7 +1021,7 @@ public class Document {
             }
             boolean elementChanged = element.stepScrollRender();
             if (elementChanged) {
-                element.getRenderer().invalidateScrollVersion();
+                element.getLayout().invalidateScrollVersion();
                 render.markHitTestDirty(element);
                 scrollShifts.add(new ScrollShift(
                         element,
@@ -785,20 +1039,15 @@ public class Document {
     }
 
     /**
-     * 一次渲染帧内滚动容器的位移记录。滚动只让后代整体平移，
-     * {@code LayoutCommit.commitScrollTranslation} 借此避免全量几何重建。
+     * 本帧 stepScrollRender 产生的滚动位移；仅当 stepScrollRender 返回 true 时非空。
      */
-    public record ScrollShift(Element element, double dx, double dy) {
-    }
-
-    private final ArrayList<ScrollShift> scrollShifts = new ArrayList<>();
-
-    /** 本帧 stepScrollRender 产生的滚动位移；仅当 stepScrollRender 返回 true 时非空。 */
     public List<ScrollShift> getScrollShifts() {
         return scrollShifts;
     }
 
-    /** 滚动帧改走全量 LayoutCommit 时调用，丢弃未被平移快速路径消费的位移记录。 */
+    /**
+     * 滚动帧改走全量 LayoutCommit 时调用，丢弃未被平移快速路径消费的位移记录。
+     */
     public void discardScrollShifts() {
         scrollShifts.clear();
     }
@@ -808,6 +1057,25 @@ public class Document {
         activeScrollElements.add(element);
     }
 
+    /** A shrinking scroll range may require settling an otherwise idle offset. */
+    @dev.latvian.mods.rhino.util.HideFromJS
+    public void onScrollMetricsCommitted(Element element) {
+        if (element.needsScrollRenderStep()) registerActiveScroll(element);
+    }
+
+    /** Thumb dragging publishes the new offset before scroll listeners run. */
+    @dev.latvian.mods.rhino.util.HideFromJS
+    public void commitImmediateScroll(Element element, double dx, double dy) {
+        if (dx == 0 && dy == 0) return;
+        element.getLayout().invalidateScrollVersion();
+        if (!isActive() || !element.isConnected()) return;
+        try (ContextScope ignored = withContext(this)) {
+            LayoutCommit.commitScrollTranslation(this, List.of(new ScrollShift(element, dx, dy)));
+            render.updateHitTestSubtrees(Set.of(element));
+            render.markVisualDirty();
+        }
+    }
+
     /**
      * Element Tick 阶段：滚动、输入态、逐帧逻辑。
      */
@@ -815,6 +1083,10 @@ public class Document {
         if (!isActive()) return;
         render.tickElements();
     }
+
+    // ------------------------------------------------------------------
+    // 运行时样式表：页面脚本插入/移除 <link rel="stylesheet"> / <style>
+    // ------------------------------------------------------------------
 
     /**
      * Commit Render：将 dirty flags 提交为 layout/paintList 的更新。
@@ -854,7 +1126,6 @@ public class Document {
     }
 
     public void markDirty(Element element, int mask) {
-        domMutationVersion++;
         render.markDirty(element, mask);
     }
 
@@ -896,8 +1167,81 @@ public class Document {
 
     public void reapplyStylesFromCache() {
         if (body == null) return;
+        if (documentElement != null) {
+            documentElement.invalidateStyle();
+            markDirty(documentElement, Drawer.REPAINT);
+        }
         body.invalidateStyle();
         markDirty(body, Drawer.RELAYOUT | Drawer.REPAINT);
+    }
+
+    /**
+     * 元素进入文档树后的唯一通知点，由 {@link ElementTree} 的插入瓶颈点带上同一批元素调用。
+     *
+     * <p>模板 link 在解析结束时登记已有的样式表槽位；这里处理运行时插入的元素。</p>
+     */
+    public void onElementsAttached(List<Element> elements) {
+        if (elements == null || elements.isEmpty()) return;
+        for (int i = 0; i < elements.size(); i++) {
+            attachRuntimeStylesheet(elements.get(i));
+        }
+    }
+
+    /**
+     * 元素离开文档树后的唯一通知点，由 {@link ElementTree} 的移除瓶颈点调用。
+     *
+     * <p>元素树会把「移动」也实现成先 detach 再 attach，所以这里会被同一批元素带着空跑一次；
+     * 没登记过的元素直接忽略，真正的卸载只按 {@link #runtimeStylesheetOrders} 走。</p>
+     */
+    public void onElementsDetached(List<Element> elements) {
+        if (elements == null || elements.isEmpty()) return;
+        for (int i = 0; i < elements.size(); i++) {
+            detachRuntimeStylesheet(elements.get(i));
+        }
+    }
+
+    /**
+     * 这张运行时表是否仍归该元素所有（元素离开文档树时槽位已被释放）。
+     *
+     * <p>{@link StyleAsyncHandler} 的 apply 用它挡住「表比元素晚到」：元素已经被摘掉了，
+     * 就不能再把它的表装回文档。</p>
+     */
+    public boolean ownsRuntimeStylesheet(Element element, int order) {
+        if (element == null) return false;
+        Integer current = runtimeStylesheetOrders.get(element);
+        return current != null && current == order;
+    }
+
+    /**
+     * Associates a parsed template link with its already registered stylesheet slot.
+     */
+    public void registerTemplateStylesheet(Element element, int order) {
+        if (element != null) runtimeStylesheetOrders.put(element, order);
+    }
+
+    private void attachRuntimeStylesheet(Element element) {
+        if (element == null || runtimeStylesheetOrders.containsKey(element)) return;
+        if ("LINK".equals(element.tagName)) {
+            if (!isStylesheetRel(attributeIgnoreCase(element, "rel"))) return;
+            String href = attributeIgnoreCase(element, "href");
+            if (href == null || href.isBlank()) return;
+            int order = StyleAsyncHandler.INSTANCE.attachExternalStylesheet(this, href, element);
+            if (order >= 0) runtimeStylesheetOrders.put(element, order);
+            return;
+        }
+        if ("STYLE".equals(element.tagName)) {
+            int order = StyleAsyncHandler.INSTANCE.attachInlineStylesheet(this, element.getTextContent());
+            if (order >= 0) runtimeStylesheetOrders.put(element, order);
+            // TODO: <style> 文本被脚本改写（textContent = ...）或用 CSSOM 增删规则时重新挂表；
+            //  当前只按插入那一刻的文本应用一次，改动文本不会生效。
+        }
+    }
+
+    private void detachRuntimeStylesheet(Element element) {
+        if (element == null) return;
+        Integer order = runtimeStylesheetOrders.remove(element);
+        if (order == null) return;
+        StyleAsyncHandler.INSTANCE.detachStylesheet(this, order);
     }
 
     /**
@@ -906,7 +1250,7 @@ public class Document {
      */
     public void invalidateFontMetrics() {
         if (documentElement == null) return;
-        documentElement.getRenderer().invalidateLayoutSubtree();
+        documentElement.getLayout().invalidateLayoutSubtree();
         markDirty(documentElement, Drawer.RELAYOUT | Drawer.REPAINT);
     }
 
@@ -946,53 +1290,15 @@ public class Document {
         this.reloadPersistent = reloadPersistent;
     }
 
+    public LayoutLifecycle getLayout() {
+        return layout;
+    }
+
     /**
-     * 每次 refresh() 递增，用于外部检测 Document 内容是否已被重建。
+     * 每次 refresh() 递增，用于检测 Document 内容是否已被重建。
      */
     public long getRefreshGeneration() {
         return refreshGeneration;
-    }
-
-    public boolean markFirstLayoutCommitForTiming() {
-        long generation = refreshGeneration;
-        if (timedLayoutGeneration == generation) return false;
-        timedLayoutGeneration = generation;
-        return true;
-    }
-
-    /**
-     * 当前 refreshGeneration 是否还没做过全量几何提交。
-     *
-     * <p>与 {@link #markFirstLayoutCommitForTiming()} 不同，这是纯查询：分片路径靠它判断
-     * 「这一代还欠一次全量提交」，而不会像后者那样顺手把状态改掉。</p>
-     */
-    public boolean needsInitialFullCommit() {
-        return refreshGeneration != timedLayoutGeneration;
-    }
-
-    /** 首次全量提交是否正在分片（已开始、尚未完成）。 */
-    public boolean isInitialCommitSlicing() {
-        return initialCommitSlice != null;
-    }
-
-    /** 当前分片续跑状态；null 表示没有进行中的分片。 */
-    public InitialCommitSlice getInitialCommitSlice() {
-        return initialCommitSlice;
-    }
-
-    /** 开始（或换代后重新开始）一代文档的首次全量提交分片。 */
-    public InitialCommitSlice beginInitialCommitSlice() {
-        InitialCommitSlice slice = new InitialCommitSlice();
-        slice.generation = refreshGeneration;
-        initialCommitSlice = slice;
-        return slice;
-    }
-
-    /** 结束分片（完成或换代丢弃），并释放累计的 visited 集合。 */
-    public void endInitialCommitSlice() {
-        InitialCommitSlice slice = initialCommitSlice;
-        initialCommitSlice = null;
-        if (slice != null) slice.visited.clear();
     }
 
     public boolean isDisposed() {
@@ -1168,64 +1474,6 @@ public class Document {
         return Selector.querySelectorAll(body, "[name=\"" + normalized + "\"]");
     }
 
-    public static void refreshAll() {
-        DocumentRegistry.refreshAll();
-    }
-
-    // 这俩是创建UI用的，如果refresh放在构造函数里，那创建时就不会执行内嵌js，所以挪到了这里。
-    public static Document create(String path) {
-        return DocumentRegistry.create(path);
-    }
-
-    public static Document createInWorld(String path) {
-        return DocumentRegistry.createInWorld(path);
-    }
-
-    public static ArrayList<Document> get(String path) {
-        return DocumentRegistry.get(path);
-    }
-
-    public static Document getByUUID(String uuid) {
-        return DocumentRegistry.getByUUID(uuid);
-    }
-
-    public static List<Document> getAll() {
-        return DocumentRegistry.getAll();
-    }
-
-    public static Document getContextDocument() {
-        return DocumentRegistry.getContext();
-    }
-
-    public static void runWithContext(Document document, Runnable runnable) {
-        if (runnable == null) return;
-        try (ContextScope ignored = withContext(document)) {
-            runnable.run();
-        }
-    }
-
-    public static ContextScope withContext(Document document) {
-        Document previous = DocumentRegistry.getContext();
-        DocumentRegistry.setContext(document);
-        return new ContextScope(previous);
-    }
-
-    public static final class ContextScope implements AutoCloseable {
-        private final Document previous;
-        private boolean closed = false;
-
-        private ContextScope(Document previous) {
-            this.previous = previous;
-        }
-
-        @Override
-        public void close() {
-            if (closed) return;
-            closed = true;
-            DocumentRegistry.setContext(previous);
-        }
-    }
-
     public ArrayList<Element> getElements() {
         return tree.getElements();
     }
@@ -1234,15 +1482,8 @@ public class Document {
         return tree.getNodes();
     }
 
-    public static void remove(String path) {
-        DocumentRegistry.remove(path);
-    }
-
-    public static void remove(UUID uuid) {
-        DocumentRegistry.remove(uuid);
-    }
-
     public void remove() {
+        com.sighs.apricityui.render.ScreenDocumentCache.detach(this);
         DocumentRegistry.remove(uuid);
     }
 
@@ -1280,7 +1521,6 @@ public class Document {
     }
 
     public void queueMutation(MutationRecord record) {
-        domMutationVersion++;
         mutationManager.queue(record);
     }
 
@@ -1340,7 +1580,9 @@ public class Document {
         return clickCount;
     }
 
-    /** 兼容旧 API：查询最近一次按下是否构成双击（计数已由 mousedown 路径推进，不再重复计数）。 */
+    /**
+     * 兼容旧 API：查询最近一次按下是否构成双击（计数已由 mousedown 路径推进，不再重复计数）。
+     */
     public boolean registerClickAndCheckDoubleClick(Element target, int button, long nowNs, long thresholdNs) {
         if (target == null || target != lastClickTarget || button != lastClickButton) return false;
         return clickCount >= 2;
@@ -1359,7 +1601,6 @@ public class Document {
     public void setFocusedElement(Element element) {
         focus.setFocusedElement(element);
     }
-
 
     public boolean hasAnyTextSelection() {
         return focus.hasAnyTextSelection();
@@ -1381,17 +1622,23 @@ public class Document {
         return richTextSelection;
     }
 
-    /** 浏览器标准 document.createRange() 的 AUI 桥。 */
+    /**
+     * 浏览器标准 document.createRange() 的 AUI 桥。
+     */
     public RangeBridge createRange() {
         return new RangeBridge();
     }
 
-    /** 浏览器标准 document.createTreeWalker() 的 AUI 桥（whatToShow 仅 SHOW_TEXT/SHOW_ALL 有效）。 */
+    /**
+     * 浏览器标准 document.createTreeWalker() 的 AUI 桥（whatToShow 仅 SHOW_TEXT/SHOW_ALL 有效）。
+     */
     public TreeWalkerBridge createTreeWalker(Element root, int whatToShow) {
         return new TreeWalkerBridge(root, whatToShow);
     }
 
-    /** 解析单元在高亮绘制时应使用的选区区间：优先文档级只读选择，其次富文本编辑选择。 */
+    /**
+     * 解析单元在高亮绘制时应使用的选区区间：优先文档级只读选择，其次富文本编辑选择。
+     */
     public int[] resolveUnitSelectionRange(Element unit) {
         if (unit == null) return null;
         if (documentSelection.isActive()) return documentSelection.localRangeForUnit(unit);
@@ -1399,7 +1646,9 @@ public class Document {
         return null;
     }
 
-    /** 是否存在任一活动文本选择（文档级或富文本编辑）。 */
+    /**
+     * 是否存在任一活动文本选择（文档级或富文本编辑）。
+     */
     public boolean hasAnyActiveSelection() {
         return documentSelection.isActive() || richTextSelection.isActive();
     }
@@ -1408,7 +1657,8 @@ public class Document {
         richTextSelection.clear();
     }
 
-    /** 发送 selectionchange 事件（富文本选区变化时，工具栏联动用）。
+    /**
+     * 发送 selectionchange 事件（富文本选区变化时，工具栏联动用）。
      * Document 不是 Node，事件系统只认节点发射；且 document.addEventListener 已委托给 body，故派发到 body。
      */
     public void dispatchSelectionChange() {
@@ -1417,10 +1667,6 @@ public class Document {
         Event.markTrustedFromCurrentDispatch(event);
         Event.tiggerEvent(event);
     }
-
-    // ------------------------------------------------------------------
-    // 选择单元缓存（SelectionUnits 的计算结果按元素实例缓存）
-    // ------------------------------------------------------------------
 
     /**
      * 使选择单元缓存整体失效。任何可能改变单元判定、扁平文本或 run 绘制路径的变更
@@ -1431,7 +1677,9 @@ public class Document {
         selectionUnitsCache = null;
     }
 
-    /** 单元扁平文本的缓存读取：miss 时经 {@link SelectionUnits#computeFlattenedSelectableText} 计算并缓存。 */
+    /**
+     * 单元扁平文本的缓存读取：miss 时经 {@link SelectionUnits#computeFlattenedSelectableText} 计算并缓存。
+     */
     public String getCachedFlattened(Element element) {
         if (element == null) return "";
         SelectionCacheEntry entry = selectionCache.get(element);
@@ -1445,7 +1693,9 @@ public class Document {
         return value;
     }
 
-    /** 单元原始文本视图的缓存读取：miss 时经 {@link SelectionUnits#computeRawTextOf} 计算并缓存（非单元为 null）。 */
+    /**
+     * 单元原始文本视图的缓存读取：miss 时经 {@link SelectionUnits#computeRawTextOf} 计算并缓存（非单元为 null）。
+     */
     public SelectionUnits.RawText getCachedRaw(Element element) {
         if (element == null) return null;
         SelectionCacheEntry entry = selectionCache.get(element);
@@ -1459,7 +1709,13 @@ public class Document {
         return value;
     }
 
-    /** 文本是否由 run 绘制路径绘制的缓存读取：miss 时经 {@link SelectionUnits#computePaintsTextViaRuns} 计算并缓存。 */
+    // ------------------------------------------------------------------
+    // 选择单元缓存（SelectionUnits 的计算结果按元素实例缓存）
+    // ------------------------------------------------------------------
+
+    /**
+     * 文本是否由 run 绘制路径绘制的缓存读取：miss 时经 {@link SelectionUnits#computePaintsTextViaRuns} 计算并缓存。
+     */
     public boolean getCachedPaintsRuns(Element element) {
         if (element == null) return false;
         SelectionCacheEntry entry = selectionCache.get(element);
@@ -1473,7 +1729,9 @@ public class Document {
         return value;
     }
 
-    /** 文档内选择单元列表的缓存读取：miss 时经 {@link SelectionUnits#computeUnits} 计算并缓存。 */
+    /**
+     * 文档内选择单元列表的缓存读取：miss 时经 {@link SelectionUnits#computeUnits} 计算并缓存。
+     */
     public List<Element> getCachedUnits() {
         if (selectionUnitsCache == null) {
             selectionUnitsCache = SelectionUnits.computeUnits(this);
@@ -1497,26 +1755,34 @@ public class Document {
         return documentSelection.getSelectedText(this);
     }
 
-    // ------------------------------------------------------------------
-    // 文本拖拽（从选区内部按下后拖动选中文本）
-    // ------------------------------------------------------------------
-
-    /** 是否存在潜在的文本拖拽（已在选区内部按下、尚未确认拖拽）。 */
+    /**
+     * 是否存在潜在的文本拖拽（已在选区内部按下、尚未确认拖拽）。
+     */
     public boolean isTextDragPending() {
         return textDrag.text != null;
     }
 
-    /** 是否已越过移动阈值进入真正的文本拖拽。 */
+    /**
+     * 是否已越过移动阈值进入真正的文本拖拽。
+     */
     public boolean isTextDragging() {
         return textDrag.dragged;
     }
 
-    /** 拖拽的文本快照（按下时的文档选区文本），无拖拽时返回 null。 */
+    /**
+     * 拖拽的文本快照（按下时的文档选区文本），无拖拽时返回 null。
+     */
     public String getDraggedText() {
         return textDrag.text;
     }
 
-    /** 在选区内部按下时登记潜在文本拖拽：记录文本快照与按下位置，选区保持不变。 */
+    // ------------------------------------------------------------------
+    // 文本拖拽（从选区内部按下后拖动选中文本）
+    // ------------------------------------------------------------------
+
+    /**
+     * 在选区内部按下时登记潜在文本拖拽：记录文本快照与按下位置，选区保持不变。
+     */
     public void beginTextDrag(String text, double x, double y) {
         if (text == null || text.isEmpty()) {
             textDrag.clear();
@@ -1528,7 +1794,9 @@ public class Document {
         textDrag.dragged = false;
     }
 
-    /** 推进拖拽判定：移动超过阈值后进入真正拖拽，并冻结选区扩展。 */
+    /**
+     * 推进拖拽判定：移动超过阈值后进入真正拖拽，并冻结选区扩展。
+     */
     public void updateTextDrag(double x, double y) {
         if (textDrag.text == null || textDrag.dragged) return;
         if (Math.abs(x - textDrag.startX) > TEXT_DRAG_SLOP_PX
@@ -1538,13 +1806,61 @@ public class Document {
         }
     }
 
-    /** 结束（完成/取消）文本拖拽并清空状态；每次 mouseup 都会调用。 */
+    /**
+     * 结束（完成/取消）文本拖拽并清空状态；每次 mouseup 都会调用。
+     */
     public void endTextDrag() {
         textDrag.clear();
     }
 
+    // 全局清理焦点 (当点击了其他 Document 时可能需要调用)
+    public void clearFocus() {
+        focus.clearFocus();
+    }
 
-    /** 文本拖拽的文档级状态（快照 + 起点 + 是否已越过拖拽阈值）。 */
+    private void clearMutationObservers() {
+        mutationManager.clearAll();
+    }
+
+    private enum LifecycleState {
+        LOADING("loading"),
+        INTERACTIVE("interactive"),
+        COMPLETE("complete"),
+        DISPOSED("complete");
+
+        private final String readyStateValue;
+
+        LifecycleState(String readyStateValue) {
+            this.readyStateValue = readyStateValue;
+        }
+    }
+
+    /**
+     * 一次渲染帧内滚动容器的位移记录。滚动只让后代整体平移，
+     * {@code LayoutCommit.commitScrollTranslation} 借此避免全量几何重建。
+     */
+    public record ScrollShift(Element element, double dx, double dy) {
+    }
+
+    public static final class ContextScope implements AutoCloseable {
+        private final Document previous;
+        private boolean closed = false;
+
+        private ContextScope(Document previous) {
+            this.previous = previous;
+        }
+
+        @Override
+        public void close() {
+            if (closed) return;
+            closed = true;
+            DocumentRegistry.setContext(previous);
+        }
+    }
+
+    /**
+     * 文本拖拽的文档级状态（快照 + 起点 + 是否已越过拖拽阈值）。
+     */
     private static final class TextDragState {
         private String text = null;
         private double startX = 0;
@@ -1570,15 +1886,6 @@ public class Document {
         Boolean paintsRuns = null;
     }
 
-    // 全局清理焦点 (当点击了其他 Document 时可能需要调用)
-    public void clearFocus() {
-        focus.clearFocus();
-    }
-
-    private void clearMutationObservers() {
-        mutationManager.clearAll();
-    }
-
     public static final class MutationObserver {
         private final Document owner;
         private final Consumer<Object> callback;
@@ -1591,6 +1898,17 @@ public class Document {
             this.owner = owner;
             this.callback = callback;
             this.ownerGeneration = owner == null ? -1L : owner.getRefreshGeneration();
+        }
+
+        private static Set<String> parseAttributeFilter(String csv) {
+            if (csv == null || csv.isBlank()) return Collections.emptySet();
+            LinkedHashSet<String> values = new LinkedHashSet<>();
+            for (String part : csv.split(",")) {
+                if (part == null) continue;
+                String normalized = part.trim();
+                if (!normalized.isEmpty()) values.add(normalized);
+            }
+            return values.isEmpty() ? Collections.emptySet() : Collections.unmodifiableSet(values);
         }
 
         public void observe(Node target, boolean childList, boolean attributes, boolean characterData, boolean subtree,
@@ -1627,14 +1945,16 @@ public class Document {
         }
 
         public void enqueue(MutationRecord record) {
-            if (disconnected || record == null || owner == null || !owner.isCurrentGeneration(ownerGeneration) || !matches(record)) return;
+            if (disconnected || record == null || owner == null || !owner.isCurrentGeneration(ownerGeneration) || !matches(record))
+                return;
             synchronized (pending) {
                 pending.add(adapt(record));
             }
         }
 
         public void flush() {
-            if (disconnected || callback == null || owner == null || !owner.isCurrentGeneration(ownerGeneration)) return;
+            if (disconnected || callback == null || owner == null || !owner.isCurrentGeneration(ownerGeneration))
+                return;
             List<MutationRecord> snapshot = takeRecords();
             if (snapshot.isEmpty()) return;
             callback.accept(snapshot);
@@ -1668,17 +1988,6 @@ public class Document {
                 }
             }
             return record;
-        }
-
-        private static Set<String> parseAttributeFilter(String csv) {
-            if (csv == null || csv.isBlank()) return Collections.emptySet();
-            LinkedHashSet<String> values = new LinkedHashSet<>();
-            for (String part : csv.split(",")) {
-                if (part == null) continue;
-                String normalized = part.trim();
-                if (!normalized.isEmpty()) values.add(normalized);
-            }
-            return values.isEmpty() ? Collections.emptySet() : Collections.unmodifiableSet(values);
         }
     }
 

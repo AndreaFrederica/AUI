@@ -12,9 +12,7 @@ import com.sighs.apricityui.slot.IngredientExpressionCompiler;
 import com.sighs.apricityui.slot.ItemStackExpressionCompiler;
 import net.minecraft.client.Minecraft;
 import net.minecraft.core.registries.BuiltInRegistries;
-import net.minecraft.core.registries.Registries;
 import net.minecraft.resources.Identifier;
-import net.minecraft.resources.ResourceKey;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.util.context.ContextMap;
 import net.minecraft.world.item.ItemStack;
@@ -45,71 +43,28 @@ public final class RecipeExpander {
         ArrayList<Element> snapshot = new ArrayList<>(document.getElements());
         for (Element element : snapshot) {
             if (!(element instanceof Recipe recipe)) continue;
-            expandSingleRecipe(document, recipe);
+            recipe.previewState.update(recipe, System.nanoTime() / 1_000_000L, true);
         }
     }
 
-    private static void expandSingleRecipe(Document document, Recipe recipe) {
+    private static void renderPreview(Recipe recipe, RecipeResolver.DeclaredType type,
+                                      RecipeResolver.ResolveResult preview, String message) {
         boolean changed = recipe.clearGeneratedRecipeSlots();
-
-        RecipeResolver.DeclaredType declaredType = RecipeResolver.DeclaredType.fromRaw(recipe.getAttribute("type"));
-        if (declaredType == null) {
-            String message = "Recipe preview skipped: missing/invalid type";
-            ApricityUI.LOGGER.warn("{}, type={}", message, recipe.getAttribute("type"));
-            changed |= setAttributeIfChanged(recipe, "data-recipe-type", "");
-            changed |= setAttributeIfChanged(recipe, "data-recipe-layout", "");
-            changed |= setAttributeIfChanged(recipe, "data-recipe-error", message);
-            if (changed) document.markDirty(recipe, Drawer.RELAYOUT);
-            return;
+        changed |= setAttributeIfChanged(recipe, "data-recipe-type", type == null ? "" : type.id());
+        changed |= setAttributeIfChanged(recipe, "data-recipe-layout",
+                preview == null ? "" : preview.layoutKind().name().toLowerCase(Locale.ROOT));
+        if (preview == null && !Objects.equals(recipe.getAttribute("data-recipe-error"), message)) {
+            ApricityUI.LOGGER.warn("{}, type={}, output={}", message, recipe.getAttribute("type"), recipe.getOutputItemExpression());
         }
-
-        changed |= setAttributeIfChanged(recipe, "data-recipe-type", declaredType.id());
-
-        Identifier recipeId = recipe.parseRecipeIdFromInnerText();
-        if (recipeId == null) {
-            String message = "Recipe preview skipped: invalid recipe id in innerText";
-            ApricityUI.LOGGER.warn("{}, innerText={}", message, recipe.innerText);
-            changed |= setAttributeIfChanged(recipe, "data-recipe-layout", "");
-            changed |= setAttributeIfChanged(recipe, "data-recipe-error", message);
-            if (changed) document.markDirty(recipe, Drawer.RELAYOUT);
-            return;
-        }
-
-        RecipeResolver.ResolveResult preview = RecipeResolver.resolve(recipeId, declaredType);
-        changed |= setAttributeIfChanged(
-                recipe,
-                "data-recipe-layout",
-                preview.layoutKind().name().toLowerCase(Locale.ROOT)
-        );
-
-        if (preview.absoluteEntries().isEmpty() && preview.listEntries().isEmpty()) {
-            changed |= setAttributeIfChanged(recipe, "data-recipe-error", preview.message());
-            if (changed) document.markDirty(recipe, Drawer.RELAYOUT);
-            return;
-        }
-
-        changed |= setAttributeIfChanged(recipe, "data-recipe-error", "");
-
-        EnumMap<RecipeResolver.PreviewRole, Integer> roleOrderCursor = new EnumMap<>(RecipeResolver.PreviewRole.class);
-        int appendedCount = 0;
-        for (RecipeResolver.PreviewEntry entry : preview.absoluteEntries()) {
-            appendPreviewSlot(document, recipe, entry, nextRoleIndex(roleOrderCursor, entry.role()), "absolute");
-            appendedCount++;
-        }
-        if (preview.layoutKind() == RecipeResolver.LayoutKind.STONECUTTING) {
-            int visibleCount = Math.min(RecipeResolver.STONECUTTING_LIST_VISIBLE_ROWS, preview.listEntries().size());
-            for (int index = 0; index < visibleCount; index++) {
-                RecipeResolver.PreviewEntry entry = preview.listEntries().get(index);
-                appendPreviewSlot(document, recipe, entry, nextRoleIndex(roleOrderCursor, entry.role()), "list");
-                appendedCount++;
+        changed |= setAttributeIfChanged(recipe, "data-recipe-error", preview == null ? message : "");
+        if (preview != null) {
+            EnumMap<RecipeResolver.PreviewRole, Integer> cursor = new EnumMap<>(RecipeResolver.PreviewRole.class);
+            for (RecipeResolver.PreviewEntry entry : preview.entries()) {
+                appendPreviewSlot(recipe.document, recipe, entry, nextRoleIndex(cursor, entry.role()));
+                changed = true;
             }
         }
-        if (appendedCount > 0) {
-            changed = true;
-        }
-        if (changed) {
-            document.markDirty(recipe, Drawer.RELAYOUT);
-        }
+        if (changed) recipe.document.markDirty(recipe, Drawer.RELAYOUT | Drawer.REORDER);
     }
 
     private static int nextRoleIndex(
@@ -142,8 +97,7 @@ public final class RecipeExpander {
             Document document,
             Recipe recipe,
             RecipeResolver.PreviewEntry entry,
-            int roleIndex,
-            String group
+            int roleIndex
     ) {
         if (entry == null) return;
         Slot slot = new Slot(document);
@@ -155,7 +109,6 @@ public final class RecipeExpander {
         slot.setAttributesBatch(Map.of(
                 "data-role", roleName,
                 "data-i", String.valueOf(Math.max(0, roleIndex)),
-                "data-group", group == null ? "absolute" : group,
                 "interactive", "0",
                 "pointer", "0",
                 "style", "--aui-slot-interactive:0;"
@@ -192,88 +145,149 @@ public final class RecipeExpander {
         return true;
     }
 
+    public static final class PreviewState {
+        private String expression;
+        private String type;
+        private Object level;
+        private RecipeManager manager;
+        private long revision = -1;
+        private List<RecipeResolver.ResolveResult> candidates = List.of();
+        private int index;
+        private long nextRotateAt;
+        private boolean paused;
+        private boolean invalidated;
+
+        public void invalidate() {
+            invalidated = true;
+        }
+
+        public void update(Recipe recipe, long now, boolean force) {
+            Minecraft minecraft = Minecraft.getInstance();
+            Object currentLevel = minecraft == null ? null : minecraft.level;
+            MinecraftServer server = minecraft == null ? null : minecraft.getSingleplayerServer();
+            RecipeManager currentManager = server == null ? null : server.getRecipeManager();
+            String currentExpression = recipe.getOutputItemExpression();
+            String currentType = recipe.getAttribute("type");
+            long currentRevision = RecipeResolver.revision;
+            if (force || invalidated || level != currentLevel || manager != currentManager || revision != currentRevision
+                    || !Objects.equals(expression, currentExpression) || !Objects.equals(type, currentType)) {
+                level = currentLevel;
+                manager = currentManager;
+                revision = currentRevision;
+                expression = currentExpression;
+                type = currentType;
+                index = 0;
+                nextRotateAt = now + 1000L;
+                paused = false;
+                invalidated = false;
+                RecipeResolver.DeclaredType declaredType = RecipeResolver.DeclaredType.fromRaw(type);
+                Identifier outputItemId = recipe.parseOutputItemId();
+                RecipeResolver.ResolveBatch batch;
+                if (declaredType == null) {
+                    batch = RecipeResolver.ResolveBatch.empty("Recipe preview skipped: missing/invalid type");
+                } else if (outputItemId == null) {
+                    batch = RecipeResolver.ResolveBatch.empty("Recipe preview skipped: invalid output item id in textContent");
+                } else {
+                    batch = RecipeResolver.resolve(outputItemId, declaredType);
+                }
+                candidates = batch.previews();
+                renderPreview(recipe, declaredType, candidates.isEmpty() ? null : candidates.get(0), batch.message());
+                return;
+            }
+            if (advance(now, recipe.isHover)) {
+                renderPreview(recipe, RecipeResolver.DeclaredType.fromRaw(type), candidates.get(index), "");
+            }
+        }
+
+        boolean advance(long now, boolean hovered) {
+            if (hovered || paused) {
+                nextRotateAt = now + 1000L;
+                paused = hovered;
+                return false;
+            }
+            if (candidates.size() <= 1 || now < nextRotateAt) return false;
+            index = (index + 1) % candidates.size();
+            nextRotateAt = now + 1000L;
+            return true;
+        }
+    }
+
     /**
      * 解析客户端配方并生成 UI 预览槽位数据。
      */
     private static final class RecipeResolver {
-        public static final int STONECUTTING_LIST_VISIBLE_ROWS = 3;
-
         private static final String AIR_ITEM_LITERAL = "minecraft:air";
         private static final int MAX_CACHE_SIZE = 256;
-        private static final LinkedHashMap<RecipeCacheKey, ResolveResult> CACHE =
-                new LinkedHashMap<RecipeCacheKey, ResolveResult>(64, 0.75f, true) {
+        private static final LinkedHashMap<RecipeCacheKey, ResolveBatch> CACHE =
+                new LinkedHashMap<RecipeCacheKey, ResolveBatch>(64, 0.75f, true) {
                     @Override
-                    protected boolean removeEldestEntry(Map.Entry<RecipeCacheKey, ResolveResult> eldest) {
+                    protected boolean removeEldestEntry(Map.Entry<RecipeCacheKey, ResolveBatch> eldest) {
                         return size() > MAX_CACHE_SIZE;
                     }
                 };
+        private static volatile long revision;
+        private static Object cachedLevel;
+        private static RecipeManager cachedManager;
 
         private RecipeResolver() {
         }
 
-        public static synchronized ResolveResult resolve(Identifier recipeId, DeclaredType declaredType) {
-            if (recipeId == null || declaredType == null) {
-                return ResolveResult.empty("Recipe cache key is invalid");
+        public static synchronized ResolveBatch resolve(Identifier outputItemId, DeclaredType declaredType) {
+            Minecraft minecraft = Minecraft.getInstance();
+            if (minecraft == null || minecraft.level == null)
+                return ResolveBatch.empty("Client level is not available");
+            MinecraftServer server = minecraft.getSingleplayerServer();
+            RecipeManager manager = server == null ? null : server.getRecipeManager();
+            if (manager == null) return ResolveBatch.empty("Recipe manager is not available (singleplayer only)");
+            if (cachedLevel != minecraft.level || cachedManager != manager) {
+                CACHE.clear();
+                cachedLevel = minecraft.level;
+                cachedManager = manager;
             }
-            RecipeCacheKey cacheKey = new RecipeCacheKey(recipeId, declaredType);
-            ResolveResult cached = CACHE.get(cacheKey);
+            RecipeCacheKey key = new RecipeCacheKey(outputItemId, declaredType);
+            ResolveBatch cached = CACHE.get(key);
             if (cached != null) return cached;
-            ResolveResult resolved = buildPreview(recipeId, declaredType);
-            CACHE.put(cacheKey, resolved);
-            return resolved;
+            ContextMap context = SlotDisplayContext.fromLevel(minecraft.level);
+            ArrayList<ResolveResult> previews = new ArrayList<>();
+            manager.getRecipes().stream().filter(holder -> declaredType.matches(holder.value()))
+                    .sorted(Comparator.comparing(holder -> holder.id().identifier().toString()))
+                    .forEach(holder -> {
+                        for (RecipeDisplay display : holder.value().display()) {
+                            ItemStack result = display.result().resolveForFirstStack(context);
+                            if (result.isEmpty() || !outputItemId.equals(BuiltInRegistries.ITEM.getKey(result.getItem())))
+                                continue;
+                            ResolveResult preview = buildPreview(display, declaredType, context);
+                            if (!preview.entries().isEmpty()) previews.add(preview);
+                        }
+                    });
+            ResolveBatch batch = previews.isEmpty() ? ResolveBatch.empty("No recipes match the output item and type")
+                    : new ResolveBatch(List.copyOf(previews), "");
+            CACHE.put(key, batch);
+            return batch;
         }
 
         public static synchronized void clearCache() {
             CACHE.clear();
-            IngredientExpressionCompiler.clearTagCache();
+            cachedLevel = null;
+            cachedManager = null;
+            revision++;
         }
 
-        private static ResolveResult buildPreview(Identifier recipeId, DeclaredType declaredType) {
-            Minecraft minecraft = Minecraft.getInstance();
-            if (minecraft.level == null) {
-                return ResolveResult.empty("Client level is not available");
-            }
-
-            // In 26.1 the client does not keep a full RecipeManager; use the local singleplayer server.
-            MinecraftServer server = minecraft.getSingleplayerServer();
-            RecipeManager recipeManager = server == null ? null : server.getRecipeManager();
-            if (recipeManager == null) {
-                return ResolveResult.empty("Recipe manager is not available (singleplayer only)");
-            }
-
-            ResourceKey<net.minecraft.world.item.crafting.Recipe<?>> recipeKey = ResourceKey.create(Registries.RECIPE, recipeId);
-            Optional<? extends RecipeHolder<?>> recipeOptional = recipeManager.byKey(recipeKey);
-            if (recipeOptional.isEmpty()) {
-                return ResolveResult.empty("Recipe not found");
-            }
-
-            net.minecraft.world.item.crafting.Recipe<?> recipe = recipeOptional.get().value();
-            if (!declaredType.matches(recipe)) {
-                return ResolveResult.empty("Recipe type mismatch: declared=%s, actual=%s"
-                        .formatted(declaredType.id(), recipe.getClass().getSimpleName()));
-            }
-
-            ContextMap context = SlotDisplayContext.fromLevel(minecraft.level);
+        private static ResolveResult buildPreview(RecipeDisplay display, DeclaredType declaredType, ContextMap context) {
             ArrayList<PreviewEntry> absoluteEntries = new ArrayList<>();
-            ArrayList<PreviewEntry> listEntries = new ArrayList<>();
             LayoutKind layoutKind = declaredType.layoutKind();
-
-            RecipeDisplay display = null;
-            List<RecipeDisplay> displays = recipe.display();
-            if (displays != null && !displays.isEmpty()) {
-                display = displays.get(0);
-            }
 
             switch (declaredType) {
                 case CRAFTING_SHAPED -> buildShapedCraftingEntries(display, absoluteEntries, context);
                 case CRAFTING_SHAPELESS -> buildShapelessCraftingEntries(display, absoluteEntries, context);
-                case SMELTING, BLASTING, SMOKING, CAMPFIRE_COOKING -> buildCookingEntries(display, absoluteEntries, context);
-                case STONECUTTING -> buildStonecuttingEntries(display, recipeManager, absoluteEntries, listEntries, context);
+                case SMELTING, BLASTING, SMOKING, CAMPFIRE_COOKING ->
+                        buildCookingEntries(display, absoluteEntries, context);
+                case STONECUTTING -> buildStonecuttingEntries(display, absoluteEntries, context);
                 case SMITHING -> buildSmithingEntries(display, absoluteEntries, context);
                 case FALLBACK -> buildFallbackEntries(display, absoluteEntries, context);
             }
 
-            return new ResolveResult(layoutKind, List.copyOf(absoluteEntries), List.copyOf(listEntries), "");
+            return new ResolveResult(layoutKind, List.copyOf(absoluteEntries));
         }
 
         private static void buildShapedCraftingEntries(
@@ -343,72 +357,15 @@ public final class RecipeExpander {
             if (resultEntry != null) output.add(resultEntry);
         }
 
-        private static void buildStonecuttingEntries(
-                RecipeDisplay display,
-                RecipeManager recipeManager,
-                List<PreviewEntry> absoluteOutput,
-                List<PreviewEntry> listOutput,
-                ContextMap context
-        ) {
+        private static void buildStonecuttingEntries(RecipeDisplay display, List<PreviewEntry> output, ContextMap context) {
             if (!(display instanceof StonecutterRecipeDisplay stonecutter)) {
-                buildFallbackEntries(display, absoluteOutput, context);
+                buildFallbackEntries(display, output, context);
                 return;
             }
-            PreviewEntry inputEntry = toIngredientEntry(stonecutter.input(), context, PreviewRole.INPUT);
-            if (inputEntry != null) absoluteOutput.add(inputEntry);
-
-            ArrayList<ItemStack> outputs = collectStonecuttingOutputs(stonecutter, recipeManager, context);
-            if (outputs.isEmpty()) {
-                ItemStack result = stonecutter.result().resolveForFirstStack(context);
-                if (!result.isEmpty()) outputs.add(result.copy());
-            }
-
-            for (ItemStack stack : outputs) {
-                PreviewEntry outputEntry = toEntry(stack, PreviewRole.OUTPUT);
-                if (outputEntry != null) listOutput.add(outputEntry);
-            }
-        }
-
-        private static ArrayList<ItemStack> collectStonecuttingOutputs(
-                StonecutterRecipeDisplay recipe,
-                RecipeManager recipeManager,
-                ContextMap context
-        ) {
-            ArrayList<ItemStack> result = new ArrayList<>();
-            ItemStack selectedInput = recipe.input().resolveForFirstStack(context);
-            if (selectedInput.isEmpty()) return result;
-
-            HashSet<Identifier> dedup = new HashSet<>();
-            for (RecipeHolder<?> holder : recipeManager.getRecipes()) {
-                if (!(holder.value() instanceof net.minecraft.world.item.crafting.StonecutterRecipe candidateRecipe)) {
-                    continue;
-                }
-                List<RecipeDisplay> displays = candidateRecipe.display();
-                if (displays.isEmpty() || !(displays.get(0) instanceof StonecutterRecipeDisplay candidateDisplay)) {
-                    continue;
-                }
-                ItemStack candidateInput = candidateDisplay.input().resolveForFirstStack(context);
-                if (candidateInput.isEmpty()) continue;
-                // Compare the input items (degraded vs. full ingredient testing).
-                if (selectedInput.getItem() != candidateInput.getItem()) {
-                    continue;
-                }
-
-                ItemStack candidateResult = candidateDisplay.result().resolveForFirstStack(context);
-                if (candidateResult.isEmpty()) continue;
-                Identifier itemId = BuiltInRegistries.ITEM.getKey(candidateResult.getItem());
-                if (itemId == null || !dedup.add(itemId)) continue;
-                result.add(candidateResult.copy());
-            }
-
-            result.sort((a, b) -> {
-                Identifier ida = BuiltInRegistries.ITEM.getKey(a.getItem());
-                Identifier idb = BuiltInRegistries.ITEM.getKey(b.getItem());
-                String sa = ida == null ? "" : ida.toString();
-                String sb = idb == null ? "" : idb.toString();
-                return sa.compareTo(sb);
-            });
-            return result;
+            PreviewEntry input = toIngredientEntry(stonecutter.input(), context, PreviewRole.INPUT);
+            if (input != null) output.add(input);
+            PreviewEntry result = toEntryFromDisplay(stonecutter.result(), context, PreviewRole.OUTPUT);
+            if (result != null) output.add(result);
         }
 
         private static void buildSmithingEntries(
@@ -457,7 +414,8 @@ public final class RecipeExpander {
             if (display instanceof ShapelessCraftingRecipeDisplay shapeless) return shapeless.ingredients();
             if (display instanceof FurnaceRecipeDisplay furnace) return List.of(furnace.ingredient());
             if (display instanceof StonecutterRecipeDisplay stonecutter) return List.of(stonecutter.input());
-            if (display instanceof SmithingRecipeDisplay smithing) return List.of(smithing.template(), smithing.base(), smithing.addition());
+            if (display instanceof SmithingRecipeDisplay smithing)
+                return List.of(smithing.template(), smithing.base(), smithing.addition());
             return List.of();
         }
 
@@ -465,8 +423,7 @@ public final class RecipeExpander {
             if (stack == null || stack.isEmpty()) return null;
             Identifier itemId = BuiltInRegistries.ITEM.getKey(stack.getItem());
             if (itemId == null) return null;
-            int count = Math.max(1, stack.getCount());
-            String expression = ItemStackExpressionCompiler.withCount(itemId.toString(), count);
+            String expression = ItemStackExpressionCompiler.serialize(stack);
             return new PreviewEntry(role, expression);
         }
 
@@ -516,6 +473,27 @@ public final class RecipeExpander {
                 }
             }
             return String.join("|", expressions);
+        }
+
+        public record PreviewEntry(
+                PreviewRole role,
+                String slotExpression
+        ) {
+        }
+
+        public record ResolveResult(LayoutKind layoutKind, List<PreviewEntry> entries) {
+            public static ResolveResult empty () {
+                return new ResolveResult(LayoutKind.FALLBACK, List.of());
+            }
+        }
+
+        public record ResolveBatch(List<ResolveResult> previews, String message) {
+            public static ResolveBatch empty (String message){
+                return new ResolveBatch(List.of(), message);
+            }
+        }
+
+        private record RecipeCacheKey(Identifier outputItemId, DeclaredType declaredType) {
         }
 
         public enum PreviewRole {
@@ -600,6 +578,15 @@ public final class RecipeExpander {
                 this.layoutKind = layoutKind;
             }
 
+            public static DeclaredType fromRaw(String raw) {
+                if (raw == null || raw.isBlank()) return null;
+                String normalized = raw.trim().toLowerCase(Locale.ROOT);
+                for (DeclaredType value : values()) {
+                    if (value.id.equals(normalized)) return value;
+                }
+                return null;
+            }
+
             public String id() {
                 return id;
             }
@@ -609,35 +596,6 @@ public final class RecipeExpander {
             }
 
             abstract boolean matches(net.minecraft.world.item.crafting.Recipe<?> recipe);
-
-            public static DeclaredType fromRaw(String raw) {
-                if (raw == null || raw.isBlank()) return null;
-                String normalized = raw.trim().toLowerCase(Locale.ROOT);
-                for (DeclaredType value : values()) {
-                    if (value.id.equals(normalized)) return value;
-                }
-                return null;
-            }
-        }
-
-        public record PreviewEntry(
-                PreviewRole role,
-                String slotExpression
-        ) {
-        }
-
-        public record ResolveResult(
-                LayoutKind layoutKind,
-                List<PreviewEntry> absoluteEntries,
-                List<PreviewEntry> listEntries,
-                String message
-        ) {
-            public static ResolveResult empty(String message) {
-                return new ResolveResult(LayoutKind.FALLBACK, List.of(), List.of(), message == null ? "" : message);
-            }
-        }
-
-        private record RecipeCacheKey(Identifier recipeId, DeclaredType declaredType) {
         }
     }
 }

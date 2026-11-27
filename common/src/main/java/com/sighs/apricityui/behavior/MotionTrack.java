@@ -1,7 +1,9 @@
 package com.sighs.apricityui.behavior;
 
+import com.sighs.apricityui.element.Svg;
+
 import com.sighs.apricityui.style.Animation;
-import com.sighs.apricityui.layout.Layout;
+import com.sighs.apricityui.layout.LayoutInvalidation;
 import com.sighs.apricityui.style.Transition;
 
 import java.util.ArrayList;
@@ -14,38 +16,27 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
+
 import com.sighs.apricityui.style.Style;
 import com.sighs.apricityui.style.StyleFrameCache;
 import com.sighs.apricityui.init.Document;
 import com.sighs.apricityui.init.Element;
 import com.sighs.apricityui.dom.RenderElement;
-import com.sighs.apricityui.style.Text;
 import com.sighs.apricityui.parser.CSS;
 
 public final class MotionTrack {
     private static final int FLAG_TRANSITION = 1;
     private static final int FLAG_ANIMATION_SPEC = 1 << 1;
-    private static final String[] LAYOUT_PROPS = {
-            "width", "height", "minWidth", "minHeight", "maxWidth", "maxHeight", "boxSizing",
-            "position", "top", "right", "bottom", "left",
-            "margin", "marginTop", "marginBottom", "marginLeft", "marginRight",
-            "padding", "paddingTop", "paddingBottom", "paddingLeft", "paddingRight",
-            "border", "borderTop", "borderBottom", "borderLeft", "borderRight"
-    };
-    private static final String[] VISUAL_BOX_PROPS = {
-            "borderRadius", "boxShadow",
-            "backgroundColor", "backgroundImage", "backgroundRepeat", "backgroundSize", "backgroundPosition",
-            "borderImage", "borderImageSource", "borderImageSlice", "borderImageWidth", "borderImageOutset", "borderImageRepeat"
-    };
-    private static final String[] BACKGROUND_PROPS = {
-            "backgroundColor", "backgroundImage", "backgroundRepeat", "backgroundSize", "backgroundPosition"
-    };
-
     private final Document owner;
     private final ConcurrentHashMap<Element, Integer> flags = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<Element, MotionStyles> lastMotionStyles = new ConcurrentHashMap<>();
     private final Set<Element> hitTestRoots = Collections.newSetFromMap(new IdentityHashMap<>());
     private final Set<Element> layoutRoots = Collections.newSetFromMap(new IdentityHashMap<>());
+    /**
+     * 只有 out-of-flow 元素（absolute/fixed）自身的布局变化：它们不影响兄弟和祖先流，
+     * 几何可以只重建该子树，不必整页重排。
+     */
+    private final Set<Element> subtreeLayoutRoots = Collections.newSetFromMap(new IdentityHashMap<>());
     private final Set<Element> geometryRoots = Collections.newSetFromMap(new IdentityHashMap<>());
     private boolean visualChanges = false;
 
@@ -53,11 +44,20 @@ public final class MotionTrack {
         this.owner = owner;
     }
 
+    private static Set<Element> drainRoots(Set<Element> roots) {
+        if (roots.isEmpty()) return Set.of();
+        Set<Element> result = Collections.newSetFromMap(new IdentityHashMap<>());
+        result.addAll(roots);
+        roots.clear();
+        return result;
+    }
+
     public void clear() {
         flags.clear();
         lastMotionStyles.clear();
         hitTestRoots.clear();
         layoutRoots.clear();
+        subtreeLayoutRoots.clear();
         geometryRoots.clear();
         visualChanges = false;
     }
@@ -68,6 +68,7 @@ public final class MotionTrack {
         lastMotionStyles.keySet().removeIf(e -> element.uuid.equals(e.uuid));
         hitTestRoots.remove(element);
         layoutRoots.remove(element);
+        subtreeLayoutRoots.remove(element);
         geometryRoots.remove(element);
     }
 
@@ -82,6 +83,7 @@ public final class MotionTrack {
     public boolean stepRender() {
         hitTestRoots.clear();
         layoutRoots.clear();
+        subtreeLayoutRoots.clear();
         geometryRoots.clear();
         visualChanges = false;
         if (!StyleFrameCache.isActive()) return false;
@@ -155,18 +157,16 @@ public final class MotionTrack {
                     animated
             );
             StyleFrameCache.put(element, animated);
+            element.isVisible = "visible".equals(animated.visibility);
             motionStyles.last = animated;
             motionStyles.work = previousBuffer;
             motionStyles.initialized = true;
 
-            // CSS color is inherited.  A parent's transition is composited after
-            // its base style is resolved, so descendants must sample that frame
-            // value too.  Leaving them with the value inherited while the
-            // transition was primed freezes text such as <translation> at white
-            // after :hover has ended.
             Style inheritedBefore = previousMotionStyle == null ? base : previousMotionStyle;
-            if (!Objects.equals(inheritedBefore.color, animated.color)) {
-                refreshInheritedColorSubtree(element);
+            boolean visibilityChanged = !Objects.equals(inheritedBefore.visibility, animated.visibility);
+            if (visibilityChanged) hitTestRoots.add(element);
+            if (visibilityChanged || !Objects.equals(inheritedBefore.color, animated.color)) {
+                refreshInheritedMotionSubtree(element);
             }
 
             if (!flags.containsKey(element)) {
@@ -180,16 +180,14 @@ public final class MotionTrack {
         return visualChanges;
     }
 
-    private void refreshInheritedColorSubtree(Element root) {
+    private void refreshInheritedMotionSubtree(Element root) {
         if (root == null) return;
-        ArrayDeque<Element> pending = new ArrayDeque<>(root.children);
+        ArrayDeque<Element> pending = new ArrayDeque<>(root.getRenderChildren());
         while (!pending.isEmpty()) {
             Element element = pending.removeFirst();
             if (element.document != owner) continue;
-            // Inherited color is a paint tint. Refresh only the computed value;
-            // full style observation would invalidate text layout every frame.
             element.refreshInheritedStyleForMotion();
-            pending.addAll(element.children);
+            pending.addAll(element.getRenderChildren());
         }
     }
 
@@ -201,94 +199,33 @@ public final class MotionTrack {
         return drainRoots(layoutRoots);
     }
 
+    /** Out-of-flow 布局变化的根：几何只需重建这些子树。 */
+    public Set<Element> drainSubtreeLayoutRoots() {
+        return drainRoots(subtreeLayoutRoots);
+    }
+
     public Set<Element> drainGeometryRoots() {
         return drainRoots(geometryRoots);
     }
 
-    private static Set<Element> drainRoots(Set<Element> roots) {
-        if (roots.isEmpty()) return Set.of();
-        Set<Element> result = Collections.newSetFromMap(new IdentityHashMap<>());
-        result.addAll(roots);
-        roots.clear();
-        return result;
-    }
-
     private boolean invalidateMotionCaches(Element element, Style base, Style animated) {
-        RenderElement renderer = element.getRenderer();
-        boolean requiresGeometryCommit = false;
-
-        if (differsAny(base, animated, LAYOUT_PROPS)) {
-            invalidateLayoutMotion(element, base, animated);
-            requiresGeometryCommit = true;
-        } else if (differsAny(base, animated, VISUAL_BOX_PROPS)) {
-            renderer.clearVisualBoxCache();
-            renderer.invalidateStyleVersion();
-        }
-
-        // Color is applied as a draw-time tint. Keep text layout and wrapping
-        // caches stable during a color transition; other text properties still
-        // need the existing invalidation path.
-        if (differsAny(base, animated, Style.getTextPropWithoutColor())) {
-            renderer.text.clear();
-            renderer.wrappedText.clear();
-            element.forEachRoute(routeElement -> routeElement.getRenderer().invalidateTextVersion());
-        }
-
-        if (!Objects.equals(base.transform, animated.transform)) {
-            renderer.invalidateTransformVersion();
-            renderer.transform.clear();
+        Svg.invalidatePaintIfChanged(element, base, animated);
+        boolean layout = LayoutInvalidation.motionAffectsLayout(base, animated);
+        if (layout) invalidateLayoutMotion(element, base, animated);
+        boolean transform = RenderElement.updateSampledStyle(element, base, animated, layout);
+        if (transform) {
             geometryRoots.add(element);
             hitTestRoots.add(element);
-            requiresGeometryCommit = true;
         }
-
-        if (!Objects.equals(base.filter, animated.filter) || !Objects.equals(base.opacity, animated.opacity)) {
-            renderer.filter.clear();
-        }
-        if (!Objects.equals(base.backdropFilter, animated.backdropFilter)) {
-            renderer.backdropFilter.clear();
-        }
-
-        if (differsAny(base, animated, BACKGROUND_PROPS)) {
-            renderer.background.clear();
-            renderer.invalidateStyleVersion();
-        }
-        return requiresGeometryCommit;
+        return layout || transform;
     }
 
     private void invalidateLayoutMotion(Element element, Style base, Style animated) {
-        RenderElement renderer = element.getRenderer();
-        layoutRoots.add(element);
-        boolean affectsNormalFlow = Layout.isInFlow(base) || Layout.isInFlow(animated);
-        if (affectsNormalFlow) {
-            element.forEachRoute(e -> {
-                RenderElement routeRenderer = e.getRenderer();
-                routeRenderer.invalidateLayoutVersion();
-                routeRenderer.size.clear();
-                routeRenderer.box.clear();
-            });
-            if (element.parentElement != null) {
-                element.parentElement.children.forEach(sibling -> sibling.getRenderer().position.clear());
-                hitTestRoots.add(element.parentElement);
-            } else {
-                hitTestRoots.add(element);
-            }
-        } else {
-            renderer.invalidateLayoutVersion();
-            renderer.size.clear();
-            renderer.box.clear();
-            hitTestRoots.add(element);
-        }
-        renderer.invalidateLayoutSubtree();
-    }
-
-    private static boolean differsAny(Style base, Style animated, String[] props) {
-        for (String prop : props) {
-            if (!Objects.equals(base.get(prop), animated.get(prop))) {
-                return true;
-            }
-        }
-        return false;
+        // in-flow 的尺寸/外边距变化会推动祖先与后续兄弟，必须整页提交；
+        // 绝对/固定定位元素只移动自己这一棵子树，范围可以收窄。
+        if (LayoutInvalidation.motionAffectsFlow(base, animated)) layoutRoots.add(element);
+        else subtreeLayoutRoots.add(element);
+        hitTestRoots.add(LayoutInvalidation.motionChanged(element, base, animated));
     }
 
     private boolean invalidateCompletedTransitionCaches(Element element, boolean affectsLayout,
@@ -300,12 +237,12 @@ public final class MotionTrack {
             invalidateLayoutMotion(element, style, style);
             requiresGeometryCommit = true;
         } else if (affectsRect) {
-            renderer.clearVisualBoxCache();
+            element.getLayout().clearVisualBoxCache();
             renderer.background.clear();
-            renderer.invalidateStyleVersion();
+            element.getLayout().invalidateStyleVersion();
         }
         if (affectsTransform) {
-            renderer.invalidateTransformVersion();
+            element.getLayout().invalidateTransformVersion();
             geometryRoots.add(element);
             hitTestRoots.add(element);
             requiresGeometryCommit = true;
@@ -317,15 +254,6 @@ public final class MotionTrack {
         renderer.text.clear();
         renderer.wrappedText.clear();
         return requiresGeometryCommit;
-    }
-
-    private static boolean differsAny(Style base, Style animated, Iterable<String> props) {
-        for (String prop : props) {
-            if (!Objects.equals(base.get(prop), animated.get(prop))) {
-                return true;
-            }
-        }
-        return false;
     }
 
     private void setFlag(Element element, int flag, boolean enabled) {

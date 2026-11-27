@@ -2,7 +2,6 @@ package com.sighs.apricityui.webview;
 
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
-import java.nio.IntBuffer;
 
 /**
  * Reader for the offscreen web view's image update stream.
@@ -10,9 +9,10 @@ import java.nio.IntBuffer;
  * <p>The host publishes into a block of shared memory mapped into this process
  * ({@link com.sighs.apricityui.spi.AuiWebViewService.View#channel()}): a small header, then a
  * packet arena holding rectangles of the picture that changed. {@link #drain} applies every
- * packet that is fully written and hands each rectangle to the caller, so the renderer
- * neither copies a whole frame nor re-uploads a whole texture for a page that moved one
- * element.</p>
+ * packet that is fully written and hands each rectangle — as an offset into that buffer, not
+ * a copy — to the caller, so the renderer neither copies a whole frame nor re-uploads a whole
+ * texture for a page that moved one element, and a backend that can upload from a direct
+ * buffer never copies the pixels through the heap at all.</p>
  *
  * <p>Packets are never dropped and never reordered: the producer publishes a packet's bytes,
  * then its end offset, then its sequence number, and this reader republishes its own read
@@ -26,22 +26,45 @@ import java.nio.IntBuffer;
  */
 public final class FrameUpdateChannel {
 
-    /** {@code "AUIC"} as little-endian bytes; the header's magic. */
+    /**
+     * {@code "AUIC"} as little-endian bytes; the header's magic.
+     */
     private static final int MAGIC = 0x43495541;
-    /** Bumped whenever any offset below changes on either side. */
+    /**
+     * Bumped whenever any offset below changes on either side.
+     */
     private static final int VERSION = 1;
-    /** {@code "UAPK"}: a packet of rectangles. */
+    /**
+     * {@code "UAPK"}: a packet of rectangles.
+     */
     private static final int PACKET_MAGIC = 0x4B504155;
-    /** {@code "PAD!"}: filler written when a packet would straddle the arena end. */
+    /**
+     * {@code "PAD!"}: filler written when a packet would straddle the arena end.
+     */
     private static final int PAD_MAGIC = 0x21444150;
 
     private static final int PACKET_HEADER_BYTES = 40;
-    /** Header block every packet offset is relative to; see the class comment. */
+    /**
+     * Header block every packet offset is relative to; see the class comment.
+     */
     private static final int HEADER_BYTES = 256;
-    /** Largest payload the host packs into one packet; a rectangle is split to fit. */
+    /**
+     * Largest payload the host packs into one packet; a rectangle is split to fit.
+     */
     private static final int MAX_PACKET_PAYLOAD = 1 << 18;
-    /** Guard against reading geometry out of a corrupt packet. */
+    /**
+     * Guard against reading geometry out of a corrupt packet.
+     */
     private static final int MAX_CANVAS_EDGE = 1 << 14;
+    /**
+     * How far past {@link #MAX_PACKET_PAYLOAD} a packet may claim to be.
+     *
+     * <p>The host never sends more than {@link #MAX_PACKET_PAYLOAD}; this is one canvas row of
+     * slack, so a packet that is merely a row too large is still applied instead of being
+     * rejected whole — up to a thousand rectangles ride on that decision, and the producer has
+     * already advanced its reference canvas by the time the reader sees it.</p>
+     */
+    private static final int MAX_PACKET_PAYLOAD_SLACK = MAX_CANVAS_EDGE * 4;
 
     // Header offsets, mirroring frame_channel.h.
     private static final int OFF_MAGIC = 0;
@@ -62,40 +85,19 @@ public final class FrameUpdateChannel {
     private static final int OFF_CONSUMER_RECTS = 120;
     private static final int OFF_CONSUMER_RESYNCS = 128;
 
-    /** Asks the producer for a full canvas refresh on its next publish. */
+    /**
+     * Asks the producer for a full canvas refresh on its next publish.
+     */
     private static final int FLAG_NEEDS_FULL_REFRESH = 1;
-
-    /** Receives the stream: geometry first, then one call per dirty rectangle. */
-    public interface Target {
-
-        /**
-         * The canvas the following rectangles belong to; it changes when the element is
-         * resized or the page reflows into a new raster size. Anything the reader had cached
-         * for the previous canvas is stale at this point.
-         */
-        void resize(int width, int height);
-
-        /**
-         * Applies one dirty rectangle.
-         *
-         * @param pixels ABGR-packed pixels, row major, tightly packed, at least
-         *               {@code width * height} entries; owned by the reader and reused.
-         */
-        void rect(int x, int y, int width, int height, int[] pixels);
-    }
-
     private final ByteBuffer buffer;
     private final boolean valid;
-    private int[] rectanglePixels = new int[0];
     private int canvasWidth;
     private int canvasHeight;
     private int arenaBytes;
-
     private long packets;
     private long rectangles;
     private long payloadBytes;
     private long resyncs;
-
     public FrameUpdateChannel(ByteBuffer buffer) {
         // A ByteBuffer defaults to big-endian; the wire format is little-endian on every
         // platform the host runs on. The duplicate shares the memory and carries its own
@@ -117,14 +119,22 @@ public final class FrameUpdateChannel {
         this.valid = ok;
     }
 
-    /** Asks the host for a full canvas refresh on its next publish. */
+    private static int align8(int value) {
+        return (value + 7) & ~7;
+    }
+
+    /**
+     * Asks the host for a full canvas refresh on its next publish.
+     */
     public void requestFullRefresh() {
         if (valid) {
             buffer.putInt(OFF_FLAGS, buffer.getInt(OFF_FLAGS) | FLAG_NEEDS_FULL_REFRESH);
         }
     }
 
-    /** False when the buffer is missing or carries a layout this reader does not know. */
+    /**
+     * False when the buffer is missing or carries a layout this reader does not know.
+     */
     public boolean isValid() {
         return valid;
     }
@@ -137,37 +147,51 @@ public final class FrameUpdateChannel {
         return canvasHeight;
     }
 
-    /** Packets applied so far. */
+    /**
+     * Packets applied so far.
+     */
     public long packets() {
         return packets;
     }
 
-    /** Dirty rectangles applied so far. */
+    /**
+     * Dirty rectangles applied so far.
+     */
     public long rectangles() {
         return rectangles;
     }
 
-    /** Pixel bytes applied so far. */
+    /**
+     * Pixel bytes applied so far.
+     */
     public long payloadBytes() {
         return payloadBytes;
     }
 
-    /** Times the reader met a record it could not parse; each one costs a full refresh. */
+    /**
+     * Times the reader met a record it could not parse; each one costs a full refresh.
+     */
     public long resyncs() {
         return resyncs;
     }
 
-    /** Numbers the producer published, for comparing against {@link #packets()}. */
+    /**
+     * Numbers the producer published, for comparing against {@link #packets()}.
+     */
     public long publishedPackets() {
         return valid ? buffer.getLong(OFF_PUBLISHED_PACKETS) : 0L;
     }
 
-    /** Pixel bytes the producer published. */
+    /**
+     * Pixel bytes the producer published.
+     */
     public long publishedBytes() {
         return valid ? buffer.getLong(OFF_PUBLISHED_BYTES) : 0L;
     }
 
-    /** One-line diagnostic for {@code Iframe.status()}. */
+    /**
+     * One-line diagnostic for {@code Iframe.status()}.
+     */
     public String stats() {
         if (!valid) {
             return "stream=unavailable";
@@ -255,12 +279,10 @@ public final class FrameUpdateChannel {
                     intact = false;
                     break;
                 }
-                if (rectanglePixels.length < count) {
-                    rectanglePixels = new int[count];
-                }
-                readPixels(offset, rectanglePixels, count);
+                // The pixels stay where the host wrote them: the target uploads straight from
+                // this buffer, so nothing is copied through a Java array on the way to the GPU.
+                target.rect(x, y, width, height, buffer, offset);
                 offset += count * 4;
-                target.rect(x, y, width, height, rectanglePixels);
                 appliedRects++;
             }
             if (!intact) {
@@ -286,7 +308,7 @@ public final class FrameUpdateChannel {
         return width > 0 && height > 0
                 && width <= MAX_CANVAS_EDGE && height <= MAX_CANVAS_EDGE
                 && rectCount >= 0 && rectCount <= MAX_PACKET_PAYLOAD / 4
-                && payloadBytes >= 0 && payloadBytes <= MAX_PACKET_PAYLOAD + 4
+                && payloadBytes >= 0 && payloadBytes <= MAX_PACKET_PAYLOAD + MAX_PACKET_PAYLOAD_SLACK
                 && payloadOffset >= 0
                 && payloadOffset + (long) payloadBytes <= HEADER_BYTES + arenaBytes;
     }
@@ -303,27 +325,31 @@ public final class FrameUpdateChannel {
         requestFullRefresh();
     }
 
-    private static int align8(int value) {
-        return (value + 7) & ~7;
-    }
-
     /**
-     * Bulk-copies {@code count} packed pixels into {@code destination}.
-     *
-     * <p>An {@link IntBuffer} view is the fast path; a JDK that hands back a big-endian view
-     * (the order is inherited from the parent, but nothing promises it) falls back to
-     * per-pixel reads through the buffer's own order.</p>
+     * Receives the stream: geometry first, then one call per dirty rectangle.
      */
-    private void readPixels(int byteOffset, int[] destination, int count) {
-        final ByteBuffer slice = buffer.duplicate().order(ByteOrder.LITTLE_ENDIAN);
-        slice.position(byteOffset).limit(byteOffset + count * 4);
-        final IntBuffer ints = slice.slice().asIntBuffer();
-        if (ints.order() == ByteOrder.LITTLE_ENDIAN) {
-            ints.get(destination, 0, count);
-            return;
-        }
-        for (int index = 0; index < count; index++) {
-            destination[index] = buffer.getInt(byteOffset + index * 4);
-        }
+    public interface Target {
+
+        /**
+         * The canvas the following rectangles belong to; it changes when the element is
+         * resized or the page reflows into a new raster size. Anything the reader had cached
+         * for the previous canvas is stale at this point.
+         */
+        void resize(int width, int height);
+
+        /**
+         * Applies one dirty rectangle.
+         *
+         * <p>The pixels are not copied for the caller: {@code pixels} is the live stream
+         * buffer and {@code byteOffset} is where this rectangle's payload starts, exactly
+         * {@code width * height * 4} bytes of R,G,B,A. A backend that can upload from a
+         * {@link ByteBuffer} hands it straight to the GPU; one that cannot copies the region
+         * out itself. The bytes are only valid for the duration of the call — the producer may
+         * reuse them once {@link #drain} returns.</p>
+         *
+         * @param pixels the whole stream, little-endian; its position is unspecified, so
+         *               always address it by {@code byteOffset}
+         */
+        void rect(int x, int y, int width, int height, ByteBuffer pixels, int byteOffset);
     }
 }

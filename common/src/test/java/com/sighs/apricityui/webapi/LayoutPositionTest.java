@@ -56,13 +56,13 @@ class LayoutPositionTest {
             assertEquals(measured, LayoutMeasureCache.getSize(LayoutMeasureCache.SIZE_NATURAL, element,
                     Double.NaN, Double.NaN, true));
 
-            element.getRenderer().invalidateLayoutVersion();
+            element.getLayout().invalidateLayoutVersion();
             assertNull(LayoutMeasureCache.getSize(LayoutMeasureCache.SIZE_NATURAL, element,
                     Double.NaN, Double.NaN, true));
 
             LayoutMeasureCache.putSize(LayoutMeasureCache.SIZE_NATURAL, element,
                     Double.NaN, Double.NaN, true, measured);
-            parent.getRenderer().size.set(new Size(320, 200));
+            parent.getLayout().size.set(new Size(320, 200));
             assertNull(LayoutMeasureCache.getSize(LayoutMeasureCache.SIZE_NATURAL, element,
                     Double.NaN, Double.NaN, true));
         } finally {
@@ -226,13 +226,13 @@ class LayoutPositionTest {
         Text.of(label);
         Size.of(label);
         assertNotNull(label.getRenderer().text.get());
-        assertNotNull(label.getRenderer().size.get());
+        assertNotNull(label.getLayout().size.get());
 
         document.invalidateFontMetrics();
 
         assertNull(label.getRenderer().text.get());
         assertNull(label.getRenderer().wrappedText.get());
-        assertNull(label.getRenderer().size.get());
+        assertNull(label.getLayout().size.get());
         assertTrue(document.hasPendingRenderState());
     }
 
@@ -979,7 +979,7 @@ class LayoutPositionTest {
 
         // Simulate the provisional used size produced when the button is
         // visited before the flex line's auto height has been resolved.
-        button.getRenderer().size.set(new Size(96, 42));
+        button.getLayout().size.set(new Size(96, 42));
         assertEquals(42, Size.of(button).height(), 0.0001);
         double rowHeight = Size.of(row).height();
         double inputHeight = Size.of(input).height();
@@ -1377,7 +1377,7 @@ class LayoutPositionTest {
         button.appendChild(new TextNode(document, "INSPECT"));
         document.body.appendChild(button);
 
-        Flex.DirectTextLayout textLayout = Flex.computeDirectTextLayouts(button).get(0);
+        Layout.DirectTextLayout textLayout = Flex.computeDirectTextLayouts(button).get(0);
         Position paint = readFlexDirectTextPaintPosition(button, textLayout);
         assertEquals(37, textLayout.position().x, 0.01);
         assertEquals(Position.of(button).x + 37, paint.x, 0.01);
@@ -1413,7 +1413,7 @@ class LayoutPositionTest {
         double textWidth = Text.measureLine(Text.of(firstTab), "ATTRS");
         double expectedGroupLeft = (140 - 12 - 6 - textWidth) / 2.0;
         assertEquals(expectedGroupLeft, Position.getOffset(firstIcon).x, 0.01);
-        Flex.DirectTextLayout textLayout = Flex.computeDirectTextLayouts(firstTab).get(0);
+        Layout.DirectTextLayout textLayout = Flex.computeDirectTextLayouts(firstTab).get(0);
         assertEquals(expectedGroupLeft + 12 + 6, textLayout.position().x, 0.01);
         assertTrue(textLayout.position().x + textWidth <= 140);
     }
@@ -1578,7 +1578,7 @@ class LayoutPositionTest {
         flex.appendChild(flexSecond);
 
         Element grid = new Element(document, "div");
-        grid.setAttribute("style", "display: inline-grid; grid-template-columns: 2; gap: 3px;");
+        grid.setAttribute("style", "display: inline-grid; grid-template-columns: repeat(2, auto); gap: 3px;");
         document.body.appendChild(grid);
         Element gridFirst = new Element(document, "div");
         gridFirst.setAttribute("style", "width: 10px; height: 10px;");
@@ -1788,7 +1788,7 @@ class LayoutPositionTest {
         grid.appendChild(third);
 
         assertEquals(20, Position.getOffset(second).x);
-        assertEquals(55, Position.getOffset(third).x);
+        assertEquals(20 + 100d / 3, Position.getOffset(third).x, 0.000001);
         assertEquals(120, Layout.computeContentSize(grid).width());
     }
 
@@ -1977,10 +1977,10 @@ class LayoutPositionTest {
         }
     }
 
-    private static Position readFlexDirectTextPaintPosition(Element element, Flex.DirectTextLayout layout) {
+    private static Position readFlexDirectTextPaintPosition(Element element, Layout.DirectTextLayout layout) {
         try {
             java.lang.reflect.Method method = Element.class.getDeclaredMethod(
-                    "getFlexDirectTextPaintPosition", Flex.DirectTextLayout.class);
+                    "getDirectLayoutTextPaintPosition", Layout.DirectTextLayout.class);
             method.setAccessible(true);
             return (Position) method.invoke(element, layout);
         } catch (ReflectiveOperationException e) {

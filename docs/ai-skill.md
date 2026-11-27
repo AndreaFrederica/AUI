@@ -8,7 +8,7 @@
 
 AUI 让你用 HTML/CSS/JS 写 Minecraft 界面。它不是内嵌浏览器：HTML 解析、CSS 布局、绘制是自研引擎。支持页面脚本的 target 使用 Rhino（写 `var` + 普通 `function` 最稳）。一个 HTML 文件解析成一个 Document，放进四种宿主之一显示。
 
-**先确认 loader 和 MC 版本**：页面脚本和 KubeJS 绑定不是所有 target 都提供。Forge 1.20.1、NeoForge 1.21.1 支持页面脚本和 `ApricityUI` KubeJS 绑定；NeoForge 26.1 支持页面脚本，但没有 KubeJS 绑定；Fabric 1.20.1、1.21.1、26.1 当前不执行页面脚本，也没有 KubeJS 绑定。无页面脚本时仍可渲染 HTML/CSS，但依赖 JS 的交互不会运行。完整矩阵见[总览](guide/overview#loader-与脚本支持)。
+**先确认 loader 和 MC 版本**：页面脚本和 KubeJS 绑定不是所有 target 都提供。Forge 1.20.1、NeoForge 1.21.1 支持页面脚本和 `ApricityUI` KubeJS 绑定；NeoForge 26.1 支持页面脚本，但没有 KubeJS 绑定；Fabric 1.20.1、1.21.1、26.1 当前不执行页面脚本，也没有 KubeJS 绑定。页面脚本的运行时有 KubeJS 就用 KubeJS，只有 Rhino 就用独立 Rhino，两者都没有则跳过脚本（页面仍渲染）。无页面脚本时仍可渲染 HTML/CSS，但依赖 JS 的交互不会运行。完整矩阵见[总览](guide/overview#loader-与脚本支持)。
 
 资源管理器、DevTools 和资源重载都有各自的 MC 按键操作，**默认均未绑定**。开始操作前先在 MC 控制设置里绑定它们；左 Alt 默认用于按住释放鼠标。下文按操作名称称呼这些按键。
 
@@ -47,7 +47,9 @@ AUI 让你用 HTML/CSS/JS 写 Minecraft 界面。它不是内嵌浏览器：HTML
 ```
 
 - **aui-viewport**：`mode` 缺省为 `browser`（跟随窗口，Screen 首选）；`mode=fixed,width=N,height=N` 固定逻辑尺寸（**WorldWindow 必须用它**，否则默认 1920 宽，面板在世界里巨大无比）；`mode=gui` 跟随 MC GUI 缩放（兼容旧页面）。缩放参数 `zoom/min-zoom/max-zoom/zoom-step/user-scalable` 可选，其中 `user-scalable=false` 可禁用 Ctrl+滚轮/Ctrl+`+`/`-`/Ctrl+`0` 缩放；
-- **aui-mouse-events**：写 `intercept` 页面才拦截鼠标。**页面有任何可交互元素就必须写**，否则点击落到游戏而不是页面；纯展示 Overlay 不写（让它穿透）。
+- **aui-mouse-events**：写 `intercept` 页面才拦截鼠标。**页面有任何可交互元素就必须写**，否则点击落到游戏而不是页面；纯展示 Overlay 不写（让它穿透）；
+- **aui-hyphen-break**（可选）：`content=none` 关闭 `-` 后的自动换行，适合编号、版本号等不希望被拆开的文本；缺省允许；
+- **aui-preload**（可选）：加上 `<meta name="aui-preload">` 后，该页面会在游戏启动/资源重载扫描时预解析并预编译样式，首次打开更快；不加则首次打开时懒构建。
 
 ## 第四步：选宿主
 
@@ -90,17 +92,20 @@ function init() {
 document.addEventListener("DOMContentLoaded", init);
 ```
 
-**JS 环境的几个差异**：键盘修饰键是 `controlKey` 不是 `ctrlKey`；事件坐标已经是页面逻辑坐标，**不要乘**任何缩放系数；`fetch(url)` 只支持单参数 GET，`response.json()` 在 then 里同步调用；没有 WebGL/XHR/WebSocket/完整 Promise。DOM 查询修改、事件捕获冒泡、localStorage、Canvas 2D、定时器、ResizeObserver/MutationObserver 这些都有。
+**JS 环境的几个差异**：键盘修饰键是 `controlKey` 不是 `ctrlKey`；事件坐标已经是页面逻辑坐标，**不要乘**任何缩放系数；`fetch(url)` 只支持单参数 GET，`response.json()` 在 then 里同步调用；没有 WebGL/XHR/WebSocket/完整 Promise。DOM 查询修改、事件捕获冒泡、localStorage、Canvas 2D、定时器、ResizeObserver/IntersectionObserver/MutationObserver 这些都有。IntersectionObserver 按文档帧提交后的异步批次派发，支持 root/rootMargin/scrollMargin/threshold、trackVisibility 和 delay；不支持跨 Document/跨源观察，也不保证复杂合成场景的像素级遮挡结果。
 
 **扩展元素**（标准标签之外的 MC 向标签，都是普通 DOM 元素，都必须给 CSS 宽高）：
 
 | 需求 | 写法 | 要点 |
 | --- | --- | --- |
-| 游戏纹理 | `<texture src="minecraft:textures/item/diamond.png">` | src 是 ResourceLocation；`blur="true"` 模糊 |
+| 游戏纹理 | `<texture src="minecraft:textures/item/diamond.png">` | src 是 ResourceLocation；采样按 `image-rendering`（默认平滑，像素风写 `pixelated`） |
 | 图集帧动画 | `<sprite src="images/coin.png" steps="8" direction="right" duration="640ms" loop="infinite">` | src 是逻辑路径；direction 是图集排布方向 |
 | 本地化文本 | `<translation>item.minecraft.diamond</translation>` | 跟随游戏语言；无参数插值 |
 | 矢量图标 | `<svg viewBox="0 0 24 24"><path d="..." fill="currentColor"></path></svg>` | 支持基本形状和 path；无渐变/defs/transform |
 | 脚本绘制 | `<canvas>` | 2D context，API 接近浏览器 |
+| 主题切换 | `<theme-switcher></theme-switcher>` | 右下角悬浮按钮，可拖动，点开是内置主题清单（`/apricityui/theme/<name>/<name>.css`）；选中即换肤，换完派发冒泡的 `aui-theme-change`（`detail` 是主题 id）。按钮和清单复用当前主题的 `.icon-button` / `.menu`，所以外观跟随主题；写成成对标签——浏览器不认自闭合的自定义标签，会吞掉后面的内容 |
+
+**Markdown**：需要把 Markdown 显示成页面时，直接用 `ApricityUI.renderMarkdown(md)` 渲染成 HTML 再赋给 `innerHTML`（Java 侧是 `com.sighs.apricityui.util.Markdown.render`），不要自己接第三方解析器。不可信内容用 `renderMarkdownSafe`，但它只转义少数容器标签，不是消毒器。AUI 没有标题/列表的默认样式，记得补 CSS。
 
 **Ore 主题**：内置 MC 风格 CSS 主题（像素边框、深色表面、绿紫金强调色），引一行就有成套组件样式，**别从零写样式**：
 
@@ -152,7 +157,7 @@ id 对不上 → 槽位全部退化成展示槽位。`saveddata("machine_data", 
 - UI-only 打开（`screen(path)`）的槽位全是展示型，**真实容器必须服务端 `menu(player, path).bind(b -> b.blockEntity(pos).player())` 打开**；
 - shift-click 方向由服务端绑定顺序决定（第一个非玩家绑定是 primary），HTML 的 `primary="true"` 改不了；
 - 非玩家绑定后用 `.slot("slot.fuel").filter(FilterUtil)` 按现有 CSS selector 限制匹配槽位的放入资格；也可用 `#fuel` 或 `slot[slot-index="0"]`，不要求 HTML id。`player()` 后没有 `slot(...)` 或过滤 API。`FilterUtil` 可用 `ANY`、`NONE`、`EMPTY`、`item`、`tag`、`custom`、`allOf`、`anyOf`、`not`，以及 `and` / `or` / `negate` 组合。过滤只影响本次菜单的插入路径，仍服从底层库存限制；
-- `<recipe type="crafting_shaped">配方ID</recipe>` 生成配方预览，纯展示不占槽位；物品表达式和支持的配方类型见[MC 物品与配方元素](guide/mc-elements)。
+- `<recipe type="crafting_shaped">minecraft:iron_ingot</recipe>` 按产物物品 ID 和类型生成配方预览；多个匹配配方每秒轮播，悬停暂停，纯展示不占槽位。物品表达式和支持的配方类型见[MC 物品与配方元素](guide/mc-elements)。
 
 ## 第七步：调试（重点：模组为 AI 调试准备的功能）
 

@@ -10,6 +10,7 @@ import org.joml.Vector3f;
 
 import java.io.File;
 import java.lang.annotation.Annotation;
+import java.lang.reflect.Method;
 import java.net.URI;
 import java.nio.file.Path;
 import java.util.Map;
@@ -26,25 +27,39 @@ import com.sighs.apricityui.init.Document;
  * remains compilable without the loader source tree.</p>
  */
 public interface AuiClientService {
-    /** Returns the logical window size (scaled GUI size), falling back to a headless default. */
+    /**
+     * Returns the logical window size (scaled GUI size), falling back to a headless default.
+     */
     Size getWindowSize();
 
-    /** Returns the current mouse position in GUI coordinates. */
+    /**
+     * Returns the current mouse position in GUI coordinates.
+     */
     Position getMousePosition();
 
-    /** Returns the raw GLFW cursor position in GUI coordinates, or {@code null} without a window. */
+    /**
+     * Returns the raw GLFW cursor position in GUI coordinates, or {@code null} without a window.
+     */
     Position getMousePositionDirectly();
 
-    /** Returns the unscaled window width in physical pixels. */
+    /**
+     * Returns the unscaled window width in physical pixels.
+     */
     double getWindowWidth();
 
-    /** Returns the unscaled window height in physical pixels. */
+    /**
+     * Returns the unscaled window height in physical pixels.
+     */
     double getWindowHeight();
 
-    /** Returns the scaled GUI width. */
+    /**
+     * Returns the scaled GUI width.
+     */
     int getScaledWidth();
 
-    /** Returns the scaled GUI height. */
+    /**
+     * Returns the scaled GUI height.
+     */
     int getScaledHeight();
 
     int getDefaultFontWidth(String text, boolean bold, boolean oblique, double strokeWidth);
@@ -53,39 +68,65 @@ public interface AuiClientService {
 
     boolean isKeyPressed(String keyName);
 
-    /** Returns whether the game mouse is grabbed (crosshair mode, cursor hidden). */
+    /**
+     * Returns whether the game mouse is grabbed (crosshair mode, cursor hidden).
+     */
     boolean isMouseGrabbed();
 
-    /** Returns the pointer position used for world-window picking. */
+    /**
+     * Returns the pointer position used for world-window picking.
+     */
     Position getMousePositionForWorldInteraction();
 
-    /** Opens the loader's WebUI screen for the given template path. */
+    /**
+     * Opens the loader's WebUI screen for the given template path.
+     */
     void openScreen(String templatePath);
 
-    /** Closes the current loader screen when a client is available. */
+    /**
+     * Closes the current loader screen when a client is available.
+     */
     default void closeScreen() {
     }
 
-    /** Returns the loader's game directory (e.g. Forge {@code FMLPaths.GAMEDIR}). */
+    /**
+     * Returns the loader's game directory (e.g. Forge {@code FMLPaths.GAMEDIR}).
+     */
     Path getGameDirectory();
 
-    /** Returns the loader's config directory (e.g. Forge {@code FMLPaths.CONFIGDIR}). */
+    /**
+     * Returns the loader's config directory (e.g. Forge {@code FMLPaths.CONFIGDIR}).
+     */
     Path getConfigDirectory();
 
-    /** Returns whether the loader is running in a production (non-dev) environment. */
+    /**
+     * Returns whether the loader is running in a production (non-dev) environment.
+     */
     boolean isProduction();
 
-    /** Restricts annotation scanning to the given base packages. */
+    /**
+     * Restricts annotation scanning to the given base packages.
+     */
     void addScanPackage(String basePackage);
 
-    /** Restricts annotation scanning to the given base packages. */
+    /**
+     * Restricts annotation scanning to the given base packages.
+     */
     void addScanPackages(String... basePackages);
 
-    /** Scans loader-registered classes for the given annotation and invokes the consumer for each match. */
+    /**
+     * Scans loader-registered classes for the given annotation and invokes the consumer for each match.
+     */
     void scanAnnotationClasses(Class<? extends Annotation> annotationClass,
                                Predicate<Map<String, Object>> annotationPredicate,
                                Consumer<Class<?>> consumer,
                                Runnable onFinished);
+
+    default void scanAnnotationStaticMethods(Class<? extends Annotation> annotationClass,
+                                             Consumer<Method> consumer,
+                                             Runnable onFinished) {
+        onFinished.run();
+    }
 
     // ------------------------------------------------------------------
     // Version-neutral client-platform ops (added for the 26.1 target).
@@ -93,19 +134,29 @@ public interface AuiClientService {
     // or package across versions, so common asks the loader instead.
     // ------------------------------------------------------------------
 
-    /** Opens a URI with the system default handler (best-effort). */
+    /**
+     * Opens a URI with the system default handler (best-effort).
+     */
     void openUri(URI uri);
 
-    /** Opens a file with the system default handler (best-effort). */
+    /**
+     * Opens a file with the system default handler (best-effort).
+     */
     void openFile(File file);
 
-    /** Returns the GLFW window handle (0 when no window is available). */
+    /**
+     * Returns the GLFW window handle (0 when no window is available).
+     */
     long getWindowHandle();
 
-    /** Returns the current camera position in world space. */
+    /**
+     * Returns the current camera position in world space.
+     */
     Vec3 getCameraPosition();
 
-    /** Returns the current camera look (forward) vector in world space. */
+    /**
+     * Returns the current camera look (forward) vector in world space.
+     */
     Vector3f getCameraLookVector();
 
     /** Client mouse lifecycle hooks; legacy targets may provide no-op defaults. */
@@ -152,6 +203,11 @@ public interface AuiClientService {
     /** Returns the active AUI screen document, or {@code null} when no AUI screen is open. */
     default Document getCurrentScreenDocument() {
         return null;
+    }
+
+    /** Whether the client is currently connected to a world, including while a screen is open. */
+    default boolean hasClientWorld() {
+        return true;
     }
 
     /** Performs a platform-native world occlusion test for a segment. */

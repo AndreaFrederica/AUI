@@ -10,19 +10,19 @@ Three support tiers:
 | 🟡 | Partial support: parses and behaves, but with clear gaps versus the spec |
 | ❌ | Unsupported: ignored when set (CSS properties warn once) |
 
-Overall profile: the selector layer is the most complete; layout is a "common subset + key omissions" (no float, no table layout, no sticky); the painting layer covers a lot (shadows, filters, clip-path, transforms, animations all work); the HTML layer targets UI rather than documents — **there is no UA default styling**, so `h1` and `div` are visually indistinguishable.
+Overall profile: the selector layer is the most complete; layout is a "common subset + key omissions" (for example, complex table layout has limitations); the painting layer covers a lot (shadows, filters, clip-path, transforms, animations all work); the HTML layer targets UI rather than documents — **there is no UA default styling**, so `h1` and `div` are visually indistinguishable.
 
 ## Migration Cheat Sheet
 
 If you're short on time, read only this section. Before moving a browser page into AUI, check in priority order:
 
 1. **UA styles are zero**: write all styles for h1-h6, p, ul/li yourself; don't use br/hr to express layout;
-2. **Layout to avoid**: float, sticky, grid's areas/auto-flow/named lines, negative margins, table layout;
-3. **Value parsing to avoid**: calc multiplication/division, border styles like dashed (solid only), currentColor, named colors beyond the 26, radial/conic gradients, skew/matrix transforms;
+2. **Layout to avoid**: complex negative-margin combinations and complex table layout;
+3. **Value parsing to avoid**: calc multiplication/division, border/outline styles like dashed (solid only), currentColor, named colors beyond the 26, radial/conic gradients, skew/matrix transforms;
 4. **Cascade caveat**: the cascade follows browser ordering — normal inline > normal stylesheet, stylesheet `!important` > normal inline, inline `!important` wins over everything;
 5. **Text caveats**: italic has no effect (use oblique), justify has no effect, vertical-align only works with baseline, text-decoration only has underline/line-through;
 6. **Form caveats**: types like date/email/url degrade to plain text boxes; form submission only fires an event, no request;
-7. **transition whitelist**: properties outside the list (gap, grid-template, font-size, etc.) jump instantly.
+7. **transition whitelist**: properties outside the list (font-size, etc.) jump instantly; numeric Grid tracks and gaps transition, while structural changes jump.
 
 ## HTML Parser
 
@@ -31,7 +31,7 @@ A regex-based tokenizer, not a standard tree builder.
 - ✅ All attribute syntaxes, comments, doctype stripping, self-closing and void tags, script/style raw text, always synthesizing html/head/body;
 - 🟡 Only six named entities — `amp apos gt lt nbsp quot` — plus numeric entities; there is pop-stack error recovery, but **no browser-style implicit tag generation** — `<p>` is not auto-closed, `<tbody>` is not inserted;
 - 🟡 A `<script>` with both src and inline content executes **both** (non-standard); no defer/async/module;
-- `<head>` children (title, etc.) don't enter the DOM; there is no `document.title`; `<meta>` only reads the two aui-* specific configs aui-viewport and aui-mouse-events (see the [meta section](apricity-screen#page-meta-configuration)); charset is fixed to UTF-8.
+- `<head>` children (title, etc.) don't enter the DOM; there is no `document.title`; `<meta>` only reads the four aui-* specific configs aui-viewport, aui-mouse-events, aui-hyphen-break, and aui-preload (see the [meta section](apricity-screen#page-meta-configuration)); charset is fixed to UTF-8.
 
 ## HTML Elements
 
@@ -53,9 +53,9 @@ A regex-based tokenizer, not a standard tree builder.
 
 **Forms**: submit/requestSubmit/reset, constraint validation, FormData collection, label association, fieldset disabled cascading, and external association via `form=id` are all ✅; action submission and navigation are ❌ (only an event fires).
 
-**Tags without a dedicated class**: p/h1-h6/ul/ol/li/table, etc. are handled as generic block/inline with **no UA styles**; table has no table layout, and `display:table` also degrades to block; basically avoid br/hr; video/object/embed are unimplemented; iframe has a **dedicated class** rendered by an offscreen system WebView, see the [WebView and iframe doc](webview).
+**Tags without a dedicated class**: p/h1-h6/ul/ol/li/table, etc. are handled as generic block/inline with **no UA styles**; table supports the Markdown table subset described below; basically avoid br/hr; video/object/embed are unimplemented; iframe has a **dedicated class** rendered by an offscreen system WebView, see the [WebView and iframe doc](webview).
 
-The entire **UA default stylesheet**: about 30 tags are inline (a, b, i, code, img, input, canvas, iframe, etc.), head/script/style/title/meta/option, etc. are display:none, and everything else is block. That's all.
+**UA display defaults**: about 30 tags are inline (a, b, i, code, img, input, canvas, iframe, etc.); head/script/style/title/meta/option, etc. are display:none. table/thead/tbody/tfoot/tr/th/td use their corresponding table display values; cells default to top alignment and accept `align="left|center|right"`, with author CSS taking precedence. Other tags default to block.
 
 For extension tags such as texture, sprite, and translation, see the [Extension Elements doc](extension-elements); for item, ingredient, and recipe, see [Minecraft Item and Recipe Elements](mc-elements); for container and slot, see the [Container guide](container). Unknown tags render as generic Elements without warnings.
 
@@ -75,19 +75,47 @@ For extension tags such as texture, sprite, and translation, see the [Extension 
 
 ## Layout
 
-**display**: block/inline/inline-block/flex/inline-flex/grid/inline-grid/none ✅; table/list-item/flow-root degrade to block; contents and other unknown values are all block.
+**display**: block/inline/inline-block/flex/inline-flex/grid/inline-grid/none ✅; table/table-header-group/table-footer-group/table-row-group/table-row/table-cell ✅; `flow-root` ✅, list-item degrades to block; contents and other unknown values are all block.
 
 **Box model**:
 
 - ✅ margin/padding (including auto centering), margin collapsing, border shorthand, border-radius (including elliptical dual radii), border-image nine-slice, box-shadow (multiple, inset), box-sizing, width/height min/max, aspect-ratio, px/%/em/rem/vw/vh, min()/max()/clamp();
+- ✅ the whole `outline` family (the `outline` shorthand plus `outline-width`/`outline-style`/`outline-color`/`outline-offset`): drawn outside the border box — it takes no space and does not touch the box model, and `outline-offset` accepts negative values (an inset focus ring); the line style follows border and always draws solid, `none`/`hidden` draw nothing; `outline-color`'s `auto`/`currentColor` takes the element's own `color` (currentColor stays black everywhere else) and the width keywords thin/medium/thick map to 1/3/5px; not on the transition whitelist (it jumps instantly);
 - 🟡 **Negative margins are clamped to 0**; calc() **only supports addition and subtraction** — no multiplication/division or nesting;
 - ❌ border-style (everything draws as solid), border-width keywords (thin/medium/thick), fit-content/min-content/max-content, vmin/vmax/ch/ex, physical units.
 
-**Positioning**: static/relative/fixed/absolute ✅ (absolute containing block rules are normal; known deviations: both-sides-auto anchors to the containing block origin instead of the static position, and transform/filter ancestors don't establish a containing block); z-index ✅; **sticky ❌, float/clear ❌**.
+**Positioning**: static/relative/fixed/absolute ✅ (absolute containing block rules are normal; known deviations: both-sides-auto anchors to the containing block origin instead of the static position, and transform/filter ancestors don't establish a containing block); z-index ✅.
+
+**Floats and text wrapping.** Use `float: left | right | none` and `clear: left | right | both | none`. Apply `display: flow-root` to the wrapper to contain its floats. Direct Flex and Grid items follow their container's layout rules.
+
+```html
+<div style="display:flow-root">
+  <img src="icon.png" style="float:left;width:48px;margin-right:8px">
+  <p>This text wraps around the icon.</p>
+  <div style="clear:both">This line starts below the floating image.</div>
+</div>
+```
+
+**Sticky positioning.** Pair `position: sticky` with at least one non-`auto` edge using `top`, `right`, `bottom`, `left`, or the `inset` shorthand. The element keeps its place in layout, sticks to the nearest scrollport, and moves away when it reaches the end of its containing area. This works in normal flow, Flex, Grid, and table headers. `overflow: hidden` establishes a scrollport for sticky positioning. `overflow: clip` by itself lets the element look farther up the tree. This release covers horizontal writing and physical edge properties.
+
+```html
+<div style="height:120px;overflow:auto">
+  <div style="position:sticky;top:0;z-index:1;background:white">List header</div>
+  <div style="height:300px">Scrollable list content</div>
+</div>
+```
 
 **Flexbox**: row/column, row-reverse/column-reverse, wrap/wrap-reverse (**including column-direction wrapping**: a definite-height container breaks into columns when the accumulated height overflows; justify-content within a column, align-content between columns, and align-items inside each column all apply; an auto-height container stays a single column per spec), the six justify-content values plus the `start`/`end`/`left`/`right`/`normal` aliases (`left`/`right` fall back to flex-start in column direction per spec), grow/shrink/basis (**`flex-basis: content` uses the natural size instead of collapsing**; an omitted basis in the `flex` shorthand is `0%` per spec), **min/max respected during distribution** (the flex base size is first clamped to the hypothetical main size, min winning conflicts; a grow item that hits its max freezes and redistributes the remainder to siblings, and once everything is frozen the leftover goes to justify-content), gap, auto margins, anonymous items, order, align-content (including `end`/`normal`, the latter behaving as stretch per spec) all ✅; anonymous text items (direct text) **soft-wrap** at the row container's content width ✅ (known MVP deviation: in mixed layouts text wraps at the full container width rather than its shrunken share, and multiple anonymous items each wrap at the full width independently); align-items/align-self **baseline ✅**: row direction aligns within the baseline-sharing group (with mixed align-self, only items whose computed value is baseline join the group — the rest keep their own alignment), wrap containers align per line, and column direction equals flex-start per spec; the `first baseline`/`last baseline` aliases equal `baseline` per spec.
 
-**Grid** (MVP): template-columns/rows (px/auto/fr/minmax/repeat including auto-fill/fit), gap, items/self alignment, `grid-row/column`'s `N`, `span N`, `N / M`, auto placement ✅; ❌ named lines, template-areas, auto-flow, implicit tracks, place-* shorthands, subgrid.
+**Grid**: explicit and implicit tracks; repeating `grid-auto-rows/columns` sizes; row/column auto-flow with dense packing; stable order; positive/negative line indexes, spans, named lines with occurrence indexes, template areas and generated area line names ✅. Tracks accept existing length units, percentages, calc(), auto, fr, min-content/max-content, minmax(), fit-content() and repeat(). Auto-fill retains empty tracks; auto-fit collapses empty tracks and adjacent gutters. Items/self alignment, auto margins, first/last baselines, content distribution, and safe/unsafe overflow alignment ✅. Anonymous direct text participates in placement, wrapping, painting and selection. Absolute children can use existing grid lines as their containing block. Grid, grid-template, grid-area, grid-row/column and place-* shorthands expand during declaration parsing and follow the cascade.
+
+The nonstandard `grid-template-columns: 2` extension has been removed; use `repeat(2, auto)`. Invalid declarations are ignored as a whole; each axis is limited to 10,000 tracks. Row, column and two-axis `subgrid` support nested subgrids, inherited/local line names, name repeats, descendant intrinsic contributions, default/explicit gaps and edge box decorations. Descendants in subgridded rows share first/last baselines with parent items and sibling subgrids; baseline shims participate in each intrinsic sizing pass. Spanning min/max-content contributions and the intrinsic/final sizes of fractional tracks below 1fr are handled separately. Subgridded axes do not create implicit tracks; out-of-range placement is clamped to the inherited range. Masonry, RTL/vertical Grid and pagination are unsupported. Intrinsic track keywords do not add support for the equivalent width/height keywords. Example: `tests/grid-layout-test.html`.
+
+**Table (automatic layout)**: `table/thead/tbody/tfoot/tr/th/td`, direct `table > tr`, arbitrary column counts, and ragged rows ✅. Headers and body share automatic columns based on minimum/preferred content widths. `width:auto` fits content within available space; `width:100%` fills the container. Text, inline content, images, padding, and separate cell borders contribute to measurement. Heights are remeasured at the assigned width; cells align at the top. Minimum content widths may overflow: use an outer `overflow:auto` wrapper. Cell `align="left|center|right"` attributes are supported; author CSS wins. Built-in `.table` themes now use native table layout.
+
+`td/th` support `colspan` (1–1000) and `rowspan` (0–65534). Missing/invalid values default to 1; `colspan=0` becomes 1. `rowspan=0` extends to the end of the current row group; positive spans are clipped at group boundaries. Spanning constraints and fixed/percentage cell widths participate in automatic column sizing; rowspans distribute height according to content and row constraints. The first header group is placed first and the first footer group last; additional groups of either kind act as body groups. DOM order is preserved. Changing/removing spans and inserting/removing/hiding rows updates geometry and hit testing. Generic CSS `display:table-cell` elements do not interpret HTML span attributes.
+
+This subset uses zero cell spacing and separate borders. `border-spacing:0` can also be used for browser previews; nonzero spacing is unsupported. ❌ caption/colgroup, inline-table, table-layout:fixed, border-collapse, full anonymous table box repair, and baseline/middle/bottom cell alignment. Table layout itself does not depend on a Markdown parser; see the [Mod-Specific API](apricity-api) for the built-in Markdown renderer. Example: [Table layout](../../../common/src/main/resources/assets/apricityui/apricity/tests/table-layout-test.html).
 
 **Inline**: inline/inline-block line breaking, baseline alignment ✅; **vertical-align only has a real effect with baseline** — all other keywords are silently inert.
 
@@ -98,14 +126,15 @@ For extension tags such as texture, sprite, and translation, see the [Extension 
 | Property | Support | Notes |
 | --- | --- | --- |
 | color, background-color, opacity | ✅ | |
-| background-image | 🟡 | url(), linear-gradient, layered multiple backgrounds; no radial/conic |
+| background-image | 🟡 | url(), linear-gradient, repeating-linear-gradient, layered multiple backgrounds; no radial/conic |
 | background-repeat | 🟡 | `space` is treated as plain repeat |
 | background-size/position/shorthand | ✅ | |
 | background-attachment/origin/clip/blend-mode | ❌ | |
 | object-fit / object-position | ✅ | |
+| image-rendering | ✅ | `auto`/`smooth`/`high-quality`/`pixelated`/`crisp-edges`; applies to `<img>`, `<texture>`, `background-image`, `border-image`, `mask-image`, `<canvas>` and `<svg>`; `auto` is smooth scaling like browsers, `smooth`/`high-quality` are linear, `crisp-edges` is nearest in both directions, `pixelated` is nearest when enlarging and behaves like `auto` when shrinking; `<texture>` cannot report its intrinsic size, so `pixelated` there is treated as enlarging |
 | visibility | 🟡 | collapse is equivalent to hidden |
 | clip-path | 🟡 | polygon/circle/ellipse/inset; polygon accepts a nonzero/evenodd prefix (both filled as nonzero) and fills concave shapes via ear clipping; circle/ellipse default to closest-side when the radius is omitted; inset's round radii are ignored |
-| mask | 🟡 | mask shorthand + mask-image/mode/repeat/position/size/clip/origin/composite: url(), linear-gradient, per-layer compositing (add/subtract/intersect/exclude ≈ source-over/source-out/source-in/xor), alpha and luminance modes (mixed-mode layer stacks fall back to alpha), mask-clip/origin with border-box/padding-box/content-box/no-clip (margin-box/fill-box etc. treated as border-box); mask layers that fail to load are skipped (content stays visible, unlike browsers' "mask everything out"); like filter, has no effect inside world windows |
+| mask | 🟡 | mask shorthand + mask-image/mode/repeat/position/size/clip/origin/composite: url(), linear-gradient, per-layer compositing (add/subtract/intersect/exclude ≈ source-over/source-out/source-in/xor), alpha and luminance modes (mixed-mode layer stacks fall back to alpha), mask-clip/origin with border-box/padding-box/content-box/no-clip (margin-box/fill-box etc. treated as border-box); layers that are still loading are skipped (content stays visible, repainted on load); unavailable/invalid layers are treated as transparent black per spec — when every layer is unavailable, the element is masked out entirely, matching browsers (when a paintable layer is also present the unpaintable one is still just skipped); like filter, has no effect inside world windows |
 | filter / backdrop-filter | 🟡 | blur/brightness/contrast/saturate/sepia/grayscale/invert/hue-rotate/opacity/drop-shadow, animatable; functions apply in a fixed order (brightness→contrast→saturate→sepia→grayscale→invert→hue-rotate), not the written order |
 | transform | 🟡 | translate/rotate/scale on each axis, all angle units; **no skew, matrix, perspective** |
 | transform-origin | ✅ | |
@@ -126,11 +155,11 @@ For extension tags such as texture, sprite, and translation, see the [Extension 
 
 **Color**: the whole hex family, rgb/rgba old and new syntaxes, hsl/hsla, transparent ✅; `color(srgb-linear r g b / a)` is parsed into a linear-light working color (components are retained through the renderer's 16x SDR bound); `dynamic-range-limit` accepts `standard`, `constrained`, `no-limit`, numbers, and percentages and maps the working range in the filter shader. Ordinary 8-bit framebuffers still clamp presentation above SDR white. Only 26 named colors (CSS has 148); **currentColor resolves to black** (except inside SVG); hwb/lab/lch/oklch ❌.
 
-**Interaction**: common cursor values + `url()` custom cursors ✅ (move/wait/grab, etc. fall back to the arrow); user-select, pointer-events, accent-color, appearance, resize (textarea) ✅; outline ❌.
+**Interaction**: common cursor values + `url()` custom cursors ✅ (move/wait/grab, etc. fall back to the arrow); user-select, pointer-events, accent-color, appearance, resize (textarea) ✅; focus rings are drawn with `outline` (see the box model under "Layout").
 
 **Pseudo-element content**: only a single quoted string; attr()/counter()/url()/multi-part concatenation ❌.
 
-**transition**: shorthand, comma lists, all, delays, interruption and reverse redirection ✅; but **animatable properties are a whitelist** — opacity, width/height, transform, filter, color, background-color, the four position edges, margin/padding, border-width, border-radius, box-shadow; anything outside the list jumps instantly.
+**transition**: shorthand, comma lists, all, delays, interruption and reverse redirection ✅; but **animatable properties are a whitelist** — opacity, width/height, transform, filter, color, background-color, the four position edges, margin/padding, border-width, border-radius, box-shadow, gap/row-gap/column-gap, and grid-template-columns/rows; anything outside the list jumps instantly. Grid tracks interpolate numeric lists of equal length: lengths, percentages and linear calc() can mix, while fr interpolates only with fr (including 0fr → 1fr). Track-count changes, named lines, repeat()/minmax()/fit-content(), and auto/min-content/max-content/subgrid remain discrete. Grid interpolation in @keyframes is not included.
 
 **animation**: the full shorthand family, multiple animations, the four direction/fill-mode values, steps/cubic-bezier ✅; for interpolation, transform/filter/box-shadow have dedicated interpolation, the rest use generic numeric/color interpolation, and discrete properties don't animate.
 

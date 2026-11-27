@@ -7,12 +7,14 @@ import com.sighs.apricityui.init.Element;
 import com.sighs.apricityui.init.Node;
 import com.sighs.apricityui.registry.annotation.ElementRegister;
 import com.sighs.apricityui.render.Base;
+import com.sighs.apricityui.render.Drawer;
 import com.sighs.apricityui.render.ImageDrawer;
 import com.sighs.apricityui.render.Rect;
 import com.sighs.apricityui.layout.Box;
 import com.sighs.apricityui.parser.Color;
 import com.sighs.apricityui.layout.Position;
 import com.sighs.apricityui.layout.Size;
+import com.sighs.apricityui.style.Style;
 
 import java.awt.BasicStroke;
 import java.awt.Graphics2D;
@@ -24,28 +26,110 @@ import java.awt.geom.Line2D;
 import java.awt.geom.Path2D;
 import java.awt.geom.Rectangle2D;
 import java.util.Locale;
+import java.util.Objects;
+import java.util.Set;
 
 @ElementRegister(Svg.TAG_NAME)
 public class Svg extends Canvas {
     public static final String TAG_NAME = "SVG";
     private static final int RASTER_SCALE = 4;
-    private static final String[] RASTER_FINGERPRINT_ATTRIBUTES = {
+    private static final Set<String> PAINT_PROPERTIES = Set.of(
             "color", "fill", "stroke", "stroke-width", "stroke-linecap", "stroke-linejoin",
-            "opacity", "fill-opacity", "stroke-opacity", "fill-rule", "d", "cx", "cy", "r",
-            "x", "y", "width", "height", "rx", "ry", "x1", "y1", "x2", "y2"
-    };
+            "fill-opacity", "stroke-opacity", "fill-rule"
+    );
     private double rasterLayoutWidth = -1;
     private double rasterLayoutHeight = -1;
     private int intrinsicViewportWidth = 1;
     private int intrinsicViewportHeight = 1;
     private long rasterSubtreeMutationVersion = Long.MIN_VALUE;
-    private long rasterStyleFingerprint = Long.MIN_VALUE;
     private int rasterSurfaceWidth = -1;
     private int rasterSurfaceHeight = -1;
 
     public Svg(Document document) {
         super(document);
         this.tagName = TAG_NAME;
+    }
+
+    /** Presentation attributes are author declarations below stylesheet and inline CSS. */
+    public static void applyPresentationAttributes(Element element, Style style) {
+        for (var entry : element.getAttributes().entrySet()) {
+            String value = entry.getValue();
+            if (value != null && !value.isBlank() && PAINT_PROPERTIES.contains(entry.getKey())) {
+                if (rasterOwner(element) == null) return;
+                style.update(entry.getKey(), value);
+            }
+        }
+    }
+
+    public static void presentationAttributeChanged(Element element, String name) {
+        if (PAINT_PROPERTIES.contains(name)) invalidatePaint(element);
+    }
+
+    public static void invalidatePaintIfChanged(Element element, Style previous, Style current) {
+        if (!Objects.equals(previous.color, current.color)
+                || !Objects.equals(previous.fill, current.fill)
+                || !Objects.equals(previous.stroke, current.stroke)
+                || !Objects.equals(previous.strokeWidth, current.strokeWidth)
+                || !Objects.equals(previous.strokeLinecap, current.strokeLinecap)
+                || !Objects.equals(previous.strokeLinejoin, current.strokeLinejoin)
+                || !Objects.equals(previous.fillOpacity, current.fillOpacity)
+                || !Objects.equals(previous.strokeOpacity, current.strokeOpacity)
+                || !Objects.equals(previous.fillRule, current.fillRule)) {
+            invalidatePaint(element);
+        }
+    }
+
+    private static void invalidatePaint(Element element) {
+        Svg svg = rasterOwner(element);
+        if (svg == null) return;
+        svg.rasterSubtreeMutationVersion = Long.MIN_VALUE;
+        if (svg.document != null) svg.document.markDirty(svg, Drawer.REPAINT);
+    }
+
+    private static Svg rasterOwner(Element element) {
+        for (Element current = element; current != null; current = current.parentElement) {
+            if (current instanceof Svg svg) return svg;
+        }
+        return null;
+    }
+
+    private static double parseSvgNumber(String raw, double fallback) {
+        if (raw == null || raw.isBlank()) return fallback;
+        try {
+            return Double.parseDouble(raw.trim());
+        } catch (NumberFormatException ignored) {
+            return fallback;
+        }
+    }
+
+    private static String firstNonBlank(String... values) {
+        if (values == null) return null;
+        for (String value : values) {
+            if (value != null && !value.isBlank() && !"unset".equalsIgnoreCase(value)) {
+                return value;
+            }
+        }
+        return null;
+    }
+
+    private static int parseDimension(String raw, int fallback) {
+        if (raw == null || raw.isBlank()) return Math.max(1, fallback);
+        Double parsed = Size.parseNumber(raw);
+        return parsed == null ? Math.max(1, fallback) : Math.max(1, (int) Math.round(parsed));
+    }
+
+    private static double parseOpacity(String raw, double fallback) {
+        if (raw == null || raw.isBlank()) return fallback;
+        try {
+            return clampOpacity(Double.parseDouble(raw.trim()));
+        } catch (NumberFormatException ignored) {
+            return fallback;
+        }
+    }
+
+    private static double clampOpacity(double value) {
+        if (!Double.isFinite(value)) return 1.0;
+        return Math.max(0.0, Math.min(1.0, value));
     }
 
     @Override
@@ -90,7 +174,7 @@ public class Svg extends Canvas {
         int height = parseDimension(getAttribute("height"), (int) Math.round(Math.max(1d, viewBox[3])));
         intrinsicViewportWidth = width;
         intrinsicViewportHeight = height;
-        resizeSurface(width, height, false);
+        resizeRasterSurface(width, height);
     }
 
     @Override
@@ -98,22 +182,20 @@ public class Svg extends Canvas {
         return new Size(intrinsicViewportWidth, intrinsicViewportHeight);
     }
 
-    private void renderVectorSurface() {
+    void renderVectorSurface() {
         syncSurfaceToLayoutSize();
         long subtreeMutationVersion = getSubtreeMutationVersion();
-        long styleFingerprint = svgStyleFingerprint(this, 17L);
         if (rasterSubtreeMutationVersion == subtreeMutationVersion
-                && rasterStyleFingerprint == styleFingerprint
-                && rasterSurfaceWidth == getWidth()
-                && rasterSurfaceHeight == getHeight()) {
+                && rasterSurfaceWidth == getBitmapWidth()
+                && rasterSurfaceHeight == getBitmapHeight()) {
             return;
         }
         renderOperation(graphics -> {
             graphics.setComposite(java.awt.AlphaComposite.Clear);
-            graphics.fill(new Rectangle2D.Double(0, 0, getWidth(), getHeight()));
+            graphics.fill(new Rectangle2D.Double(0, 0, getBitmapWidth(), getBitmapHeight()));
             graphics.setComposite(java.awt.AlphaComposite.SrcOver);
-            double surfaceWidth = getWidth();
-            double surfaceHeight = getHeight();
+            double surfaceWidth = getBitmapWidth();
+            double surfaceHeight = getBitmapHeight();
             if (surfaceWidth <= 0 || surfaceHeight <= 0) {
                 return;
             }
@@ -126,15 +208,12 @@ public class Svg extends Canvas {
             AffineTransform original = graphics.getTransform();
             graphics.translate(-viewBox[0], -viewBox[1]);
             graphics.scale(surfaceWidth / vbWidth, surfaceHeight / vbHeight);
-            SvgPaint inheritedPaint = SvgPaint.fromElement(this, currentColorArgb(), "black", "none", 1.0,
-                    "butt", "miter", 1.0, 1.0, 1.0);
-            drawSvgSubtree(graphics, this, inheritedPaint);
+            drawSvgChildren(graphics, this, parseOpacity(getAttribute("opacity"), 1.0));
             graphics.setTransform(original);
         });
         rasterSubtreeMutationVersion = subtreeMutationVersion;
-        rasterStyleFingerprint = styleFingerprint;
-        rasterSurfaceWidth = getWidth();
-        rasterSurfaceHeight = getHeight();
+        rasterSurfaceWidth = getBitmapWidth();
+        rasterSurfaceHeight = getBitmapHeight();
     }
 
     private void syncSurfaceToLayoutSize() {
@@ -144,8 +223,10 @@ public class Svg extends Canvas {
         rasterLayoutHeight = contentSize.height();
         int surfaceWidth = Math.max(1, (int) Math.ceil(contentSize.width() * RASTER_SCALE));
         int surfaceHeight = Math.max(1, (int) Math.ceil(contentSize.height() * RASTER_SCALE));
-        if (surfaceWidth == getWidth() && surfaceHeight == getHeight()) return;
-        resizeSurface(surfaceWidth, surfaceHeight, false);
+        if (surfaceWidth == getBitmapWidth() && surfaceHeight == getBitmapHeight()) return;
+        // SVG owns its supersampled raster: it is sized and addressed in raster pixels, so it
+        // must not go through the CSS-pixel canvas resize path.
+        resizeRasterSurface(surfaceWidth, surfaceHeight);
     }
 
     @Override
@@ -166,41 +247,39 @@ public class Svg extends Canvas {
                 (float) contentPos.y,
                 (float) drawWidth,
                 (float) drawHeight,
-                true
+                ImageDrawer.usesLinearFiltering(getComputedStyle(),
+                        drawWidth, drawHeight, getBitmapWidth(), getBitmapHeight())
         );
     }
 
-    private void drawSvgSubtree(Graphics2D graphics, Element parent, SvgPaint inheritedPaint) {
-        if (parent == null) return;
-        SvgPaint currentPaint = SvgPaint.fromElement(parent, inheritedPaint.currentColor, inheritedPaint.fill,
-                inheritedPaint.stroke, inheritedPaint.strokeWidth, inheritedPaint.lineCap, inheritedPaint.lineJoin,
-                inheritedPaint.opacity, inheritedPaint.fillOpacity, inheritedPaint.strokeOpacity);
+    private void drawSvgChildren(Graphics2D graphics, Element parent, double inheritedOpacity) {
         for (Node child : parent.getChildNodes()) {
             if (!(child instanceof Element childElement)) continue;
             String tag = childElement.tagName == null ? "" : childElement.tagName.toUpperCase(Locale.ROOT);
+            double opacity = inheritedOpacity * parseOpacity(childElement.getAttribute("opacity"), 1.0);
             if (Path.TAG_NAME.equals(tag)) {
-                drawPath(graphics, childElement, currentPaint);
+                drawPath(graphics, childElement, SvgPaint.fromElement(childElement, opacity));
                 continue;
             }
             Shape shape = shapeForElement(childElement, tag);
             if (shape != null) {
-                drawShape(graphics, childElement, shape, currentPaint);
+                drawShape(graphics, shape, SvgPaint.fromElement(childElement, opacity));
                 continue;
             }
-            drawSvgSubtree(graphics, childElement, currentPaint);
+            drawSvgChildren(graphics, childElement, opacity);
         }
     }
 
-    private void drawPath(Graphics2D graphics, Element pathElement, SvgPaint inheritedPaint) {
+    private void drawPath(Graphics2D graphics, Element pathElement, SvgPaint paint) {
         String d = pathElement.getAttribute("d");
         if (d == null || d.isBlank()) return;
         CanvasPath2D canvasPath = new CanvasPath2D(d);
-        if ("evenodd".equalsIgnoreCase(pathElement.getAttribute("fill-rule"))) {
+        if ("evenodd".equalsIgnoreCase(paint.fillRule)) {
             canvasPath.setWindingRule(Path2D.WIND_EVEN_ODD);
         }
         Shape shape = canvasPath.asShape();
         if (shape == null || shape.getBounds2D().isEmpty()) return;
-        drawShape(graphics, pathElement, shape, inheritedPaint);
+        drawShape(graphics, shape, paint);
     }
 
     private Shape shapeForElement(Element element, String tag) {
@@ -263,18 +342,14 @@ public class Svg extends Canvas {
         return path;
     }
 
-    private void drawShape(Graphics2D graphics, Element pathElement, Shape shape, SvgPaint inheritedPaint) {
-        SvgPaint paint = SvgPaint.fromElement(pathElement, inheritedPaint.currentColor, inheritedPaint.fill,
-                inheritedPaint.stroke, inheritedPaint.strokeWidth, inheritedPaint.lineCap, inheritedPaint.lineJoin,
-                inheritedPaint.opacity, inheritedPaint.fillOpacity, inheritedPaint.strokeOpacity);
-
+    private void drawShape(Graphics2D graphics, Shape shape, SvgPaint paint) {
         if (!"none".equalsIgnoreCase(paint.fill)) {
-            graphics.setColor(toAwtColor(resolveSvgColor(paint.fill, paint.currentColor), paint.opacity * paint.fillOpacity));
+            graphics.setColor(toAwtColor(Color.parse(paint.fill, paint.currentColor), paint.opacity * paint.fillOpacity));
             graphics.fill(shape);
         }
 
         if (!"none".equalsIgnoreCase(paint.stroke)) {
-            graphics.setColor(toAwtColor(resolveSvgColor(paint.stroke, paint.currentColor), paint.opacity * paint.strokeOpacity));
+            graphics.setColor(toAwtColor(Color.parse(paint.stroke, paint.currentColor), paint.opacity * paint.strokeOpacity));
             graphics.setStroke(new BasicStroke(
                     (float) Math.max(0.1d, paint.strokeWidth),
                     switch (paint.lineCap) {
@@ -292,30 +367,6 @@ public class Svg extends Canvas {
         }
     }
 
-    private int currentColorArgb() {
-        String computedColor = getComputedStyle() == null ? null : getComputedStyle().color;
-        if (computedColor == null || computedColor.isBlank() || "unset".equalsIgnoreCase(computedColor)) {
-            computedColor = getAttribute("color");
-        }
-        if (computedColor == null || computedColor.isBlank() || "unset".equalsIgnoreCase(computedColor)) {
-            computedColor = "#000000";
-        }
-        return Color.parse(computedColor);
-    }
-
-    private static int resolveCurrentColor(Element element, int fallback) {
-        if (element == null) return fallback;
-        String color = firstNonBlank(element.getAttribute("color"), element.getComputedStyle() == null ? null : element.getComputedStyle().color);
-        if (color == null || color.isBlank() || "unset".equalsIgnoreCase(color)) return fallback;
-        return Color.parse(color);
-    }
-
-    private int resolveSvgColor(String value, int currentColor) {
-        if (value == null || value.isBlank()) return currentColor;
-        if ("currentcolor".equalsIgnoreCase(value)) return currentColor;
-        return Color.parse(value);
-    }
-
     private java.awt.Color toAwtColor(int argb, double opacityMultiplier) {
         int a = (argb >>> 24) & 0xFF;
         int r = (argb >>> 16) & 0xFF;
@@ -325,101 +376,38 @@ public class Svg extends Canvas {
         return new java.awt.Color(r, g, b, a);
     }
 
-    private static long svgStyleFingerprint(Element element, long value) {
-        if (element == null) return value;
-        String color = element.getComputedStyle() == null ? null : element.getComputedStyle().color;
-        value = mixStyleFingerprint(value, color);
-        for (String attribute : RASTER_FINGERPRINT_ATTRIBUTES) {
-            value = mixStyleFingerprint(value, element.getAttribute(attribute));
-        }
-        for (Node child : element.childNodes) {
-            if (child instanceof Element childElement) {
-                value = svgStyleFingerprint(childElement, value);
-            }
-        }
-        return value;
-    }
-
-    private static long mixStyleFingerprint(long value, String component) {
-        return (value * 0x9E3779B185EBCA87L) ^ (component == null ? 0 : component.hashCode());
-    }
-
     private double[] parseViewBox() {
         String raw = firstNonBlank(getAttribute("viewBox"), getAttribute("viewbox"));
         if (raw == null || raw.isBlank()) {
-            return new double[]{0, 0, Math.max(1, getWidth()), Math.max(1, getHeight())};
+            return new double[]{0, 0, Math.max(1, getBitmapWidth()), Math.max(1, getBitmapHeight())};
         }
         String[] parts = raw.trim().split("[,\\s]+");
         if (parts.length < 4) {
-            return new double[]{0, 0, Math.max(1, getWidth()), Math.max(1, getHeight())};
+            return new double[]{0, 0, Math.max(1, getBitmapWidth()), Math.max(1, getBitmapHeight())};
         }
         return new double[]{
                 parseSvgNumber(parts[0], 0),
                 parseSvgNumber(parts[1], 0),
-                Math.max(1d, parseSvgNumber(parts[2], Math.max(1, getWidth()))),
-                Math.max(1d, parseSvgNumber(parts[3], Math.max(1, getHeight())))
+                Math.max(1d, parseSvgNumber(parts[2], Math.max(1, getBitmapWidth()))),
+                Math.max(1d, parseSvgNumber(parts[3], Math.max(1, getBitmapHeight())))
         };
     }
 
-    private static double parseSvgNumber(String raw, double fallback) {
+    private record SvgPaint(int currentColor, String fill, String stroke, double strokeWidth, String lineCap,
+                           String lineJoin, String fillRule,
+                           double opacity, double fillOpacity, double strokeOpacity) {
+        static SvgPaint fromElement(Element element, double opacity) {
+            Style style = element.getComputedStyle();
+            return new SvgPaint(Color.parse(style.color), style.fill.trim(), style.stroke.trim(),
+                    parsePaintLength(style.strokeWidth, 1.0), style.strokeLinecap.trim().toLowerCase(Locale.ROOT),
+                    style.strokeLinejoin.trim().toLowerCase(Locale.ROOT), style.fillRule.trim(),
+                    opacity, parseOpacity(style.fillOpacity, 1.0), parseOpacity(style.strokeOpacity, 1.0));
+        }
+    }
+
+    private static double parsePaintLength(String raw, double fallback) {
         if (raw == null || raw.isBlank()) return fallback;
-        try {
-            return Double.parseDouble(raw.trim());
-        } catch (NumberFormatException ignored) {
-            return fallback;
-        }
-    }
-
-    private static String firstNonBlank(String... values) {
-        if (values == null) return null;
-        for (String value : values) {
-            if (value != null && !value.isBlank() && !"unset".equalsIgnoreCase(value)) {
-                return value;
-            }
-        }
-        return null;
-    }
-
-    private static int parseDimension(String raw, int fallback) {
-        if (raw == null || raw.isBlank()) return Math.max(1, fallback);
         Double parsed = Size.parseNumber(raw);
-        return parsed == null ? Math.max(1, fallback) : Math.max(1, (int) Math.round(parsed));
-    }
-
-    private static double parseOpacity(String raw, double fallback) {
-        if (raw == null || raw.isBlank()) return fallback;
-        try {
-            return clampOpacity(Double.parseDouble(raw.trim()));
-        } catch (NumberFormatException ignored) {
-            return fallback;
-        }
-    }
-
-    private static double clampOpacity(double value) {
-        if (!Double.isFinite(value)) return 1.0;
-        return Math.max(0.0, Math.min(1.0, value));
-    }
-
-    private record SvgPaint(int currentColor, String fill, String stroke, double strokeWidth, String lineCap, String lineJoin,
-                            double opacity, double fillOpacity, double strokeOpacity) {
-        private static SvgPaint fromElement(Element element, int inheritedColor, String inheritedFill, String inheritedStroke,
-                                            double inheritedStrokeWidth, String inheritedLineCap, String inheritedLineJoin,
-                                            double inheritedOpacity, double inheritedFillOpacity, double inheritedStrokeOpacity) {
-            int color = resolveCurrentColor(element, inheritedColor);
-            String fill = firstNonBlank(attribute(element, "fill"), inheritedFill, "black");
-            String stroke = firstNonBlank(attribute(element, "stroke"), inheritedStroke, "none");
-            double strokeWidth = parseSvgNumber(attribute(element, "stroke-width"), inheritedStrokeWidth);
-            String lineCap = firstNonBlank(attribute(element, "stroke-linecap"), inheritedLineCap, "butt").toLowerCase(Locale.ROOT);
-            String lineJoin = firstNonBlank(attribute(element, "stroke-linejoin"), inheritedLineJoin, "miter").toLowerCase(Locale.ROOT);
-            double opacity = inheritedOpacity * parseOpacity(attribute(element, "opacity"), 1.0);
-            double fillOpacity = parseOpacity(attribute(element, "fill-opacity"), inheritedFillOpacity);
-            double strokeOpacity = parseOpacity(attribute(element, "stroke-opacity"), inheritedStrokeOpacity);
-            return new SvgPaint(color, fill, stroke, strokeWidth, lineCap, lineJoin,
-                    clampOpacity(opacity), fillOpacity, strokeOpacity);
-        }
-
-        private static String attribute(Element element, String name) {
-            return element == null ? null : element.getAttribute(name);
-        }
+        return parsed == null ? fallback : parsed;
     }
 }

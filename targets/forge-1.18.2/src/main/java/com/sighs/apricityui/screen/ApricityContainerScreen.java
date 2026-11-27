@@ -33,13 +33,27 @@ import java.util.List;
 import com.sighs.apricityui.client.Client;
 import com.sighs.apricityui.viewport.ApricityViewport;
 
-public class ApricityContainerScreen extends AbstractContainerScreen<ApricityContainerMenu> implements AuiLinkedScreen {
+public class ApricityContainerScreen<M extends ApricityContainerMenu> extends AbstractContainerScreen<M> implements AuiLinkedScreen {
+    private final List<RenderNode.ItemNode> floatingItemNodes = new ArrayList<>();
     private Document linkedDocument;
     private SlotDataBinder slotBinder;
-    private final List<RenderNode.ItemNode> floatingItemNodes = new ArrayList<>();
 
-    public ApricityContainerScreen(ApricityContainerMenu menu, Inventory inventory, Component title) {
+    public ApricityContainerScreen(M menu, Inventory inventory, Component title) {
         super(menu, inventory, title);
+    }
+
+    /**
+     * 1.19.2 的 ItemStack 还没有 copyWithCount（1.20 才补上），语义与 1.20.1 原版一致。
+     */
+    private static ItemStack copyWithCount(ItemStack stack, int count) {
+        if (stack.isEmpty()) return ItemStack.EMPTY;
+        ItemStack copy = stack.copy();
+        copy.setCount(count);
+        return copy;
+    }
+
+    private static boolean isControlModifier(int modifiers) {
+        return (modifiers & GLFW.GLFW_MOD_CONTROL) != 0;
     }
 
     public Document getLinkedDocument() {
@@ -121,26 +135,27 @@ public class ApricityContainerScreen extends AbstractContainerScreen<ApricityCon
         imageHeight = height;
         super.init();
 
-        if (linkedDocument != null) {
-            linkedDocument.remove();
-            linkedDocument = null;
+        // Screen.resize() calls init(); keep the live Document so resizing does not
+        // rebuild the page. A closed/disposed Document is recreated normally.
+        if (linkedDocument == null || !linkedDocument.isActive()) {
+            linkedDocument = Document.create(menu.getTemplatePath());
+            if (linkedDocument == null) return;
+            if (slotBinder != null) {
+                slotBinder.clear();
+                slotBinder = null;
+            }
         }
-        if (slotBinder != null) {
-            slotBinder.clear();
-            slotBinder = null;
-        }
-
-        linkedDocument = Document.create(menu.getTemplatePath());
         if (linkedDocument == null) return;
+        if (slotBinder == null) {
+            slotBinder = new SlotDataBinder(menu);
+            slotBinder.setDisplayStateResolver(this::resolveMenuSlotDisplayState);
+            slotBinder.bindSlotsFromDocument(linkedDocument);
+            com.sighs.apricityui.network.client.ApricityClientNetwork.resolveSlotFilters(
+                    slotBinder.resolveSlotFilters(linkedDocument, menu.containerId)
+            );
+        }
         linkedDocument.applyViewport(false);
-
-        slotBinder = new SlotDataBinder(menu);
-        slotBinder.setDisplayStateResolver(this::resolveMenuSlotDisplayState);
-        slotBinder.bindSlotsFromDocument(linkedDocument);
         slotBinder.syncAllSlotPositions(linkedDocument, leftPos, topPos, true);
-        com.sighs.apricityui.network.client.ApricityClientNetwork.resolveSlotFilters(
-                slotBinder.resolveSlotFilters(linkedDocument, menu.containerId)
-        );
     }
 
     @Override
@@ -203,7 +218,7 @@ public class ApricityContainerScreen extends AbstractContainerScreen<ApricityCon
             drawLinkedDocument(poseStack);
             com.sighs.apricityui.dev.resource.ResourcePreviewDialog.draw(poseStack, linkedDocument);
             drawSlotHoverTooltipByElement(poseStack, mouseX, mouseY);
-            Client.drawPersistentScreenDocuments(poseStack, linkedDocument);
+            Base.drawPersistentScreenDocuments(poseStack, linkedDocument);
             Minecraft.getInstance().renderBuffers().bufferSource().endBatch();
             Cursor.drawPseudoCursor(poseStack);
             Minecraft.getInstance().renderBuffers().bufferSource().endBatch();
@@ -287,14 +302,6 @@ public class ApricityContainerScreen extends AbstractContainerScreen<ApricityCon
         return new SlotDataBinder.SlotItemState(copyWithCount(carried, placeCount), overlayText, true);
     }
 
-    /** 1.19.2 的 ItemStack 还没有 copyWithCount（1.20 才补上），语义与 1.20.1 原版一致。 */
-    private static ItemStack copyWithCount(ItemStack stack, int count) {
-        if (stack.isEmpty()) return ItemStack.EMPTY;
-        ItemStack copy = stack.copy();
-        copy.setCount(count);
-        return copy;
-    }
-
     private void drawSlotHoverTooltipByElement(PoseStack poseStack, int mouseX, int mouseY) {
         if (linkedDocument == null || !menu.getCarried().isEmpty()) return;
 
@@ -317,7 +324,7 @@ public class ApricityContainerScreen extends AbstractContainerScreen<ApricityCon
             Item item = SlotContentRules.getDisplayItem(slot);
             ItemStack stack = item == null ? ItemStack.EMPTY : item.getTooltipStack();
             if (stack.isEmpty()) continue;
-            item.renderTooltip(poseStack, mouseX, mouseY);
+            Base.drawFlatTooltip(poseStack, () -> item.renderTooltip(poseStack, mouseX, mouseY));
             return;
         }
 
@@ -332,7 +339,7 @@ public class ApricityContainerScreen extends AbstractContainerScreen<ApricityCon
 
             ItemStack stack = minecraftElement.getTooltipStack();
             if (stack.isEmpty()) continue;
-            minecraftElement.renderTooltip(poseStack, mouseX, mouseY);
+            Base.drawFlatTooltip(poseStack, () -> minecraftElement.renderTooltip(poseStack, mouseX, mouseY));
             return;
         }
 
@@ -344,7 +351,7 @@ public class ApricityContainerScreen extends AbstractContainerScreen<ApricityCon
             if (boundElement != null && boundElement.canShowItemTooltip() && boundItem != null) {
                 ItemStack stack = boundItem.getTooltipStack();
                 if (!stack.isEmpty()) {
-                    boundItem.renderTooltip(poseStack, mouseX, mouseY);
+                    Base.drawFlatTooltip(poseStack, () -> boundItem.renderTooltip(poseStack, mouseX, mouseY));
                     return;
                 }
             }
@@ -354,8 +361,9 @@ public class ApricityContainerScreen extends AbstractContainerScreen<ApricityCon
                 if (!stack.isEmpty()) {
                     // 1.20.1 的 GuiGraphics#renderTooltip(font, stack, x, y) 在 1.19.2 对应
                     // Screen 上带 font/stack 的公开重载（内部同样用 width/height 钳制边界）。
-                    renderTooltip(poseStack, getTooltipFromItem(stack), stack.getTooltipImage(),
-                            mouseX, mouseY, font, stack);
+                    Base.drawFlatTooltip(poseStack, () -> renderTooltip(
+                            poseStack, getTooltipFromItem(stack), stack.getTooltipImage(),
+                            mouseX, mouseY, font, stack));
                 }
             }
         }
@@ -383,9 +391,11 @@ public class ApricityContainerScreen extends AbstractContainerScreen<ApricityCon
     public void removed() {
         if (linkedDocument != null) {
             linkedDocument.remove();
+            linkedDocument = null;
         }
         if (slotBinder != null) {
             slotBinder.clear();
+            slotBinder = null;
         }
         Size.clearViewportOverride();
         super.removed();
@@ -405,9 +415,5 @@ public class ApricityContainerScreen extends AbstractContainerScreen<ApricityCon
             slotBinder.syncAllSlotPositions(linkedDocument, leftPos, topPos, true);
         }
         return true;
-    }
-
-    private static boolean isControlModifier(int modifiers) {
-        return (modifiers & GLFW.GLFW_MOD_CONTROL) != 0;
     }
 }

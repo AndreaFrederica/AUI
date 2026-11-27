@@ -2,7 +2,7 @@
 
 AUI 不是 Chromium，也没有浏览器内核。在支持的 target 上，页面 JavaScript 由 Rhino 执行，Java 侧的 Document、Element、事件和资源管线被桥接成浏览器风格的对象。所以这里的 API 分三类：
 
-> **Target 限制**：Forge 1.20.1、NeoForge 1.21.1 和 NeoForge 26.1 target 支持页面脚本；Fabric 1.20.1、Fabric 1.21.1、Fabric 26.1 的 target 实现目前不执行页面脚本。页面仍会解析和渲染，但不执行 `<script>` 的 target 上，依赖脚本的交互不可用。各 target 的说明见[总览](overview#loader-与脚本支持)。
+> **Target 限制**：Forge 1.20.1、NeoForge 1.21.1 和 NeoForge 26.1 target 支持页面脚本，但运行时要能拿到 Rhino：装有 KubeJS 时用 KubeJS（优先），只有 Rhino 时用 AUI 自带的独立 Rhino 运行时，两者都没有时脚本跳过、页面照常渲染。Fabric 1.20.1、Fabric 1.21.1、Fabric 26.1 的 target 实现目前不执行页面脚本。各 target 的说明见[总览](overview#loader-与脚本支持)。
 
 - **可用**：按下文示例直接用；
 - **轻量兼容**：名字和常用调法和浏览器一样，但返回值、时机或参数范围有缩减；
@@ -45,17 +45,17 @@ CSS 属性和布局见 [HTML/CSS 覆盖面](html-css-coverage)，页面级的 vi
 | setTimeout / setInterval / requestAnimationFrame | 轻量 | 客户端调度器驱动 |
 | Event / CustomEvent / MouseEvent / WheelEvent / PointerEvent | 可用 | 构造器读取的字段有限 |
 | URLSearchParams / FormData | 轻量 | 方法集比标准少 |
-| ResizeObserver / MutationObserver | 轻量 | 按文档帧派发，不是微任务时机 |
+| ResizeObserver / IntersectionObserver / MutationObserver | 轻量 | 按文档帧派发，不是微任务时机 |
 | DOMMatrix / Path2D / OffscreenCanvas / createImageBitmap | 轻量 | 见 Canvas 节 |
 
-**没有提供**：KeyboardEvent 构造器、navigator.clipboard、Selection/Range、history、matchMedia、XMLHttpRequest、WebSocket、IntersectionObserver、WebGL、Service Worker、完整 Promise、AbortController、Shadow DOM、postMessage。`<iframe>` 的元素壳与离屏渲染见 [WebView 与 iframe](webview)，但页面里的 `window.parent`/`postMessage` 没有接到 AUI 上。文字选择复制是 AUI 自己的实现，别按 Selection/Range 写。
+**没有提供**：KeyboardEvent 构造器、navigator.clipboard、Selection/Range、history、matchMedia、XMLHttpRequest、WebSocket、WebGL、Service Worker、完整 Promise、AbortController、Shadow DOM、postMessage。`<iframe>` 的元素壳与离屏渲染见 [WebView 与 iframe](webview)，但页面里的 `window.parent`/`postMessage` 没有接到 AUI 上。文字选择复制是 AUI 自己的实现，别按 Selection/Range 写。
 
 ## Window
 
 ```javascript
 window.innerWidth          // Document 逻辑视口尺寸
 window.innerHeight
-window.devicePixelRatio    // Minecraft GUI scale
+window.devicePixelRatio    // 物理像素 / 文档 CSS 像素（设备缩放）
 ```
 
 事件里的 `clientX/clientY` 已经是逻辑坐标，不要再乘 devicePixelRatio 或 renderScale。
@@ -281,6 +281,30 @@ ro.observe(el);  ro.unobserve(el);  ro.disconnect();
 entry 有 `target/contentRect/borderBoxSize/contentBoxSize`；contentRect 除了常规矩形字段还有 `borderBoxWidth/borderBoxHeight`。没有实际尺寸变化不会重复回调。
 
 ```javascript
+var io = new IntersectionObserver(function (entries, observer) {
+    for (var i = 0; i < entries.length; i++) {
+        var entry = entries[i];
+        if (entry.isIntersecting) console.log(entry.target, entry.intersectionRatio);
+    }
+}, {
+    root: null,                         // null = Document 逻辑 viewport
+    rootMargin: "20px 0px",
+    scrollMargin: "0px",               // 扩大路径上的滚动裁剪区域
+    threshold: [0, 0.5, 1],
+    trackVisibility: true,
+    delay: 100                          // trackVisibility=true 时最少 100ms
+});
+io.observe(el);
+io.unobserve(el);
+io.takeRecords();
+io.disconnect();
+```
+
+`IntersectionObserver` 的 entry 有 `target/time/rootBounds/boundingClientRect/intersectionRect/isIntersecting/isVisible/intersectionRatio`。实例只读 `root/rootMargin/scrollMargin/thresholds/delay/trackVisibility`；rootMargin 和 scrollMargin 会规范为四值，threshold 会排序去重。`root` 可以是同一 Document 的 Element、Document 或 null；显式 root 的目标必须是它的后代。显式 root 在 overflow 裁剪时使用提交后的 padding clip（含滚动条 gutter），否则使用 border box；target 基于提交后的 border box，并沿目标到 root 的祖先链应用 overflow 裁剪。`rootMargin` 只扩大 root，`scrollMargin` 只扩大路径上的滚动裁剪，百分比均按未扩大的矩形宽度解析；支持 CSS 绝对长度和百分比，非法值会抛错。`trackVisibility` 开启后会填充 `isVisible`，且 `delay` 自动提升到至少 100ms。
+
+观察器按文档帧提交后的异步批量派发；目标可以在插入 DOM 前注册，断连或 `display:none` 时会产生不相交状态，而不会被静默删除。当前实现不提供跨 Document/跨源观察，也不承诺滤镜、遮挡等复杂合成场景的像素级可见性。
+
+```javascript
 var mo = new MutationObserver(function (records) { ... });
 mo.observe(document.documentElement, {
     childList: true, attributes: true, characterData: true, subtree: true,
@@ -292,7 +316,7 @@ mo.takeRecords();  mo.disconnect();
 
 record 可读 `type/target/addedNodes/removedNodes/previousSibling/nextSibling/attributeName/oldValue`。
 
-两者都按文档帧批量派发，不是浏览器微任务时机。Document 刷新后观察器被清理，必须重新查询节点重新 observe。
+三者都按文档帧批量派发，不是浏览器微任务时机。IntersectionObserver 在所有 Document 完成该轮布局和 paint-list 提交后统一收集，再调用回调；回调内的样式、滚动、unobserve 或 disconnect 影响下一轮。Document 刷新后观察器被清理，必须重新查询节点重新 observe。
 
 ## Canvas 和图像
 

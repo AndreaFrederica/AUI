@@ -1,6 +1,7 @@
 package com.sighs.apricityui.style;
 
 import com.sighs.apricityui.element.AbstractText;
+import com.sighs.apricityui.element.Model;
 import com.sighs.apricityui.element.Translation;
 import com.sighs.apricityui.init.Document;
 import com.sighs.apricityui.init.Element;
@@ -99,6 +100,11 @@ public class Text {
     public String verticalAlign = "baseline";
     public String whiteSpace = "normal";
     public String wordBreak = "normal";
+    /**
+     * 文档 meta {@code aui-hyphen-break}：false 时 '-' / '‐' 不再作为首选换行机会。
+     * 只影响标准的连字符断行，不影响空白、CJK 与 {@code break-all} 的断行。
+     */
+    public boolean hyphenBreak = true;
     public double textIndent = 0;
     public double letterSpacing = 0;
     // 字体渲染固定为 web 模式：默认字号 16px，缩放基准 9px（即字号即实际渲染像素）。
@@ -325,8 +331,15 @@ public class Text {
 
     public static Text of(Element element) {
         boolean naturalMeasurement = Size.isNaturalMeasurementContext();
-        Text cache = naturalMeasurement ? null : element.getRenderer().text.get();
-        if (cache != null) return cache;
+        var storage = naturalMeasurement ? element.getRenderer().naturalText : element.getRenderer().text;
+        Text cache = storage.get();
+        if (cache != null) {
+            if (naturalMeasurement) {
+                cache.textIndent = getTextIndent(element);
+                measureSize(element, cache);
+            }
+            return cache;
+        }
         Text text = new Text();
         text.content = resolveElementTextContent(element);
         if (element.tagName.equals("INPUT")) text.content = element.value;
@@ -363,6 +376,7 @@ public class Text {
             if (element.tagName.equals("PRE")) text.whiteSpace = "pre";
             else if (element.tagName.equals("TEXTAREA")) text.whiteSpace = "pre-wrap";
         }
+        text.hyphenBreak = element.document == null || element.document.allowsHyphenBreak();
         if (!(element instanceof AbstractText)) {
             text.content = normalizeWhiteSpaceContent(text.content, text.whiteSpace);
         }
@@ -370,10 +384,7 @@ public class Text {
 
         if (text.lineHeight == -1) text.lineHeight = calculateLineHeight(text, state.lineHeightRaw);
         text.size = measureSize(element, text);
-
-        if (!naturalMeasurement) {
-            element.getRenderer().text.set(text);
-        }
+        storage.set(text);
         return text;
     }
 
@@ -600,6 +611,7 @@ public class Text {
 
     private static String resolveElementTextContent(Element element) {
         if (element == null) return "";
+        if (element instanceof Model) return "";
         if (element instanceof Translation translation) return translation.getTranslatedText();
         if (element.childNodes.isEmpty()) return element.innerText == null ? "" : element.innerText;
         StringBuilder builder = new StringBuilder();
@@ -979,6 +991,29 @@ public class Text {
         return List.of(value.split("\n", -1));
     }
 
+    /** Normalized direct DOM text, without text contributed by descendants. */
+    public static String directNormalizedText(Element element) {
+        if (element == null) return "";
+        String raw;
+        if (!element.childNodes.isEmpty()) {
+            StringBuilder builder = new StringBuilder();
+            for (Node child : element.childNodes) {
+                if (child instanceof TextNode textNode) {
+                    builder.append(textNode.getTextContent());
+                }
+            }
+            raw = builder.toString();
+            if (raw.isEmpty()) {
+                raw = element.innerText == null ? "" : element.innerText;
+            }
+        } else {
+            raw = element.innerText == null ? "" : element.innerText;
+        }
+        if (raw.isEmpty()) return "";
+        String normalized = Text.normalizeWhiteSpaceContent(raw, Text.getWhiteSpace(element));
+        return normalized == null ? "" : normalized;
+    }
+
     public static WrappedText wrap(Element element) {
         return wrap(element, Text.of(element));
     }
@@ -1039,6 +1074,7 @@ public class Text {
         h = 31 * h + (text.fontFamily == null ? 0 : text.fontFamily.hashCode());
         h = 31 * h + (text.whiteSpace == null ? 0 : text.whiteSpace.hashCode());
         h = 31 * h + (text.wordBreak == null ? 0 : text.wordBreak.hashCode());
+        h = 31 * h + (text.hyphenBreak ? 1 : 0);
         h = 31 * h + (text.direction == null ? 0 : text.direction.hashCode());
         h = 31 * h + (int) Math.round(text.textIndent * 1000);
         h = 31 * h + (int) Math.round(text.letterSpacing * 1000);
@@ -1046,7 +1082,92 @@ public class Text {
         return h;
     }
 
+    public static double minContentWidth(Text text) {
+        return minContentWrap(text).width();
+    }
+
+    private static WrappedText minContentWrap(Text text) {
+        String content = text == null || text.content == null ? "" : text.content;
+        List<String> lines = new ArrayList<>();
+        List<Integer> starts = new ArrayList<>();
+        double width = 0;
+        int base = 0;
+        for (String line : splitLines(content)) {
+            int start = 0;
+            for (int i = 0; i < line.length();) {
+                int cp = line.codePointAt(i), end = i + Character.charCount(cp);
+                if (allowsSoftWrap(text.whiteSpace) && (isPreferredBreakChar(text, line.charAt(i)) || isBreakAllOpportunity(text, cp))) {
+                    int finish = consumesBreakChar(text.whiteSpace, line.charAt(i)) ? i : end;
+                    String segment = line.substring(start, finish);
+                    if (!segment.isEmpty()) {
+                        lines.add(segment);
+                        starts.add(base + start);
+                        width = Math.max(width, measureLine(text, segment));
+                    }
+                    start = end;
+                }
+                i = end;
+            }
+            if (start < line.length() || line.isEmpty()) {
+                String segment = line.substring(start);
+                lines.add(segment);
+                starts.add(base + start);
+                width = Math.max(width, measureLine(text, segment));
+            }
+            base += line.length() + 1;
+        }
+        if (lines.isEmpty()) {
+            lines.add("");
+            starts.add(0);
+        }
+        return new WrappedText(List.copyOf(lines), starts.stream().mapToInt(Integer::intValue).toArray(), width);
+    }
+
+    // Keep intrinsic and constrained measurement separate: flex layout alternates between them.
+    private WrapMemo naturalWrapMemo;
+    private WrapMemo constrainedWrapMemo;
+    private WrapMemo minContentWrapMemo;
+
+    private record WrapMemo(long fontRevision, double wrapWidth, String content, double fontSize,
+                            int fontWeight, boolean oblique, double strokeWidth, String fontFamily,
+                            String whiteSpace, String wordBreak, boolean hyphenBreak, String direction,
+                            double textIndent, double letterSpacing, double lineHeight, WrappedText result) {
+        WrapMemo(Text text, double width, WrappedText result, long revision) {
+            this(revision, width, text.content, text.fontSize, text.fontWeight, text.oblique,
+                    text.strokeWidth, text.fontFamily, text.whiteSpace, text.wordBreak, text.hyphenBreak,
+                    text.direction, text.textIndent, text.letterSpacing, text.lineHeight, result);
+        }
+
+        boolean matches(Text text, double width) {
+            return fontRevision == Font.getMetricsRevision() && wrapWidth == width
+                    && fontSize == text.fontSize && fontWeight == text.fontWeight && oblique == text.oblique
+                    && strokeWidth == text.strokeWidth && hyphenBreak == text.hyphenBreak
+                    && textIndent == text.textIndent && letterSpacing == text.letterSpacing && lineHeight == text.lineHeight
+                    && java.util.Objects.equals(content, text.content)
+                    && java.util.Objects.equals(fontFamily, text.fontFamily)
+                    && java.util.Objects.equals(whiteSpace, text.whiteSpace)
+                    && java.util.Objects.equals(wordBreak, text.wordBreak)
+                    && java.util.Objects.equals(direction, text.direction);
+        }
+    }
+
     public static WrappedText wrap(Text text, double wrapWidth) {
+        if (text == null || (text.content != null && text.content.length() > 8192)) return wrapUncached(text, wrapWidth);
+        boolean minContent = Size.isMinContentMeasurementContext();
+        boolean natural = Size.isNaturalMeasurementContext();
+        WrapMemo memo = minContent ? text.minContentWrapMemo : natural ? text.naturalWrapMemo : text.constrainedWrapMemo;
+        if (memo != null && memo.matches(text, wrapWidth)) return memo.result;
+        long revision = Font.getMetricsRevision();
+        WrappedText result = wrapUncached(text, wrapWidth);
+        memo = new WrapMemo(text, wrapWidth, result, revision);
+        if (minContent) text.minContentWrapMemo = memo;
+        else if (natural) text.naturalWrapMemo = memo;
+        else text.constrainedWrapMemo = memo;
+        return result;
+    }
+
+    private static WrappedText wrapUncached(Text text, double wrapWidth) {
+        if (Size.isMinContentMeasurementContext()) return minContentWrap(text);
         String content = text == null || text.content == null ? "" : text.content;
         List<String> hardLines = splitLines(content);
         List<String> lines = new ArrayList<>();
@@ -1145,6 +1266,50 @@ public class Text {
 
     }
 
+    public record LineBreak(int end, int next) {}
+
+    /** Measures one fragment when successive lines have different available widths. */
+    public static LineBreak firstLine(Text text, String content, int start, double available) {
+        int position = start;
+        int lastBreak = -1;
+        double width = 0;
+        boolean softWrap = allowsSoftWrap(text.whiteSpace) && Double.isFinite(available);
+        while (position < content.length()) {
+            int codePoint = content.codePointAt(position);
+            if (codePoint == '\n') return new LineBreak(position, position + 1);
+            int next = position + Character.charCount(codePoint);
+            if (softWrap) {
+                width += measureLine(text, singleCodePointString(codePoint));
+                boolean consumes = consumesBreakChar(text.whiteSpace, (char) codePoint);
+                if (width > available && consumes && position > start) return new LineBreak(position, next);
+                if (width > available && lastBreak > start) {
+                    int end = lastBreak;
+                    if (consumesBreakChar(text.whiteSpace, content.charAt(end - 1))) end--;
+                    return new LineBreak(end, lastBreak);
+                }
+                if (isPreferredBreakChar(text, (char) codePoint) || isBreakAllOpportunity(text, codePoint)) {
+                    lastBreak = next;
+                    if (width > available) return new LineBreak(consumes ? position : next, next);
+                }
+            }
+            position = next;
+        }
+        return new LineBreak(position, position);
+    }
+
+    public static double minimumFirstLineWidth(Text text, String content, int start) {
+        int end = start;
+        boolean wrap = allowsSoftWrap(text.whiteSpace);
+        while (end < content.length()) {
+            int codePoint = content.codePointAt(end);
+            if (codePoint == '\n' || wrap && consumesBreakChar(text.whiteSpace, (char) codePoint) && end > start) break;
+            end += Character.charCount(codePoint);
+            if (wrap && (isPreferredBreakChar(text, (char) codePoint) || isBreakAllOpportunity(text, codePoint)) && end > start + 1) break;
+            if (wrap && isBreakAllOpportunity(text, codePoint)) break;
+        }
+        return measureLine(text, content.substring(start, end));
+    }
+
     private static boolean isPreferredBreakChar(Text text, char c) {
         String whiteSpace = text == null ? "normal" : text.whiteSpace;
         String wordBreak = text == null ? "normal" : text.wordBreak;
@@ -1153,7 +1318,9 @@ public class Text {
         // CSS normal line breaking permits a break after a visible hyphen.  Keep
         // the character on the preceding line; unlike a collapsed space it is
         // part of the rendered text.
-        return whitespaceBreak || isHyphenBreakOpportunity(c) || isCjkBreakOpportunity(wordBreak, c);
+        boolean allowsHyphenBreak = text == null || text.hyphenBreak;
+        return whitespaceBreak || (allowsHyphenBreak && isHyphenBreakOpportunity(c))
+                || isCjkBreakOpportunity(wordBreak, c);
     }
 
     private static boolean isCjkBreakOpportunity(String wordBreak, char c) {
@@ -1210,6 +1377,17 @@ public class Text {
         if (element == null || text == null || !allowsSoftWrap(text.whiteSpace)) return 0;
         if (element instanceof AbstractText input && !input.isMultiline()) return 0;
         Style style = element.getRawComputedStyle();
+        Double assignedWidth = com.sighs.apricityui.layout.Layout.assignedTextContentWidth(element);
+        if (assignedWidth != null) return Math.max(0, assignedWidth - Math.abs(text.textIndent));
+        if (!Size.isNaturalMeasurementContext()
+                && ("absolute".equals(style.position) || "fixed".equals(style.position))) {
+            Size used = element.getLayout().size.get();
+            if (used != null) {
+                Box usedBox = Box.of(element);
+                return Math.max(0, used.width() - usedBox.getBorderHorizontal() - usedBox.getPaddingHorizontal()
+                        - Math.abs(text.textIndent));
+            }
+        }
         CssLength widthLength = style.widthLength();
         Double explicitWidth = widthLength.numberValue();
         if (explicitWidth == null && Size.isNaturalMeasurementContext()

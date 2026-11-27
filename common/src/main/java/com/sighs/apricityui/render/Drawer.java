@@ -7,10 +7,12 @@ import com.sighs.apricityui.style.Filter;
 import com.sighs.apricityui.style.DynamicRangeLimit;
 import com.sighs.apricityui.style.Interaction;
 import com.sighs.apricityui.layout.Size;
+import com.sighs.apricityui.layout.Table;
 import com.sighs.apricityui.style.Transform;
 import com.sighs.apricityui.style.Transition;
 
 import java.util.*;
+
 import com.sighs.apricityui.style.Style;
 import com.sighs.apricityui.init.Document;
 import com.sighs.apricityui.init.Element;
@@ -23,6 +25,14 @@ public class Drawer {
     public static final int RELAYOUT = 4;
     public static final int HITTEST = 8;
     public static final int COMMIT_LAYOUT = 16;
+    /**
+     * 组内排序：先 z-index，再 translateZ。同值时依赖 List.sort 的稳定性保持插入序——
+     * 分组循环按 DFS 树序插入，因此同值元素按规范的“树序”排列，
+     * 这对跨层级提升进来的元素（domOrder 只在兄弟间有意义）尤其重要。
+     */
+    private static final Comparator<Paintable> PAINTABLE_ORDER = Comparator
+            .comparingInt(Paintable::zValue)
+            .thenComparingDouble(Paintable::translateZ);
 
     public static void flushUpdates(Document document) {
         Set<Element> dirtyElements = document.getDirtyElements();
@@ -32,16 +42,6 @@ public class Drawer {
         Set<Element> reorderRoots = Collections.newSetFromMap(new IdentityHashMap<>());
 
         for (Element e : sortedDirty) {
-            // 如果标记了 RELAYOUT，通常意味着尺寸变化，这往往也会影响绘制顺序或边界
-            if (e.hasDirtyFlag(RELAYOUT)) {
-                e.forEachRoute(element -> element.getRenderer().invalidateLayoutVersion());
-                e.forEachRoute(element -> element.getRenderer().size.clear());
-                e.forEachRoute(element -> element.getRenderer().position.clear());
-                // 布局变化通常需要重绘，但不一定需要重排队列（除非影响了层叠上下文）
-                // 但为了安全起见，布局变动通常触发 REPAINT
-                e.addDirtyFlags(REPAINT);
-            }
-
             if (e.hasDirtyFlag(REORDER)) {
                 // REORDER 通常会同时标记一批同层元素；按层叠上下文去重，避免同一帧重复 rebuild 大子树。
                 Element contextRoot = findNearestStackingContext(e);
@@ -72,9 +72,10 @@ public class Drawer {
         // 同一次构建共享的“已提升”集合：被子作用域跳过的元素记入其中，
         // 递归到它们原本的 DOM 父级时据此跳过，保证每个元素只画一次。
         Set<Element> hoisted = Collections.newSetFromMap(new IdentityHashMap<>());
-        processStackingContext(body, paintList, hoisted);
+        Set<Element> tableBackgrounds = Collections.newSetFromMap(new IdentityHashMap<>());
+        processStackingContext(body, paintList, hoisted, tableBackgrounds);
         for (Element topLayer : collectTopLayerRoots(body)) {
-            processStackingContext(topLayer, paintList, hoisted);
+            processStackingContext(topLayer, paintList, hoisted, tableBackgrounds);
         }
         return paintList;
     }
@@ -146,7 +147,7 @@ public class Drawer {
      * hitTest 也有自己的 mask stack，因此这里保持“只负责顺序”，把“是否可见”交给渲染阶段处理。
      */
     private static void processStackingContext(Element contextRoot, List<RenderNode> paintList,
-                                               Set<Element> hoisted) {
+                                               Set<Element> hoisted, Set<Element> tableBackgrounds) {
         Style rootStyle = contextRoot.getRawComputedStyle();
         if ("none".equals(rootStyle.display)) {
             // CSS display:none should suppress the entire subtree, not just the node itself.
@@ -190,14 +191,17 @@ public class Drawer {
                 // shadow or border. The padding box is the overflow clip edge.
                 paintList.add(new RenderNode.ElementPhaseNode(contextRoot, Base.RenderPhase.BORDER));
                 paintList.add(new RenderNode.MaskPushNode(contextRoot));
-                appendBodyRenderNodes(contextRoot, paintList);
+                appendBodyRenderNodes(contextRoot, paintList, tableBackgrounds);
                 appendForegroundRenderNodes(contextRoot, paintList);
                 paintList.add(new RenderNode.MaskPopNode(contextRoot));
             } else {
-                appendBodyRenderNodes(contextRoot, paintList);
+                appendBodyRenderNodes(contextRoot, paintList, tableBackgrounds);
                 paintList.add(new RenderNode.ElementPhaseNode(contextRoot, Base.RenderPhase.BORDER));
                 appendForegroundRenderNodes(contextRoot, paintList);
             }
+            // CSS outline 画在本元素全部后代之后（Appendix E 的最后一步），且在自身
+            // overflow 裁剪之外——overflow 裁的是内容，不裁元素自己的 outline。
+            paintList.add(new RenderNode.ElementPhaseNode(contextRoot, Base.RenderPhase.OUTLINE));
             if (contextRoot.mayRenderScrollbar()) {
                 paintList.add(new RenderNode.ScrollbarNode(contextRoot));
             }
@@ -278,30 +282,38 @@ public class Drawer {
 
         if (needsMask) {
             if (splitContentForNegativeZ) {
-                paintList.add(new RenderNode.ElementBackgroundNode(contextRoot));
+                if (!tableBackgrounds.contains(contextRoot))
+                    paintList.add(new RenderNode.ElementBackgroundNode(contextRoot));
             }
             paintList.add(new RenderNode.ElementPhaseNode(contextRoot, Base.RenderPhase.BORDER));
             paintList.add(new RenderNode.MaskPushNode(contextRoot));
-            if (!splitContentForNegativeZ) appendBodyRenderNodes(contextRoot, paintList);
+            if (!splitContentForNegativeZ) appendBodyRenderNodes(contextRoot, paintList, tableBackgrounds);
         } else {
             if (splitContentForNegativeZ) {
-                paintList.add(new RenderNode.ElementBackgroundNode(contextRoot));
+                if (!tableBackgrounds.contains(contextRoot))
+                    paintList.add(new RenderNode.ElementBackgroundNode(contextRoot));
             } else {
-                appendBodyRenderNodes(contextRoot, paintList);
+                appendBodyRenderNodes(contextRoot, paintList, tableBackgrounds);
             }
             paintList.add(new RenderNode.ElementPhaseNode(contextRoot, Base.RenderPhase.BORDER));
         }
 
-        for (Paintable p : negativeZ) processStackingContext(p.element, paintList, hoisted);
+        for (Paintable p : negativeZ) processStackingContext(p.element, paintList, hoisted, tableBackgrounds);
         if (splitContentForNegativeZ) {
             appendContentRenderNodes(contextRoot, paintList);
         }
-        for (Element e : normalFlow) processStackingContext(e, paintList, hoisted);
-        for (Paintable p : autoOrZeroContext) processStackingContext(p.element, paintList, hoisted);
-        for (Paintable p : positiveZ) processStackingContext(p.element, paintList, hoisted);
+        if (Table.isStructure(rootStyle.display) && !"table-row".equals(rootStyle.display)) {
+            for (Element e : normalFlow) appendTableBackgrounds(e, paintList, tableBackgrounds);
+        }
+        for (Element e : normalFlow) processStackingContext(e, paintList, hoisted, tableBackgrounds);
+        for (Paintable p : autoOrZeroContext) processStackingContext(p.element, paintList, hoisted, tableBackgrounds);
+        for (Paintable p : positiveZ) processStackingContext(p.element, paintList, hoisted, tableBackgrounds);
         appendForegroundRenderNodes(contextRoot, paintList);
 
         if (needsMask) paintList.add(new RenderNode.MaskPopNode(contextRoot));
+        // CSS outline 画在本元素全部后代之后（Appendix E 的最后一步），且在自身 overflow
+        // 裁剪之外——overflow 裁的是内容，不裁元素自己的 outline。
+        paintList.add(new RenderNode.ElementPhaseNode(contextRoot, Base.RenderPhase.OUTLINE));
         if (contextRoot.mayRenderScrollbar()) {
             paintList.add(new RenderNode.ScrollbarNode(contextRoot));
         }
@@ -310,18 +322,6 @@ public class Drawer {
         if (hasIsolation) paintList.add(new RenderNode.IsolationPopNode(contextRoot));
         if (hasClipPath) paintList.add(new RenderNode.ClipPathPopNode(contextRoot));
         if (hasMaskImage) paintList.add(new RenderNode.MaskImagePopNode(contextRoot));
-    }
-
-    /**
-     * 组内排序：先 z-index，再 translateZ。同值时依赖 List.sort 的稳定性保持插入序——
-     * 分组循环按 DFS 树序插入，因此同值元素按规范的“树序”排列，
-     * 这对跨层级提升进来的元素（domOrder 只在兄弟间有意义）尤其重要。
-     */
-    private static final Comparator<Paintable> PAINTABLE_ORDER = Comparator
-            .comparingInt(Paintable::zValue)
-            .thenComparingDouble(Paintable::translateZ);
-
-    private record Paintable(Element element, int zValue, double translateZ, int domOrder) {
     }
 
     /**
@@ -373,7 +373,20 @@ public class Drawer {
         return !com.sighs.apricityui.style.MaskImage.hasMask(element);
     }
 
-    private static void appendBodyRenderNodes(Element contextRoot, List<RenderNode> paintList) {
+    private static void appendTableBackgrounds(Element element, List<RenderNode> nodes, Set<Element> painted) {
+        Style style = element.getRawComputedStyle();
+        if (!Table.isStructure(style.display) || "table".equals(style.display)
+                || !"static".equals(style.position) || !isTransparentGroupingScope(element, style)) return;
+        // Later row backgrounds must stay behind cells spanning down from earlier rows.
+        if (painted.add(element)) nodes.add(new RenderNode.ElementBackgroundNode(element));
+        for (Element child : element.getRenderChildren()) appendTableBackgrounds(child, nodes, painted);
+    }
+
+    private static void appendBodyRenderNodes(Element contextRoot, List<RenderNode> paintList, Set<Element> tableBackgrounds) {
+        if (tableBackgrounds.contains(contextRoot)) {
+            appendContentRenderNodes(contextRoot, paintList);
+            return;
+        }
         if (contextRoot instanceof BodyRenderNodeProvider provider) {
             List<RenderNode> nodes = provider.createBodyRenderNodes();
             if (nodes != null && !nodes.isEmpty()) {
@@ -432,7 +445,6 @@ public class Drawer {
         return result;
     }
 
-
     private static Element findNearestStackingContext(Element e) {
         Element paintRoot = getDocumentPaintRoot(e == null ? null : e.document);
         if (e == null) return paintRoot;
@@ -487,7 +499,6 @@ public class Drawer {
         return false;
     }
 
-
     private static boolean hasCompositedFilter(Element element, Style style) {
         if (!Filter.isDisabled(style.filter, style.opacity)) return true;
         if (DynamicRangeLimit.isActive(style.dynamicRangeLimit)) return true;
@@ -514,6 +525,7 @@ public class Drawer {
         boolean zIndexedContext = !zIndex.equals("auto")
                 && (!position.equals("static") || isFlexOrGridItem(element));
         return zIndexedContext
+                || "sticky".equals(position)
                 || hasCompositedFilter(element, style)
                 || hasBackdrop
                 || hasMixBlendMode(style)
@@ -528,6 +540,9 @@ public class Drawer {
         if (display == null) return false;
         return display.equals("flex") || display.equals("inline-flex")
                 || display.equals("grid") || display.equals("inline-grid");
+    }
+
+    private record Paintable(Element element, int zValue, double translateZ, int domOrder) {
     }
 
 }

@@ -2,8 +2,10 @@ package com.sighs.apricityui.screen;
 
 import com.sighs.apricityui.client.Client;
 import com.sighs.apricityui.init.Document;
+import com.sighs.apricityui.dev.perf.PageOpenTiming;
 import com.sighs.apricityui.event.Event;
 import com.sighs.apricityui.loader.ClientLoader;
+import com.sighs.apricityui.spi.AuiKeyService;
 import com.sighs.apricityui.spi.AuiServices;
 import com.sighs.apricityui.render.Base;
 import com.sighs.apricityui.render.FrameTimingHud;
@@ -27,29 +29,40 @@ public class ApricityScreen extends Screen implements AuiLinkedScreen {
     private boolean loggedInitState = false;
     private boolean loggedRenderState = false;
 
+    private PageOpenTiming openTiming;
+
     public ApricityScreen(String templatePath) {
         super(Component.empty());
         this.templatePath = templatePath;
+        this.openTiming = PageOpenTiming.start(templatePath, "screen");
     }
 
-    /** Sets whether Minecraft should pause while this screen is open. */
-    public ApricityScreen setPauseGame(boolean pauseGame) {
-        this.pauseGame = pauseGame;
-        return this;
-    }
-
-    /** Sets whether Minecraft's standard screen background should be drawn first. */
-    public ApricityScreen setShowDefaultBackground(boolean showDefaultBackground) {
-        this.showDefaultBackground = showDefaultBackground;
-        return this;
+    private static boolean isControlModifier(int modifiers) {
+        return (modifiers & GLFW.GLFW_MOD_CONTROL) != 0;
     }
 
     public boolean isPauseGame() {
         return pauseGame;
     }
 
+    /**
+     * Sets whether Minecraft should pause while this screen is open.
+     */
+    public ApricityScreen setPauseGame(boolean pauseGame) {
+        this.pauseGame = pauseGame;
+        return this;
+    }
+
     public boolean isShowDefaultBackground() {
         return showDefaultBackground;
+    }
+
+    /**
+     * Sets whether Minecraft's standard screen background should be drawn first.
+     */
+    public ApricityScreen setShowDefaultBackground(boolean showDefaultBackground) {
+        this.showDefaultBackground = showDefaultBackground;
+        return this;
     }
 
     public Document getLinkedDocument() {
@@ -60,12 +73,14 @@ public class ApricityScreen extends Screen implements AuiLinkedScreen {
     protected void init() {
         super.init();
 
-        if (linkedDocument != null) {
-            linkedDocument.remove();
-            linkedDocument = null;
+        // Screen.resize() calls init(); recreating the Document here would turn a
+        // window resize into a full page reload and wipe form state.
+        if (linkedDocument == null || !linkedDocument.isActive()) {
+            linkedDocument = Document.create(templatePath, openTiming);
+            if (linkedDocument == null && openTiming != null) openTiming.finish("screen-create-failed");
+        } else if (openTiming != null) {
+            openTiming.finish("screen-reused-document");
         }
-
-        linkedDocument = Document.create(templatePath);
         if (linkedDocument != null) {
             linkedDocument.applyViewport(false);
         }
@@ -116,7 +131,8 @@ public class ApricityScreen extends Screen implements AuiLinkedScreen {
                 try {
                     PoseMatrices.scale2D(guiGraphics.pose(), viewport.renderScale(), viewport.renderScale());
                     Mask.pushScissorScale(viewport.scissorScale(), guiGraphics.pose());
-                    Base.drawScreenDocument(guiGraphics.pose(), linkedDocument);
+                    Base.drawScreenDocument(guiGraphics.pose(), linkedDocument,
+                            com.sighs.apricityui.render.ScreenDocumentCache.attach(linkedDocument));
                 } finally {
                     Mask.popScissorScale();
                     guiGraphics.pose().popPose();
@@ -126,7 +142,7 @@ public class ApricityScreen extends Screen implements AuiLinkedScreen {
             // Draw the resource preview right after its owning document so the
             // previewed HTML stays below the DevTools tool document (and toasts).
             com.sighs.apricityui.dev.resource.ResourcePreviewDialog.draw(guiGraphics.pose(), linkedDocument);
-            Client.drawPersistentScreenDocuments(guiGraphics, linkedDocument);
+            Base.drawPersistentScreenDocuments(guiGraphics.pose(), linkedDocument);
             guiGraphics.flush();
             Cursor.drawPseudoCursor(guiGraphics.pose());
             guiGraphics.flush();
@@ -146,7 +162,7 @@ public class ApricityScreen extends Screen implements AuiLinkedScreen {
 
     @Override
     public boolean keyPressed(int keyCode, int scanCode, int modifiers) {
-        if (keyCode == AuiServices.keys().reloadKey()) {
+        if (AuiKeyService.matches(keyCode, AuiServices.keys().reloadKey())) {
             ClientLoader.reload();
             return true;
         }
@@ -181,6 +197,7 @@ public class ApricityScreen extends Screen implements AuiLinkedScreen {
     public void removed() {
         if (linkedDocument != null) {
             linkedDocument.remove();
+            linkedDocument = null;
         }
         Size.clearViewportOverride();
         super.removed();
@@ -201,9 +218,5 @@ public class ApricityScreen extends Screen implements AuiLinkedScreen {
 
     private ApricityViewport currentViewport() {
         return linkedDocument == null ? new ApricityViewport(1, 1, 1.0f, 1.0d) : linkedDocument.getViewport();
-    }
-
-    private static boolean isControlModifier(int modifiers) {
-        return (modifiers & GLFW.GLFW_MOD_CONTROL) != 0;
     }
 }

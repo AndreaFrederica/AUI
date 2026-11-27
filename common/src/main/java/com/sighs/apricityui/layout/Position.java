@@ -18,14 +18,10 @@ public class Position {
         this.y = y;
     }
 
-    public Position add(Position position) {
-        return new Position(x + position.x, y + position.y);
-    }
-
     public static Position getOffset(Element element) {
         if (element == null) return ZERO;
 
-        Position cache = element.getRenderer().position.get();
+        Position cache = element.getLayout().position.get();
         if (cache != null) return cache;
 
         Style style = element.getComputedStyle();
@@ -48,25 +44,16 @@ public class Position {
             resultPosition = resolveOutOfFlowOffset(element, positionType);
         }
 
-        element.getRenderer().position.set(resultPosition);
+        element.getLayout().position.set(resultPosition);
         return resultPosition;
     }
 
+    /** Visual border-box origin in document coordinates, before CSS transforms. */
     public static Position of(Element element) {
         if (element == null) return ZERO;
-        double x = 0.0;
-        double y = 0.0;
-        for (Element e : element.getRouteArray()) {
-            Position offset = Position.getOffset(e);
-            x += offset.x;
-            y += offset.y;
-            if (!e.uuid.equals(element.uuid)) {
-                x -= e.getScrollLeft();
-                y -= e.getScrollTop();
-            }
-            if ("fixed".equals(e.getComputedStyle().position)) break;
-        }
-        return x == 0.0 && y == 0.0 ? ZERO : new Position(x, y);
+        Position origin = forRender(element);
+        Box box = Box.of(element);
+        return new Position(origin.x + box.getMarginLeft(), origin.y + box.getMarginTop());
     }
 
     /**
@@ -77,6 +64,10 @@ public class Position {
      * must not leak back into the paint position.
      */
     public static Position forRender(Element element) {
+        return forRender(element, null, false);
+    }
+
+    static Position forRender(Element element, java.util.IdentityHashMap<Element, Position> sticky, boolean skipOwnSticky) {
         if (element == null) return ZERO;
         double x = 0.0;
         double y = 0.0;
@@ -99,6 +90,17 @@ public class Position {
                 }
                 x -= e.getScrollLeft();
                 y -= e.getScrollTop();
+            }
+            if ((!skippingMargins || e == resumeMarginAt) && !(skipOwnSticky && e == element)
+                    && StickyPosition.hasInsets(e)) {
+                if (sticky == null) sticky = new java.util.IdentityHashMap<>();
+                Position shift = sticky.get(e);
+                if (shift == null) {
+                    shift = StickyPosition.offset(e, sticky);
+                    sticky.put(e, shift);
+                }
+                x += shift.x;
+                y += shift.y;
             }
             if ("absolute".equals(e.getComputedStyle().position)) {
                 skippingMargins = true;
@@ -132,7 +134,7 @@ public class Position {
         return 0;
     }
 
-    private static boolean isSet(String value) {
+    static boolean isSet(String value) {
         if (value == null || value.isBlank()) return false;
         String normalized = value.trim().toLowerCase();
         return !"unset".equals(normalized) && !"auto".equals(normalized);
@@ -203,6 +205,13 @@ public class Position {
                 Position shift = containingBlockShift(element, containingBlock);
                 originX = cbBox.getBorderLeft() + shift.x;
                 originY = cbBox.getBorderTop() + shift.y;
+                Layout.ContainingArea area = Layout.containingArea(element, containingBlock);
+                if (area != null) {
+                    containerW = area.width();
+                    containerH = area.height();
+                    originX = area.x() + shift.x;
+                    originY = area.y() + shift.y;
+                }
             } else {
                 // 初始包含块：文档视口（随内容滚动，区别于 fixed）
                 Size window = viewportContainingBlockSize(element);
@@ -218,6 +227,12 @@ public class Position {
         boolean hasRight = isSet(style.right);
         boolean hasTop = isSet(style.top);
         boolean hasBottom = isSet(style.bottom);
+        Element parent = element.parentElement;
+        if (!hasLeft && !hasRight && !hasTop && !hasBottom && parent != null
+                && !parent.getComputedStyle().isFlexDisplay() && !parent.getComputedStyle().isGridDisplay()
+                && "block".equals(style.display)) {
+            return NormalFlow.computeStaticBlockPosition(element);
+        }
 
         double x = 0;
         double y = 0;
@@ -244,7 +259,7 @@ public class Position {
      * the thread-local global window size here is incorrect when layout is
      * queried from a keyboard/default-action callback without a document
      * context (for example, a browser-sized DevTools document).
-     *
+     * <p>
      * 初始包含块（无 positioned 祖先的 absolute）使用同一视口尺寸，
      * 区别仅在于初始包含块随内容滚动。
      */
@@ -260,6 +275,10 @@ public class Position {
             if (viewport.width() > 1 && viewport.height() > 1) return viewport;
         }
         return Size.getWindowSize();
+    }
+
+    public Position add(Position position) {
+        return new Position(x + position.x, y + position.y);
     }
 
     @Override

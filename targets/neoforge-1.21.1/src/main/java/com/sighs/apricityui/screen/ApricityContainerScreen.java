@@ -33,13 +33,17 @@ import java.util.List;
 import com.sighs.apricityui.client.Client;
 import com.sighs.apricityui.viewport.ApricityViewport;
 
-public class ApricityContainerScreen extends AbstractContainerScreen<ApricityContainerMenu> implements AuiLinkedScreen {
+public class ApricityContainerScreen<M extends ApricityContainerMenu> extends AbstractContainerScreen<M> implements AuiLinkedScreen {
+    private final List<RenderNode.ItemNode> floatingItemNodes = new ArrayList<>();
     private Document linkedDocument;
     private SlotDataBinder slotBinder;
-    private final List<RenderNode.ItemNode> floatingItemNodes = new ArrayList<>();
 
-    public ApricityContainerScreen(ApricityContainerMenu menu, Inventory inventory, Component title) {
+    public ApricityContainerScreen(M menu, Inventory inventory, Component title) {
         super(menu, inventory, title);
+    }
+
+    private static boolean isControlModifier(int modifiers) {
+        return (modifiers & GLFW.GLFW_MOD_CONTROL) != 0;
     }
 
     public Document getLinkedDocument() {
@@ -125,22 +129,23 @@ public class ApricityContainerScreen extends AbstractContainerScreen<ApricityCon
         imageHeight = height;
         super.init();
 
-        if (linkedDocument != null) {
-            linkedDocument.remove();
-            linkedDocument = null;
+        // Screen.resize() calls init(); keep the live Document so resizing does not
+        // rebuild the page. A closed/disposed Document is recreated normally.
+        if (linkedDocument == null || !linkedDocument.isActive()) {
+            linkedDocument = Document.create(menu.getTemplatePath());
+            if (linkedDocument == null) return;
+            if (slotBinder != null) {
+                slotBinder.clear();
+                slotBinder = null;
+            }
         }
-        if (slotBinder != null) {
-            slotBinder.clear();
-            slotBinder = null;
-        }
-
-        linkedDocument = Document.create(menu.getTemplatePath());
         if (linkedDocument == null) return;
+        if (slotBinder == null) {
+            slotBinder = new SlotDataBinder(menu);
+            slotBinder.setDisplayStateResolver(this::resolveMenuSlotDisplayState);
+            slotBinder.bindSlotsFromDocument(linkedDocument);
+        }
         linkedDocument.applyViewport(false);
-
-        slotBinder = new SlotDataBinder(menu);
-        slotBinder.setDisplayStateResolver(this::resolveMenuSlotDisplayState);
-        slotBinder.bindSlotsFromDocument(linkedDocument);
         slotBinder.syncAllSlotPositions(linkedDocument, leftPos, topPos, true);
     }
 
@@ -201,7 +206,7 @@ public class ApricityContainerScreen extends AbstractContainerScreen<ApricityCon
             drawLinkedDocument(guiGraphics);
             com.sighs.apricityui.dev.resource.ResourcePreviewDialog.draw(guiGraphics.pose(), linkedDocument);
             drawSlotHoverTooltipByElement(guiGraphics, mouseX, mouseY);
-            Client.drawPersistentScreenDocuments(guiGraphics, linkedDocument);
+            Base.drawPersistentScreenDocuments(guiGraphics.pose(), linkedDocument);
             guiGraphics.flush();
             Cursor.drawPseudoCursor(guiGraphics.pose());
             guiGraphics.flush();
@@ -303,7 +308,7 @@ public class ApricityContainerScreen extends AbstractContainerScreen<ApricityCon
             Item item = SlotContentRules.getDisplayItem(slot);
             ItemStack stack = item == null ? ItemStack.EMPTY : item.getTooltipStack();
             if (stack.isEmpty()) continue;
-            item.renderTooltip(guiGraphics, mouseX, mouseY);
+            Base.drawFlatTooltip(guiGraphics.pose(), () -> item.renderTooltip(guiGraphics, mouseX, mouseY));
             return;
         }
 
@@ -318,7 +323,7 @@ public class ApricityContainerScreen extends AbstractContainerScreen<ApricityCon
 
             ItemStack stack = minecraftElement.getTooltipStack();
             if (stack.isEmpty()) continue;
-            minecraftElement.renderTooltip(guiGraphics, mouseX, mouseY);
+            Base.drawFlatTooltip(guiGraphics.pose(), () -> minecraftElement.renderTooltip(guiGraphics, mouseX, mouseY));
             return;
         }
 
@@ -330,7 +335,7 @@ public class ApricityContainerScreen extends AbstractContainerScreen<ApricityCon
             if (boundElement != null && boundElement.canShowItemTooltip() && boundItem != null) {
                 ItemStack stack = boundItem.getTooltipStack();
                 if (!stack.isEmpty()) {
-                    boundItem.renderTooltip(guiGraphics, mouseX, mouseY);
+                    Base.drawFlatTooltip(guiGraphics.pose(), () -> boundItem.renderTooltip(guiGraphics, mouseX, mouseY));
                     return;
                 }
             }
@@ -338,7 +343,7 @@ public class ApricityContainerScreen extends AbstractContainerScreen<ApricityCon
             if (boundElement == null) {
                 ItemStack stack = hoveredSlot.getItem();
                 if (!stack.isEmpty()) {
-                    guiGraphics.renderTooltip(font, stack, mouseX, mouseY);
+                    Base.drawFlatTooltip(guiGraphics.pose(), () -> guiGraphics.renderTooltip(font, stack, mouseX, mouseY));
                 }
             }
         }
@@ -366,9 +371,11 @@ public class ApricityContainerScreen extends AbstractContainerScreen<ApricityCon
     public void removed() {
         if (linkedDocument != null) {
             linkedDocument.remove();
+            linkedDocument = null;
         }
         if (slotBinder != null) {
             slotBinder.clear();
+            slotBinder = null;
         }
         Size.clearViewportOverride();
         super.removed();
@@ -388,9 +395,5 @@ public class ApricityContainerScreen extends AbstractContainerScreen<ApricityCon
             slotBinder.syncAllSlotPositions(linkedDocument, leftPos, topPos, true);
         }
         return true;
-    }
-
-    private static boolean isControlModifier(int modifiers) {
-        return (modifiers & GLFW.GLFW_MOD_CONTROL) != 0;
     }
 }

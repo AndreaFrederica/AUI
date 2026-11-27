@@ -12,6 +12,7 @@ import com.sighs.apricityui.element.RichText;
 import com.sighs.apricityui.element.Select;
 import com.sighs.apricityui.event.KeyEvent;
 import com.sighs.apricityui.event.MouseEvent;
+import com.sighs.apricityui.spi.AuiKeyService;
 import com.sighs.apricityui.spi.AuiServices;
 import com.sighs.apricityui.loader.ClientLoader;
 import com.sighs.apricityui.layout.Position;
@@ -25,15 +26,17 @@ import java.util.ArrayList;
 import java.util.List;
 
 public class Operation {
+    private static final long KEY_DEDUP_WINDOW_NS = 5_000_000L; // 5ms
     public static Position cachedMousePosition = null;
     private static int mouseButtons = 0;
-    private static final long KEY_DEDUP_WINDOW_NS = 5_000_000L; // 5ms
     private static long lastKeyEventTimeNs = 0L;
     private static int lastKeyCode = -1;
     private static int lastScanCode = -1;
     private static int lastAction = -1;
     private static int lastModifiers = -1;
     private static boolean lastDevToolsInspectConsumed;
+    // 应用内富文本剪贴板：系统剪贴板只有纯文本（GLFW），富文本 HTML 走内存。
+    private static String internalClipboardHtml = null;
 
     public static boolean onMouseDown() {
         return onMouseDown(-1);
@@ -70,7 +73,9 @@ public class Operation {
         return event.isNativeConsumed();
     }
 
-    /** Returns whether the most recent mouse press/release was consumed by DevTools picking. */
+    /**
+     * Returns whether the most recent mouse press/release was consumed by DevTools picking.
+     */
     public static boolean wasDevToolsInspectConsumed() {
         return lastDevToolsInspectConsumed;
     }
@@ -323,7 +328,7 @@ public class Operation {
                                 Event.tiggerEvent(clipboard);
                                 if (!clipboard.defaultPrevented) {
                                     if (!selectedText.isEmpty()) setClipboardText(selectedText);
-                                    textElement.replaceSelection("");
+                                    textElement.replaceSelection("", "deleteByCut");
                                     documentCanceled[0] = true;
                                     return;
                                 }
@@ -337,7 +342,7 @@ public class Operation {
                                 Event.markTrustedFromCurrentDispatch(clipboard);
                                 Event.tiggerEvent(clipboard);
                                 if (!clipboard.defaultPrevented) {
-                                    textElement.insertText(getClipboardText());
+                                    textElement.insertText(getClipboardText(), "insertFromPaste");
                                     documentCanceled[0] = true;
                                     return;
                                 }
@@ -483,15 +488,17 @@ public class Operation {
     }
 
     private static boolean handleFrameworkShortcut(int key) {
-        if (key == AuiServices.keys().devToolsKey()) {
+        // 未绑定的快捷键（-1）不能和未知按键（同样可能是 -1）匹配，否则未知按键会
+        // 误触发所有未绑定快捷键。
+        if (AuiKeyService.matches(key, AuiServices.keys().devToolsKey())) {
             DevTools.toggle();
             return true;
         }
-        if (key == AuiServices.keys().resourceManagerKey()) {
+        if (AuiKeyService.matches(key, AuiServices.keys().resourceManagerKey())) {
             ResourceManager.toggle();
             return true;
         }
-        if (key == AuiServices.keys().reloadKey()) {
+        if (AuiKeyService.matches(key, AuiServices.keys().reloadKey())) {
             ClientLoader.reload();
             return true;
         }
@@ -559,9 +566,6 @@ public class Operation {
     public static void setClipboardText(String text) {
         Base.setClipboardText(text);
     }
-
-    // 应用内富文本剪贴板：系统剪贴板只有纯文本（GLFW），富文本 HTML 走内存。
-    private static String internalClipboardHtml = null;
 
     public static String getInternalClipboardHtml() {
         return internalClipboardHtml;

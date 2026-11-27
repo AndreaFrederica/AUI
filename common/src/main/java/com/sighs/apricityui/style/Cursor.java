@@ -19,11 +19,11 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+
 import com.sighs.apricityui.task.AbstractAsyncHandler;
 import com.sighs.apricityui.parser.CSS;
 
 public class Cursor {
-    private static final float PSEUDO_CURSOR_Z = 1000.0F;
     /**
      * GLFW 的「西北-东南双向箭头」标准光标。
      *
@@ -115,7 +115,7 @@ public class Cursor {
         for (Document document : documents) {
             if (document.inWorld || document.isManuallyRendered()) continue;
 
-            Element target = document.hitTest(document.screenToDocumentPosition(mousePosition));
+            Element target = document.hitTestIfComplete(document.screenToDocumentPosition(mousePosition));
             if (target == null || target == document.body) continue;
 
             applyCssCursor(document.getPath(), resolveCssCursor(target, document.screenToDocumentPosition(mousePosition)));
@@ -148,7 +148,9 @@ public class Cursor {
         return fallback;
     }
 
-    /** 悬停处是否应按文本光标（I 形）处理：输入控件，或命中点落在可选文本的行盒上。 */
+    /**
+     * 悬停处是否应按文本光标（I 形）处理：输入控件，或命中点落在可选文本的行盒上。
+     */
     private static boolean isTextCursorTarget(Element target, Position mousePosition) {
         if (target == null || mousePosition == null) return false;
         if (target instanceof com.sighs.apricityui.element.AbstractText) return true;
@@ -162,7 +164,9 @@ public class Cursor {
                 && com.sighs.apricityui.behavior.TextSelection.isPositionOverSelectableText(unit, mousePosition.x, mousePosition.y);
     }
 
-    /** Flushes and draws the pseudo cursor. Loaders call this from their GUI render pass. */
+    /**
+     * Flushes and draws the pseudo cursor. Loaders call this from their GUI render pass.
+     */
     public static void drawPseudoCursor(PoseStack poseStack) {
         if (poseStack == null || pseudoCursorSpec == null) return;
 
@@ -192,13 +196,9 @@ public class Cursor {
         float drawX = (float) mouse.x - drawHotspotX;
         float drawY = (float) mouse.y - drawHotspotY;
 
-        poseStack.pushPose();
         Base.commitDraws();
-        Base.resolveOffset(poseStack);
-        poseStack.translate(0.0D, 0.0D, PSEUDO_CURSOR_Z);
         ImageDrawer.drawOverlay(poseStack, AuiServices.resources().locationOf(texture.getKey()), drawX, drawY, width, height, false);
         ImageDrawer.flushBatch();
-        poseStack.popPose();
     }
 
     private static void enablePseudoCursor(CursorUrlSpec spec) {

@@ -13,7 +13,6 @@ import com.sighs.apricityui.layout.Position;
 import com.sighs.apricityui.layout.Size;
 import com.sighs.apricityui.loader.ClientLoader;
 import com.sighs.apricityui.render.Base;
-import com.sighs.apricityui.render.DocumentLayerOrder;
 import com.sighs.apricityui.render.FrameTimingHud;
 import com.sighs.apricityui.render.Operation;
 import com.sighs.apricityui.screen.ApricityContainerScreen;
@@ -36,7 +35,9 @@ import org.lwjgl.glfw.GLFW;
 
 import java.util.ArrayList;
 
-/** Shared client facade used by common rendering code. */
+/**
+ * Shared client facade used by common rendering code.
+ */
 public final class Client {
     private static int lastWindowWidth = -1;
     private static int lastWindowHeight = -1;
@@ -44,7 +45,8 @@ public final class Client {
     private static int lastFramebufferHeight = -1;
     private static double lastGuiScale = -1;
 
-    private Client() { }
+    private Client() {
+    }
 
     public static void tick() {
         Minecraft minecraft = Minecraft.getInstance();
@@ -66,7 +68,8 @@ public final class Client {
             lastFramebufferWidth = framebufferWidth;
             lastFramebufferHeight = framebufferHeight;
             lastGuiScale = guiScale;
-            for (Document document : Document.getAll()) if (document != null && !document.isDisposed()) document.applyViewport(true);
+            for (Document document : Document.getAll())
+                if (document != null && !document.isDisposed()) document.applyViewport(true);
             com.sighs.apricityui.init.Window.window.fireResizeEvent();
         }
     }
@@ -75,13 +78,13 @@ public final class Client {
         // 渲染帧仅作轮询载具：60Hz 固定节拍由 MouseMoveEngine 调度，未到期零成本返回。
         MouseMoveEngine.poll(Client::getMousePosition);
         Minecraft minecraft = Minecraft.getInstance();
-        if (minecraft.screen instanceof ApricityContainerScreen || minecraft.screen instanceof ApricityScreen) return;
+        if (minecraft.screen instanceof ApricityContainerScreen<?> || minecraft.screen instanceof ApricityScreen) return;
         Position mousePosition = getMousePosition();
         Tooltip.moveActiveFromScreen(mousePosition);
         DevTools.handleInspectMouseMove(mousePosition);
         FrameTimingHud.beginFrame();
         try {
-            drawPersistentScreenDocuments(graphics);
+            Base.drawPersistentScreenDocuments(graphics.pose(), null);
             graphics.flush();
             Cursor.drawPseudoCursor(graphics.pose());
             graphics.flush();
@@ -102,9 +105,9 @@ public final class Client {
         DevTools.handleInspectMouseMove(mousePosition);
         FrameTimingHud.beginFrame();
         try {
-            for (Document document : DocumentLayerOrder.backToFront(Document.getAll())) {
-                if (document == null || document.inWorld || document.isManuallyRendered()) continue;
-                Base.drawOverlayDocument(graphics.pose(), document);
+            Base.FlatLayerPlan flatLayers = Base.planFlatLayers();
+            for (Document document : flatLayers.orderedDocuments()) {
+                Base.drawOverlayDocument(graphics.pose(), document, flatLayers.baseZOf(document));
                 ResourcePreviewDialog.draw(graphics.pose(), document);
             }
             graphics.flush();
@@ -116,19 +119,9 @@ public final class Client {
         }
     }
 
-    public static void drawPersistentScreenDocuments(GuiGraphics graphics) { drawPersistentScreenDocuments(graphics, null); }
-
-    public static void drawPersistentScreenDocuments(GuiGraphics graphics, Document excludedDocument) {
-        if (graphics == null) return;
-        for (Document document : DocumentLayerOrder.backToFront(Document.getAll())) {
-            if (document == null || document == excludedDocument || document.inWorld || document.isManuallyRendered() || !document.isReloadPersistent()) continue;
-            Base.drawOverlayDocument(graphics.pose(), document);
-            ResourcePreviewDialog.draw(graphics.pose(), document);
-        }
-    }
-
-
-    /** Dispatches a native keyboard event to the common AUI input pipeline. */
+    /**
+     * Dispatches a native keyboard event to the common AUI input pipeline.
+     */
     public static boolean handleKeyInput(int key, int scanCode, int action, int modifiers) {
         boolean screenEvent = Minecraft.getInstance().screen != null;
         return Operation.handleKeyInput(
@@ -143,7 +136,9 @@ public final class Client {
         );
     }
 
-    /** Dispatches a native mouse button event and reports whether Minecraft should ignore it. */
+    /**
+     * Dispatches a native mouse button event and reports whether Minecraft should ignore it.
+     */
     public static boolean handleMouseButton(int button, int action) {
         boolean nativeConsumed = false;
         if (action == GLFW.GLFW_PRESS) nativeConsumed = Operation.onMouseDown(button);
@@ -166,7 +161,9 @@ public final class Client {
         return nativeConsumed || CursorReleaseController.isActive();
     }
 
-    /** Dispatches a native scroll event and reports whether Minecraft should ignore it. */
+    /**
+     * Dispatches a native scroll event and reports whether Minecraft should ignore it.
+     */
     public static boolean handleMouseScroll(double delta) {
         boolean nativeConsumed = Operation.scroll(delta);
         if (Minecraft.getInstance().screen != null) return nativeConsumed;
@@ -194,7 +191,8 @@ public final class Client {
 
     public static Position getMousePositionForWorldInteraction() {
         Minecraft minecraft = Minecraft.getInstance();
-        if (minecraft.mouseHandler.isMouseGrabbed()) return new Position(getWindow().getGuiScaledWidth() / 2d, getWindow().getGuiScaledHeight() / 2d);
+        if (minecraft.mouseHandler.isMouseGrabbed())
+            return new Position(getWindow().getGuiScaledWidth() / 2d, getWindow().getGuiScaledHeight() / 2d);
         return getMousePosition();
     }
 
@@ -222,11 +220,27 @@ public final class Client {
         }
     }
 
-    public static Window getWindow() { return Minecraft.getInstance().getWindow(); }
-    public static Size getWindowSize() { Window window = getWindow(); return new Size(window.getGuiScaledWidth(), window.getGuiScaledHeight()); }
-    public static int getDefaultFontWidth(String text) { return getDefaultFontWidth(text, false, false, 0); }
-    public static int getDefaultFontWidth(String text, boolean bold) { return getDefaultFontWidth(text, bold, false, 0); }
-    public static int getDefaultFontWidth(String text, boolean bold, boolean oblique) { return getDefaultFontWidth(text, bold, oblique, 0); }
+    public static Window getWindow() {
+        return Minecraft.getInstance().getWindow();
+    }
+
+    public static Size getWindowSize() {
+        Window window = getWindow();
+        return new Size(window.getGuiScaledWidth(), window.getGuiScaledHeight());
+    }
+
+    public static int getDefaultFontWidth(String text) {
+        return getDefaultFontWidth(text, false, false, 0);
+    }
+
+    public static int getDefaultFontWidth(String text, boolean bold) {
+        return getDefaultFontWidth(text, bold, false, 0);
+    }
+
+    public static int getDefaultFontWidth(String text, boolean bold, boolean oblique) {
+        return getDefaultFontWidth(text, bold, oblique, 0);
+    }
+
     public static int getDefaultFontWidth(String text, boolean bold, boolean oblique, double strokeWidth) {
         Minecraft minecraft = Minecraft.getInstance();
         if (minecraft.font == null) return 0;
@@ -251,7 +265,9 @@ public final class Client {
         pose.popPose();
     }
 
-    public static void drawDefaultFont(PoseStack pose, Text text, Position position) { drawDefaultFont(pose, text, text.content, position); }
+    public static void drawDefaultFont(PoseStack pose, Text text, Position position) {
+        drawDefaultFont(pose, text, text.content, position);
+    }
 
     public static void drawFrameTimingHud(GuiGraphics graphics) {
         if (graphics == null || !FrameTimingHud.isEnabled()) return;

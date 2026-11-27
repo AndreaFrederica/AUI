@@ -28,12 +28,22 @@ import dev.latvian.mods.rhino.type.TypeInfo;
  * 顶层变量共享；需要跨脚本共享的数据走 Java / KubeJS API。</p>
  *
  * <p>Rhino / KubeJS 是可选依赖：本类引用它们的类型，只能由
- * {@link KubeJSSupport#loaded()} 放行之后的代码路径加载。</p>
+ * {@link ScriptRuntimeSupport#backend()} 判定为
+ * {@link ScriptRuntimeSupport.Backend#KUBEJS} 之后的代码路径加载。</p>
  */
 public final class AuiScriptContextFactory extends KubeJSContextFactory {
 
     public AuiScriptContextFactory(ScriptManager manager) {
         super(manager);
+    }
+
+    /**
+     * {@code String}/{@code Number}/{@code Boolean} 就是 JS 的基本类型，原样返回才是浏览器
+     * 语义（等同于老 Rhino 的 {@code WrapFactory.setJavaPrimitiveWrap(false)}）。{@code char}
+     * 不在这里处理：Rhino 自己把它转成数字，跟着它的既有行为走。
+     */
+    private static boolean isJsPrimitive(Object value) {
+        return value instanceof String || value instanceof Number || value instanceof Boolean;
     }
 
     @Override
@@ -60,14 +70,5 @@ public final class AuiScriptContextFactory extends KubeJSContextFactory {
         public Object wrapAny(Scriptable scope, Object value) {
             return isJsPrimitive(value) ? value : super.wrapAny(scope, value);
         }
-    }
-
-    /**
-     * {@code String}/{@code Number}/{@code Boolean} 就是 JS 的基本类型，原样返回才是浏览器
-     * 语义（等同于老 Rhino 的 {@code WrapFactory.setJavaPrimitiveWrap(false)}）。{@code char}
-     * 不在这里处理：Rhino 自己把它转成数字，跟着它的既有行为走。
-     */
-    private static boolean isJsPrimitive(Object value) {
-        return value instanceof String || value instanceof Number || value instanceof Boolean;
     }
 }

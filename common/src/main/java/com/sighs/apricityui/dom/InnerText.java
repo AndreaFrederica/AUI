@@ -11,10 +11,12 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
 
-/** Layout-aware implementation of the HTMLElement innerText getter and setter. */
+/**
+ * Layout-aware implementation of the HTMLElement innerText getter and setter.
+ */
 public final class InnerText {
     private static final java.util.Set<String> REPLACED_CONTENT_TAGS = java.util.Set.of(
-            "INPUT", "TEXTAREA", "IFRAME", "AUDIO", "VIDEO", "CANVAS", "OBJECT", "IMG", "IMAGE"
+            "INPUT", "TEXTAREA", "IFRAME", "AUDIO", "VIDEO", "CANVAS", "OBJECT", "IMG", "IMAGE", "MODEL"
     );
 
     private InnerText() {
@@ -291,9 +293,7 @@ public final class InnerText {
         String declared = declaredDisplay(element);
         if (declared != null) {
             String normalized = declared.trim().toLowerCase(Locale.ROOT);
-            if (normalized.equals("table") || normalized.equals("inline-table")
-                    || normalized.equals("table-row") || normalized.equals("table-cell")
-                    || normalized.equals("table-caption") || normalized.equals("contents")) {
+            if (normalized.equals("inline-table") || normalized.equals("table-caption") || normalized.equals("contents")) {
                 return normalized;
             }
             String computed = element.getComputedStyle().display;
@@ -301,9 +301,6 @@ public final class InnerText {
         }
         String tag = normalizedTag(element);
         return switch (tag) {
-            case "TABLE" -> "table";
-            case "TR" -> "table-row";
-            case "TD", "TH" -> "table-cell";
             case "CAPTION" -> "table-caption";
             default -> computedDisplay(element);
         };
@@ -357,6 +354,10 @@ public final class InnerText {
         private boolean preserveNextLeadingSpace;
         private boolean lineBoundary = true;
         private int requiredBreaks;
+
+        private static boolean isCollapsibleSpace(char value) {
+            return value == ' ' || value == '\t' || value == '\f' || value == '\u000B';
+        }
 
         void text(String raw, String whiteSpace, String transform, String language) {
             if (raw == null || raw.isEmpty()) return;
@@ -470,10 +471,6 @@ public final class InnerText {
             requiredBreaks = 0;
             lineBoundary = true;
             preserveNextLeadingSpace = false;
-        }
-
-        private static boolean isCollapsibleSpace(char value) {
-            return value == ' ' || value == '\t' || value == '\f' || value == '\u000B';
         }
 
     }

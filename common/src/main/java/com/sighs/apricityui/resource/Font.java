@@ -57,19 +57,6 @@ public class Font {
     private static final ThreadLocal<CodepointScratch> CODE_POINT_SCRATCH =
             ThreadLocal.withInitial(CodepointScratch::new);
 
-    private static final class CodepointScratch {
-        String chainKey;
-        int styleBits;
-        long revision = Long.MIN_VALUE;
-        final HashMap<Integer, Integer> fontIndexByCodePoint = new HashMap<>();
-
-        boolean matches(String chainKey, int styleBits, long revision) {
-            return this.revision == revision
-                    && this.styleBits == styleBits
-                    && Objects.equals(this.chainKey, chainKey);
-        }
-    }
-
     static {
         // 默认把一个系统字体注册为 fallback
         FONTS.put(DEFAULT_KEY, new java.awt.Font("Microsoft YaHei", java.awt.Font.PLAIN, (int) BASE_FONT_SIZE));
@@ -81,14 +68,44 @@ public class Font {
             return false;
         }
         try {
-            java.awt.Font base = java.awt.Font.createFont(java.awt.Font.TRUETYPE_FONT, stream);
-            java.awt.Font derived = base.deriveFont(java.awt.Font.PLAIN, BASE_FONT_SIZE);
-            registerResolvedFont(key, derived);
+            registerDecodedFont(key, decodeBaseFont(stream.readAllBytes()));
             return true;
         } catch (FontFormatException | IOException e) {
             ApricityUI.LOGGER.error("[AUI Font] failed to decode font family={}", key, e);
             return false;
         }
+    }
+
+    /**
+     * Decodes font bytes into a base-size AWT font without touching any global font state.
+     * Safe on a worker thread; the caller publishes the result with
+     * {@link #registerDecodedFont(String, java.awt.Font)} on the main thread.
+     */
+    public static java.awt.Font decodeBaseFont(byte[] bytes) throws FontFormatException, IOException {
+        if (bytes == null || bytes.length == 0) throw new FontFormatException("empty font resource");
+        java.awt.Font base = java.awt.Font.createFont(java.awt.Font.TRUETYPE_FONT, new java.io.ByteArrayInputStream(bytes));
+        return base.deriveFont(java.awt.Font.PLAIN, BASE_FONT_SIZE);
+    }
+
+    /**
+     * Outcome of publishing a decoded font. {@code replaced} is the previous font mapped to the
+     * family (null when the family was new), so the caller can drop glyphs built from it instead
+     * of clearing the whole cache. {@code changed} is false when the mapping is already identical.
+     */
+    public record Registration(java.awt.Font replaced, boolean changed) {
+        static final Registration UNCHANGED = new Registration(null, false);
+    }
+
+    /**
+     * Publishes an already decoded font under {@code key}. Must run on the main thread.
+     */
+    public static Registration registerDecodedFont(String key, java.awt.Font decoded) {
+        String cleanKey = cleanFamilyName(key);
+        if (cleanKey.isEmpty() || decoded == null) return Registration.UNCHANGED;
+        java.awt.Font previous = FONTS.get(cleanKey);
+        if (previous == decoded) return new Registration(previous, false);
+        registerResolvedFont(cleanKey, decoded);
+        return new Registration(previous, true);
     }
 
     public static boolean registerFont(String key, File fontFile) {
@@ -98,8 +115,7 @@ public class Font {
         }
         try {
             java.awt.Font base = java.awt.Font.createFont(java.awt.Font.TRUETYPE_FONT, fontFile);
-            java.awt.Font derived = base.deriveFont(java.awt.Font.PLAIN, BASE_FONT_SIZE);
-            registerResolvedFont(key, derived);
+            registerDecodedFont(key, base.deriveFont(java.awt.Font.PLAIN, BASE_FONT_SIZE));
             return true;
         } catch (Exception e) {
             ApricityUI.LOGGER.error("[AUI Font] failed to load font family={} file={}", key, fontFile, e);
@@ -420,7 +436,9 @@ public class Font {
         return Math.max(0, width);
     }
 
-    /** Measures web-font advances with the fractional metrics used by browsers. */
+    /**
+     * Measures web-font advances with the fractional metrics used by browsers.
+     */
     public static double measureFontRuns(List<FontRun> runs,
                                          FontRenderContext renderContext,
                                          double letterSpacing,
@@ -531,12 +549,7 @@ public class Font {
 
     private static java.awt.Font deriveCachedFont(java.awt.Font font, int fontStyle, float size) {
         if (font == null) return null;
-        DerivedFontKey key = new DerivedFontKey(
-                font.getFontName(Locale.ROOT),
-                font.getFamily(Locale.ROOT),
-                fontStyle,
-                Float.floatToIntBits(size)
-        );
+        DerivedFontKey key = new DerivedFontKey(font, fontStyle, Float.floatToIntBits(size));
         return DERIVED_FONT_CACHE.computeIfAbsent(key, unused -> font.deriveFont(fontStyle, size));
     }
 
@@ -570,10 +583,33 @@ public class Font {
         });
     }
 
+    private static final class CodepointScratch {
+        final HashMap<Integer, Integer> fontIndexByCodePoint = new HashMap<>();
+        String chainKey;
+        int styleBits;
+        long revision = Long.MIN_VALUE;
+
+        boolean matches(String chainKey, int styleBits, long revision) {
+            return this.revision == revision
+                    && this.styleBits == styleBits
+                    && Objects.equals(this.chainKey, chainKey);
+        }
+    }
+
     public record FontRun(java.awt.Font font, String text) {
     }
 
-    private record DerivedFontKey(String fontName, String family, int style, int sizeBits) {
+    private record DerivedFontKey(java.awt.Font base, int style, int sizeBits) {
+        @Override
+        public boolean equals(Object other) {
+            return other instanceof DerivedFontKey key && base == key.base
+                    && style == key.style && sizeBits == key.sizeBits;
+        }
+
+        @Override
+        public int hashCode() {
+            return 31 * (31 * System.identityHashCode(base) + style) + sizeBits;
+        }
     }
 
     private record RunPlanKey(String familyChain, int style, int sizeBits, String content) {

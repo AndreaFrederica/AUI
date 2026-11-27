@@ -1,13 +1,13 @@
 package com.sighs.apricityui.render;
 
 import com.sighs.apricityui.render.RenderNode;
-import com.sighs.apricityui.render.LayoutCommit;
 
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.IdentityHashMap;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
+
 import com.sighs.apricityui.init.Document;
 import com.sighs.apricityui.init.Element;
 
@@ -24,14 +24,7 @@ public final class RenderQueue {
     private final HitTestCache hitTestCache;
     private ArrayList<RenderNode> paintList = new ArrayList<>();
     private int globalDirtyMask = 0;
-    private boolean layoutCommitDirty = false;
     private volatile long visualVersion = 1L;
-    // Roots collected by commit(boolean) when the pending geometry work is made of
-    // COMMIT_LAYOUT changes only (transform/visual geometry, no relayout). null means
-    // the batch needs the full LayoutCommit.commit(document) path; an empty set means
-    // the geometry part of the batch turned out to be a no-op. Consumed by
-    // Base.drawDocumentInContext through Document.drainStyleTransformRoots().
-    private Set<Element> styleTransformRoots = null;
 
     public RenderQueue(Document owner) {
         this.owner = owner;
@@ -55,8 +48,7 @@ public final class RenderQueue {
         dirtyElements.clear();
         hitTestDirtyRoots.clear();
         globalDirtyMask = 0;
-        layoutCommitDirty = false;
-        styleTransformRoots = null;
+        owner.getLayout().reset();
         paintList = new ArrayList<>();
         hitTestCache.clear();
     }
@@ -66,11 +58,11 @@ public final class RenderQueue {
         if (owner.documentElement == null) {
             paintList = new ArrayList<>();
             hitTestCache.clear();
-            layoutCommitDirty = false;
+            owner.getLayout().paintListChanged(false);
             return;
         }
         paintList = Drawer.createPaintList(owner.documentElement);
-        layoutCommitDirty = true;
+        owner.getLayout().paintListChanged(true);
         hitTestCache.markDirty();
     }
 
@@ -85,16 +77,33 @@ public final class RenderQueue {
     }
 
     public boolean commit(boolean commitLayoutNow) {
-        boolean hadWork = globalDirtyMask != 0 || !dirtyElements.isEmpty() || layoutCommitDirty;
-        boolean hadGlobalDirty = globalDirtyMask != 0;
-        boolean globalGeometryDirty = (globalDirtyMask & (Drawer.RELAYOUT | Drawer.COMMIT_LAYOUT)) != 0;
-        boolean needsLayoutCommit = layoutCommitDirty || globalGeometryDirty;
-        // A relayout ripples through ancestors and following siblings, and a paint
-        // list rebuild creates nodes without committed geometry, so both keep the
-        // full document commit. A batch made of COMMIT_LAYOUT only changes committed
-        // world transforms, which no sibling can observe.
-        boolean needsFullLayoutCommit = layoutCommitDirty || globalGeometryDirty;
-        Set<Element> transformRoots = null;
+        return commit(commitLayoutNow, null);
+    }
+
+    public void commitForHitTest() {
+        commit(true, RenderBatchStats.FullCommitReason.HIT_TEST);
+        if (owner.getLayout().needsInitialFullCommit()) {
+            owner.getLayout().commitForHitTest(RenderBatchStats.FullCommitReason.HIT_TEST);
+        }
+    }
+
+    private boolean commit(boolean commitLayoutNow, RenderBatchStats.FullCommitReason source) {
+        boolean hadWork = globalDirtyMask != 0 || !dirtyElements.isEmpty() || owner.getLayout().hasPendingCommit();
+        if (!hadWork && hitTestDirtyRoots.isEmpty()) return false;
+        boolean hadGlobalDirty = (globalDirtyMask & (Drawer.REORDER | Drawer.RELAYOUT
+                | Drawer.COMMIT_LAYOUT | Drawer.HITTEST)) != 0;
+        // Drawer splices the existing ArrayList in place. Identity cannot version that change.
+        boolean reorder = (globalDirtyMask & Drawer.REORDER) != 0;
+        if (!reorder) {
+            for (Element element : dirtyElements) {
+                if (element != null && element.isConnected() && element.hasDirtyFlag(Drawer.REORDER)) {
+                    reorder = true;
+                    break;
+                }
+            }
+        }
+        if (reorder) owner.getLayout().paintListRevisionChanged();
+        boolean needsLayoutCommit = owner.getLayout().collectUpdates(globalDirtyMask, dirtyElements);
         boolean fullHitTestRebuild = hadGlobalDirty || hitTestDirtyRoots.contains(owner.documentElement);
         Set<Element> incrementalHitRoots = Collections.newSetFromMap(new IdentityHashMap<>());
         for (Element element : dirtyElements) {
@@ -102,19 +111,9 @@ public final class RenderQueue {
             if (element.hasDirtyFlag(Drawer.REORDER)) {
                 fullHitTestRebuild = true;
             }
-            if (element.hasDirtyFlag(Drawer.RELAYOUT) || element.hasDirtyFlag(Drawer.COMMIT_LAYOUT)) {
-                needsLayoutCommit = true;
-            }
             if (element.hasDirtyFlag(Drawer.RELAYOUT)) {
-                needsFullLayoutCommit = true;
                 incrementalHitRoots.add(element.parentElement == null ? element : element.parentElement);
             } else if (element.hasDirtyFlag(Drawer.COMMIT_LAYOUT)) {
-                // The element's own transformVersion changed, which invalidates the
-                // committed world transform of this element and of its descendants.
-                if (transformRoots == null) {
-                    transformRoots = Collections.newSetFromMap(new IdentityHashMap<>());
-                }
-                transformRoots.add(element);
                 incrementalHitRoots.add(element.parentElement == null ? element : element.parentElement);
             } else if (element.hasDirtyFlag(Drawer.HITTEST)) {
                 incrementalHitRoots.add(element);
@@ -123,15 +122,20 @@ public final class RenderQueue {
         if (!fullHitTestRebuild) {
             incrementalHitRoots.addAll(hitTestDirtyRoots);
         }
-        styleTransformRoots = needsFullLayoutCommit ? null : transformRoots;
 
         applyGlobalDirty();
+        owner.getLayout().invalidatePendingLayouts(dirtyElements);
         Drawer.flushUpdates(owner);
+        boolean geometryCommitted = true;
         if (needsLayoutCommit && commitLayoutNow) {
-            LayoutCommit.commit(owner);
+            if (source == RenderBatchStats.FullCommitReason.HIT_TEST) {
+                owner.getLayout().commitForHitTest(source);
+            } else {
+                geometryCommitted = owner.getLayout().commit(source);
+            }
         }
         if (hadWork) {
-            if (needsLayoutCommit && !commitLayoutNow) {
+            if (needsLayoutCommit && (!commitLayoutNow || !geometryCommitted)) {
                 // Render-frame style changes commit geometry immediately after
                 // this queue flush. Updating hit-test entries here would read
                 // the previous committed rects and leave the cache one frame
@@ -148,26 +152,9 @@ public final class RenderQueue {
                 }
                 hitTestDirtyRoots.clear();
             }
-            layoutCommitDirty = false;
+            owner.getLayout().updatesFlushed();
         }
         return needsLayoutCommit;
-    }
-
-    /**
-     * Roots collected by the last {@link #commit(boolean)} for a batch whose geometry
-     * work only consists of COMMIT_LAYOUT changes: those elements had their
-     * transformVersion bumped, so their committed world transforms (and those of their
-     * descendants) must be refreshed, but nothing asked for a relayout.
-     * <p>
-     * Returns {@code null} when the batch requires the full
-     * {@code LayoutCommit.commit(document)} path (relayout or paint list rebuild), in
-     * which case the collected roots are meaningless. An empty set means the pending
-     * geometry work turned out to be a no-op.
-     */
-    public Set<Element> drainStyleTransformRoots() {
-        Set<Element> roots = styleTransformRoots;
-        styleTransformRoots = null;
-        return roots;
     }
 
     public void markDirty(int mask) {
@@ -185,11 +172,11 @@ public final class RenderQueue {
     }
 
     public boolean hasPendingWork() {
-        return globalDirtyMask != 0 || !dirtyElements.isEmpty() || layoutCommitDirty;
+        return globalDirtyMask != 0 || !dirtyElements.isEmpty() || owner.getLayout().hasPendingCommit();
     }
 
     public boolean hasPendingVisualWork() {
-        if (layoutCommitDirty || (globalDirtyMask & VISUAL_DIRTY_MASK) != 0) return true;
+        if (owner.getLayout().hasPendingCommit() || (globalDirtyMask & VISUAL_DIRTY_MASK) != 0) return true;
         for (Element element : dirtyElements) {
             if (element != null && element.hasDirtyFlag(VISUAL_DIRTY_MASK)) return true;
         }

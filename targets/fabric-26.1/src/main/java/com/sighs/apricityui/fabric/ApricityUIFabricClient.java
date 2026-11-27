@@ -1,5 +1,6 @@
 package com.sighs.apricityui.fabric;
 
+import com.mojang.blaze3d.systems.RenderSystem;
 import com.sighs.apricityui.ApricityUI;
 import com.sighs.apricityui.client.Client;
 import com.sighs.apricityui.client.DebugAIScreenshotTicker;
@@ -34,8 +35,17 @@ import net.minecraft.server.packs.resources.ResourceManager;
 import org.joml.Matrix4f;
 
 public final class ApricityUIFabricClient implements ClientModInitializer {
-    /** HUD 元素 id；AUI overlay 排在其他 HUD 元素之后，保证盖在原版 HUD 上。 */
+    /**
+     * HUD 元素 id；AUI overlay 排在其他 HUD 元素之后，保证盖在原版 HUD 上。
+     */
     private static final Identifier HUD_LAYER_ID = Identifier.fromNamespaceAndPath(ApricityUI.MODID, "overlay");
+
+    private static void registerKeys() {
+        KeyMappingHelper.registerKeyMapping(Keybindings.RELEASE_MOUSE);
+        KeyMappingHelper.registerKeyMapping(Keybindings.RELOAD);
+        KeyMappingHelper.registerKeyMapping(Keybindings.DEV_TOOLS);
+        KeyMappingHelper.registerKeyMapping(Keybindings.RESOURCE_MANAGER);
+    }
 
     public void onInitializeClient() {
         FabricServicesBootstrap.initClient();
@@ -74,10 +84,16 @@ public final class ApricityUIFabricClient implements ClientModInitializer {
             // poseStack 同样是局部栈，相机视图矩阵在 render state 里单独存。
             Matrix4f viewMatrix = context.levelState().cameraRenderState.viewRotationMatrix;
             float partialTick = Minecraft.getInstance().getDeltaTracker().getGameTimeDeltaPartialTick(false);
-            // 先把 AUI 记录的投影同步成世界投影，世界文档里的滤镜通道才能取回正确矩阵。
-            RenderService.INSTANCE.setProjectionMatrix(new Matrix4f(projectionMatrix));
-            for (WorldWindow window : WorldWindow.windows) {
-                window.render(context.poseStack(), viewMatrix, projectionMatrix, partialTick);
+            var previousProjectionBuffer = RenderSystem.getProjectionMatrixBuffer();
+            var previousProjectionType = RenderSystem.getProjectionType();
+            try {
+                // 先把 AUI 记录的投影同步成世界投影，世界文档里的滤镜通道才能取回正确矩阵。
+                RenderService.INSTANCE.setProjectionMatrix(new Matrix4f(projectionMatrix));
+                for (WorldWindow window : WorldWindow.windows) {
+                    window.render(context.poseStack(), viewMatrix, projectionMatrix, partialTick);
+                }
+            } finally {
+                RenderSystem.setProjectionMatrix(previousProjectionBuffer, previousProjectionType);
             }
         });
         ScreenEvents.AFTER_INIT.register((client, screen, scaledWidth, scaledHeight) ->
@@ -90,16 +106,10 @@ public final class ApricityUIFabricClient implements ClientModInitializer {
 
             @Override
             public void onResourceManagerReload(ResourceManager resourceManager) {
+                com.sighs.apricityui.model.ModelRenderService.invalidate();
                 RecipeExpander.clearCache();
                 Minecraft.getInstance().execute(com.sighs.apricityui.loader.ClientLoader::reloadResources);
             }
         });
-    }
-
-    private static void registerKeys() {
-        KeyMappingHelper.registerKeyMapping(Keybindings.RELEASE_MOUSE);
-        KeyMappingHelper.registerKeyMapping(Keybindings.RELOAD);
-        KeyMappingHelper.registerKeyMapping(Keybindings.DEV_TOOLS);
-        KeyMappingHelper.registerKeyMapping(Keybindings.RESOURCE_MANAGER);
     }
 }

@@ -17,6 +17,7 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 import java.util.List;
+
 import com.sighs.apricityui.init.Node;
 import com.sighs.apricityui.dom.TextNode;
 import com.sighs.apricityui.style.Text;
@@ -30,14 +31,12 @@ public record Size(double width, double height) {
     private static final ThreadLocal<Map<Element, Double>> NATURAL_CONTENT_WIDTHS = ThreadLocal.withInitial(
             java.util.IdentityHashMap::new
     );
+    private static final ThreadLocal<Integer> MIN_CONTENT_DEPTH = ThreadLocal.withInitial(() -> 0);
+    private static final Canvas METRICS_CANVAS = new Canvas();
     // 长度解析/求值的唯一实现来源已搬到 CssLength：本类只做委托，
     // 保证新类型与旧 API 行为等价（同一份代码路径）。
     private static volatile Size viewportOverride;
     private static volatile Double rootFontOverride;
-
-    public Size add(Size size) {
-        return new Size(width + size.width, height + size.height);
-    }
 
     public static Size getWindowSize() {
         Size override = viewportOverride;
@@ -173,7 +172,7 @@ public record Size(double width, double height) {
     }
 
     public static Size of(Element element) {
-        Size cache = element.getRenderer().size.get();
+        Size cache = element.getLayout().size.get();
         if (cache != null) return cache;
 
         Set<Element> resolving = RESOLVING.get();
@@ -187,6 +186,21 @@ public record Size(double width, double height) {
                     RESOLVING.remove();
                 }
             }
+        }
+    }
+
+    public static boolean isMinContentMeasurementContext() {
+        return MIN_CONTENT_DEPTH.get() > 0;
+    }
+
+    public static Size minContent(Element element) {
+        int depth = MIN_CONTENT_DEPTH.get();
+        MIN_CONTENT_DEPTH.set(depth + 1);
+        try {
+            return measureNatural(element, LayoutMeasureCache.SIZE_NATURAL, Double.NaN);
+        } finally {
+            if (depth == 0) MIN_CONTENT_DEPTH.remove();
+            else MIN_CONTENT_DEPTH.set(depth);
         }
     }
 
@@ -211,14 +225,37 @@ public record Size(double width, double height) {
         }
     }
 
+    static Size unconstrainedNatural(Element element, boolean minimum) {
+        Map<Element, Double> previous = NATURAL_CONTENT_WIDTHS.get();
+        NATURAL_CONTENT_WIDTHS.remove();
+        try {
+            return minimum ? minContent(element) : natural(element);
+        } finally {
+            if (previous.isEmpty()) NATURAL_CONTENT_WIDTHS.remove();
+            else NATURAL_CONTENT_WIDTHS.set(previous);
+        }
+    }
+
     private static Size measureNatural(Element element, int cacheMode, double availableWidth) {
         if (element == null) return ZERO;
+        LayoutMeasureCache.begin();
+        try {
+            return measureNaturalCached(element, cacheMode, availableWidth);
+        } finally {
+            LayoutMeasureCache.end();
+        }
+    }
+
+    private static Size measureNaturalCached(Element element, int cacheMode, double availableWidth) {
         Size cached = LayoutMeasureCache.getSize(cacheMode, element, availableWidth, Double.NaN, true);
         if (cached != null) return cached;
         int depth = NATURAL_MEASURE_DEPTH.get();
         NATURAL_MEASURE_DEPTH.set(depth + 1);
         try {
-            Size result = computeSize(element, false);
+            // With no constraints these are exactly the key and mode just missed above.
+            boolean naturalCacheMiss = cacheMode == LayoutMeasureCache.SIZE_NATURAL
+                    && Double.isNaN(availableWidth) && NATURAL_CONTENT_WIDTHS.get().isEmpty();
+            Size result = computeSize(element, false, naturalCacheMiss);
             LayoutMeasureCache.putSize(cacheMode, element, availableWidth, Double.NaN, true, result);
             return result;
         } finally {
@@ -238,6 +275,7 @@ public record Size(double width, double height) {
     public static boolean hasNaturalWidthConstraint(Element element) {
         if (element == null) return false;
         Map<Element, Double> constraints = NATURAL_CONTENT_WIDTHS.get();
+        if (constraints.isEmpty()) return false;
         Element current = element;
         while (current != null) {
             if (constraints.containsKey(current)) return true;
@@ -253,6 +291,7 @@ public record Size(double width, double height) {
 
     static Double getNaturalMeasurementWidthContext(Element element) {
         Map<Element, Double> constraints = NATURAL_CONTENT_WIDTHS.get();
+        if (constraints.isEmpty()) return null;
         Element current = element;
         while (current != null) {
             Double width = constraints.get(current);
@@ -267,29 +306,30 @@ public record Size(double width, double height) {
     }
 
     private static Size computeSize(Element element, boolean allowFlexAdjustments) {
+        return computeSize(element, allowFlexAdjustments, false);
+    }
+
+    private static Size computeSize(Element element, boolean allowFlexAdjustments, boolean naturalCacheMiss) {
         boolean intrinsicMeasurement = isNaturalMeasurementContext();
-        Size cache = intrinsicMeasurement ? null : element.getRenderer().size.get();
+        Size cache = intrinsicMeasurement ? null : element.getLayout().size.get();
         if (cache != null) return cache;
-        if (intrinsicMeasurement && !allowFlexAdjustments) {
+        if (intrinsicMeasurement && !allowFlexAdjustments && !naturalCacheMiss) {
             Size naturalCache = getNaturalMeasurementCache(element);
             if (naturalCache != null) return naturalCache;
         }
 
+        LayoutMeasureCache.recordMeasurement();
         Style style = element.getComputedStyle();
 
         if ("none".equals(style.display)) {
             return ZERO;
         }
 
-        Size gridUsedSize = intrinsicMeasurement ? null : Grid.resolveAssignedSize(element);
-        if (gridUsedSize != null
-                && element.parentElement != null
-                && Layout.isGridDisplay(element.parentElement.getComputedStyle().display)
-                && Layout.isInFlow(style)) {
-            element.getRenderer().size.set(gridUsedSize);
-            return gridUsedSize;
+        Size assignedSize = Layout.resolveAssignedSize(element);
+        if (assignedSize != null) {
+            element.getLayout().size.set(assignedSize);
+            return assignedSize;
         }
-
         boolean isText = element instanceof AbstractText
                 || ((!element.innerText.isEmpty() || hasDirectTextNodeChildren(element)) && element.getRenderChildren().isEmpty());
         Size contentSize;
@@ -300,7 +340,8 @@ public record Size(double width, double height) {
         } else if (element instanceof com.sighs.apricityui.element.Select select) {
             contentSize = select.getIntrinsicSize();
         } else {
-            contentSize = isText ? getTextSize(element) : getContentSize(element);
+            contentSize = isText && (element instanceof AbstractText || !NormalFlow.hasFloatExclusions(element))
+                    ? getTextSize(element) : getContentSize(element);
         }
         if (isText && element instanceof AbstractText textControl
                 && !textControl.isMultiline() && usesNormalLineHeight(element)) {
@@ -312,8 +353,26 @@ public record Size(double width, double height) {
         double verticalBox = box.getBorderVertical() + box.getPaddingVertical();
 
         boolean borderBox = style.isBorderBox();
-        CssLength widthLength = style.widthLength();
-        CssLength heightLength = style.heightLength();
+        // CSS 2.1 §10.3.1/§10.6.1: width/height do not apply to non-replaced in-flow
+        // inline boxes. The same exemption covers min/max-width/height ("do not apply
+        // to non-replaced inline elements"), and aspect-ratio does not apply to inline
+        // boxes either (CSS Sizing 4: "all elements except inline boxes and internal
+        // ruby or table boxes"), so all six are neutralised to auto together.
+        // Inline-blocks remain sized boxes and keep the normal sizing path.
+        boolean unsizedInline = "inline".equalsIgnoreCase(style.display)
+                && Layout.isInFlow(style)
+                && !isReplacedInline(element)
+                && element.parentElement != null
+                && !Layout.isFlexDisplay(element.parentElement.getComputedStyle().display)
+                && !Layout.isGridDisplay(element.parentElement.getComputedStyle().display);
+        // Table cells are measured at their assigned column width; authored widths constrain columns.
+        CssLength widthLength = unsizedInline || (intrinsicMeasurement && "table-cell".equals(style.display))
+                ? CssLength.parse("auto") : style.widthLength();
+        CssLength heightLength = unsizedInline ? CssLength.parse("auto") : style.heightLength();
+        CssLength minWidthLength = unsizedInline ? CssLength.parse("auto") : style.minWidthLength();
+        CssLength maxWidthLength = unsizedInline ? CssLength.parse("auto") : style.maxWidthLength();
+        CssLength minHeightLength = unsizedInline ? CssLength.parse("auto") : style.minHeightLength();
+        CssLength maxHeightLength = unsizedInline ? CssLength.parse("auto") : style.maxHeightLength();
         boolean fixedPositioned = "fixed".equals(style.position);
         boolean absolutePositioned = "absolute".equals(style.position) || fixedPositioned;
         double contentWidth = contentSize.width;
@@ -342,10 +401,10 @@ public record Size(double width, double height) {
         // 521.72，使 `.dropdown` 的 max-content 宽从 200 涨到 521.72，flex 换行行判定于是每行只放得下
         // 一个下拉框（Chromium 在同样标记下每行放两个）。
         boolean percentWidthIndefinite = intrinsicMeasurement
-                && widthLength.isPercent()
+                && widthLength.dependsOnPercentage()
                 && getNaturalMeasurementWidthContext(element) == null
                 && element.parentElement != null
-                && !hasDefiniteAutoResolvedWidthInternal(element.parentElement);
+                && (element.parentElement.getComputedStyle().isGridDisplay() || !hasDefiniteAutoResolvedWidthInternal(element.parentElement));
         boolean unsetWidth = percentWidthIndefinite || widthLength.resolve(parentWidth) == null;
         boolean unsetHeight = heightLength.resolve(parentHeight) == null;
         // width:auto on a block-level box still resolves to the containing block width, so the
@@ -365,6 +424,26 @@ public record Size(double width, double height) {
             double right = resolveLength(style.right, parentWidth, 0);
             contentWidth = Math.max(0, parentWidth - left - right - horizontalBox);
         }
+        if (absolutePositioned && unsetWidth && !(hasLeft && hasRight)
+                && isText && !(element instanceof AbstractText) && !intrinsicMeasurement) {
+            Text text = Text.of(element);
+            double available = parentWidth - horizontalBox - box.getMarginHorizontal();
+            if (hasLeft) available -= resolveLength(style.left, parentWidth, 0);
+            if (hasRight) available -= resolveLength(style.right, parentWidth, 0);
+            double preferred = Text.wrap(text, 0).width();
+            double minimum = preferred;
+            if (Text.allowsSoftWrap(text.whiteSpace)) {
+                minimum = 0;
+                java.text.BreakIterator breaks = java.text.BreakIterator.getLineInstance(Locale.ROOT);
+                breaks.setText(text.content);
+                int start = breaks.first();
+                for (int end = breaks.next(); end != java.text.BreakIterator.DONE; start = end, end = breaks.next()) {
+                    minimum = Math.max(minimum, Text.measureLine(text, text.content.substring(start, end).stripTrailing()));
+                }
+            }
+            contentWidth = Math.min(preferred, Math.max(minimum, available));
+            if (unsetHeight) contentHeight = Text.wrap(text, contentWidth).height(text.lineHeight);
+        }
         if (absolutePositioned && unsetHeight && !hasIntrinsicSize(element)
                 && hasTop && hasBottom && definiteParentHeight != null) {
             double top = resolveLength(style.top, parentHeight, 0);
@@ -373,10 +452,18 @@ public record Size(double width, double height) {
             insetResolvedHeight = true;
         }
 
-        if (unsetWidth && shouldFillAvailableBlockWidth(element, style)
-                && !shouldUseContentBasedAutoWidthInNaturalFlexMeasurement(element, allowFlexAdjustments)
-                && !shouldUseContentBasedAutoWidthForWrappedFlex(element)) {
-            double availableOuterWidth = Math.max(0, parentWidth - box.getMarginHorizontal());
+        boolean floating = !intrinsicMeasurement && FloatFlow.floats(element);
+        Double floatAvoidanceWidth = !intrinsicMeasurement ? NormalFlow.floatAvoidanceWidth(element) : null;
+        if (floating && unsetWidth && !hasIntrinsicSize(element) && !"table".equals(style.display)) {
+            double available = Math.max(0, parentWidth - horizontalBox - box.getMarginHorizontal());
+            double minimum = Size.unconstrainedNatural(element, true).width() - horizontalBox;
+            double preferred = Size.unconstrainedNatural(element, false).width() - horizontalBox;
+            contentWidth = Math.max(0, Math.min(preferred, Math.max(minimum, available)));
+            widthDefinite = true;
+        }
+        if (unsetWidth && (!intrinsicMeasurement || hasNaturalWidthConstraint(element)) && shouldFillAvailableBlockWidth(element, style)
+                && !Layout.usesContentBasedAutoWidth(element, allowFlexAdjustments)) {
+            double availableOuterWidth = Math.max(0, (floatAvoidanceWidth == null ? parentWidth : floatAvoidanceWidth) - box.getMarginHorizontal());
             contentWidth = Math.max(0, availableOuterWidth - horizontalBox);
             widthDefinite = true;
         }
@@ -392,7 +479,8 @@ public record Size(double width, double height) {
         }
         if (!unsetHeight && (!heightLength.isPercent() || definiteParentHeight != null)) {
             double resolved = heightLength.resolveOr(contentHeight, parentHeight);
-            contentHeight = borderBox ? Math.max(0, resolved - verticalBox) : Math.max(0, resolved);
+            double specifiedHeight = borderBox ? Math.max(0, resolved - verticalBox) : Math.max(0, resolved);
+            contentHeight = "table-cell".equals(style.display) ? Math.max(contentHeight, specifiedHeight) : specifiedHeight;
         }
 
         Double aspectRatio = parseAspectRatio(style.aspectRatio);
@@ -404,18 +492,15 @@ public record Size(double width, double height) {
             }
         }
 
-        Flex.ItemUsedSize flexItemSize = Flex.resolveItemUsedSize(element, box,
+        Layout.ItemSize itemSize = Layout.resolveItemSize(element, box,
                 contentWidth, contentHeight, unsetWidth, unsetHeight,
                 horizontalBox, verticalBox, explicitParentHeight, allowFlexAdjustments);
-        contentWidth = flexItemSize.contentWidth();
-        contentHeight = flexItemSize.contentHeight();
-        flexMainHeightAssigned = flexItemSize.mainSizeAssigned();
-        flexCrossHeightStretched = flexItemSize.crossSizeStretched();
+        contentWidth = itemSize.contentWidth();
+        contentHeight = itemSize.contentHeight();
+        flexMainHeightAssigned = itemSize.mainSizeAssigned();
+        flexCrossHeightStretched = itemSize.crossSizeStretched();
 
-        boolean parentAssignsColumnMainSize = element.parentElement != null
-                && Layout.isInFlow(style)
-                && Layout.isFlexDisplay(element.parentElement.getComputedStyle().display)
-                && Flex.of(element.parentElement).flexDirection.contains("column");
+        boolean parentAssignsColumnMainSize = itemSize.verticalMainAxis();
         // An aspect-ratio item in a column flex container takes its width from the container's
         // cross axis, which makes the used height definite through the ratio.
         if (aspectRatio != null && aspectRatio > 0 && parentAssignsColumnMainSize
@@ -425,36 +510,52 @@ public record Size(double width, double height) {
         if (unsetHeight && !insetResolvedHeight && !flexMainHeightAssigned && !flexCrossHeightStretched
                 && !parentAssignsColumnMainSize
                 && (!intrinsicMeasurement || naturalWidthConstraint != null)
-                && !(element instanceof AbstractText)
-                && Layout.isFlexDisplay(style.display)) {
-            Flex ownFlex = Flex.of(element);
-            if (ownFlex.flexDirection.contains("row") && !ownFlex.flexWrap.is("wrap")) {
-                contentHeight = Flex.computeRowCrossSizeAtMainSize(element, contentWidth);
-            }
+                && !(element instanceof AbstractText)) {
+            contentHeight = Layout.autoContentHeightAtWidth(element, contentWidth, contentHeight);
         }
 
-        double constrainedContentWidth = clampContentExtent(contentWidth, horizontalBox, style.minWidthLength(), style.maxWidthLength(), parentWidth, true);
-        double constrainedContentHeight = clampContentExtent(contentHeight, verticalBox, style.minHeightLength(), style.maxHeightLength(), parentHeight, definiteParentHeight != null);
-        if (aspectRatio != null && aspectRatio > 0) {
+        double constrainedContentWidth = clampContentExtent(contentWidth, horizontalBox, minWidthLength, maxWidthLength, parentWidth, true);
+        double constrainedContentHeight = clampContentExtent(contentHeight, verticalBox, minHeightLength, maxHeightLength, parentHeight, definiteParentHeight != null);
+        if (!unsizedInline && aspectRatio != null && aspectRatio > 0) {
             if (widthDefinite && unsetHeight) {
                 constrainedContentHeight = aspectHeightFromWidth(
                         constrainedContentWidth, aspectRatio, borderBox, horizontalBox, verticalBox);
-                constrainedContentHeight = clampContentExtent(constrainedContentHeight, verticalBox, style.minHeightLength(), style.maxHeightLength(), parentHeight, definiteParentHeight != null);
+                constrainedContentHeight = clampContentExtent(constrainedContentHeight, verticalBox, minHeightLength, maxHeightLength, parentHeight, definiteParentHeight != null);
             } else if (unsetWidth && !unsetHeight) {
                 constrainedContentWidth = aspectWidthFromHeight(
                         constrainedContentHeight, aspectRatio, borderBox, horizontalBox, verticalBox);
-                constrainedContentWidth = clampContentExtent(constrainedContentWidth, horizontalBox, style.minWidthLength(), style.maxWidthLength(), parentWidth, true);
+                constrainedContentWidth = clampContentExtent(constrainedContentWidth, horizontalBox, minWidthLength, maxWidthLength, parentWidth, true);
             }
         }
         contentWidth = constrainedContentWidth;
         contentHeight = constrainedContentHeight;
+        if ((floating || floatAvoidanceWidth != null || NormalFlow.hasFloatExclusions(element))
+                && unsetHeight && !hasIntrinsicSize(element) && aspectRatio == null && !"table".equals(style.display)) {
+            double measuredHeight = style.isGridDisplay() || style.isFlexDisplay() ? contentHeight
+                    : NormalFlow.contentAtWidth(element, contentWidth).height();
+            contentHeight = clampContentExtent(measuredHeight, verticalBox, minHeightLength, maxHeightLength,
+                    parentHeight, definiteParentHeight != null);
+        }
+        Size tableContent = Layout.constrainedContentSize(element, contentWidth);
+        if (tableContent != null) {
+            contentWidth = tableContent.width();
+            contentHeight = Math.max(tableContent.height(), unsetHeight
+                    ? clampContentExtent(tableContent.height(), verticalBox, minHeightLength, maxHeightLength,
+                    parentHeight, definiteParentHeight != null) : contentHeight);
+        }
+        if (absolutePositioned && unsetWidth && !(hasLeft && hasRight) && unsetHeight
+                && !insetResolvedHeight && isText && !(element instanceof AbstractText) && !intrinsicMeasurement) {
+            Text text = Text.of(element);
+            contentHeight = clampContentExtent(Text.wrap(text, contentWidth).height(text.lineHeight), verticalBox,
+                    minHeightLength, maxHeightLength, parentHeight, definiteParentHeight != null);
+        }
 
         double totalWidth = contentWidth + horizontalBox;
         double totalHeight = contentHeight + verticalBox;
 
         Size resultSize = new Size(totalWidth, totalHeight);
         if (!intrinsicMeasurement) {
-            element.getRenderer().size.set(resultSize);
+            element.getLayout().size.set(resultSize);
         }
         return resultSize;
     }
@@ -541,9 +642,11 @@ public record Size(double width, double height) {
 
         Map<Element, Double> constraints = NATURAL_CONTENT_WIDTHS.get();
         Element[] route = element.getRouteArray();
-        for (Element current : route) {
-            Double constrainedWidth = constraints.get(current);
-            if (constrainedWidth != null) return Math.max(0, constrainedWidth);
+        if (!constraints.isEmpty()) {
+            for (Element current : route) {
+                Double constrainedWidth = constraints.get(current);
+                if (constrainedWidth != null) return Math.max(0, constrainedWidth);
+            }
         }
 
         // The recursive implementation recalculated the entire ancestor chain
@@ -554,7 +657,7 @@ public record Size(double width, double height) {
         double nearestScaleWidth = scaleWidth;
         for (int index = route.length - 1; index > 0; index--) {
             Element current = route[index];
-            Size cachedSize = current.getRenderer().size.get();
+            Size cachedSize = current.getLayout().size.get();
             boolean hasUsableSize = false;
             if (cachedSize != null) {
                 double innerWidth = Box.of(current).innerSize().width();
@@ -646,7 +749,7 @@ public record Size(double width, double height) {
         double nearestScaleHeight = scaleHeight;
         for (int index = route.length - 1; index > 0; index--) {
             Element current = route[index];
-            Size cachedSize = current.getRenderer().size.get();
+            Size cachedSize = current.getLayout().size.get();
             boolean hasUsableSize = false;
             if (cachedSize != null) {
                 double innerHeight = Box.of(current).innerSize().height();
@@ -704,13 +807,15 @@ public record Size(double width, double height) {
             Size viewport = Position.viewportContainingBlockSize(element);
             return Math.max(0, horizontal ? viewport.width() : viewport.height());
         }
+        Layout.ContainingArea gridArea = Layout.containingArea(element, cb);
+        if (gridArea != null) return horizontal ? gridArea.width() : gridArea.height();
         Box cbBox = Box.of(cb);
         if (explicit) {
             Double content = horizontal ? resolveOwnExplicitContentWidth(cb) : resolveOwnExplicitContentHeight(cb);
             if (content == null) return null;
             return Math.max(0, content + (horizontal ? cbBox.getPaddingHorizontal() : cbBox.getPaddingVertical()));
         }
-        Size cbSize = cb.getRenderer().size.get();
+        Size cbSize = cb.getLayout().size.get();
         if (cbSize == null) {
             if (isResolving(cb)) return null;
             cbSize = Size.of(cb);
@@ -727,7 +832,7 @@ public record Size(double width, double height) {
     private static Double getCachedContainingBlockContentHeight(Element element) {
         Element parent = element == null ? null : element.parentElement;
         if (parent == null) return Math.max(0, getWindowHeight());
-        Size parentSize = parent.getRenderer().size.get();
+        Size parentSize = parent.getLayout().size.get();
         if (parentSize == null) return null;
         Box parentBox = Box.of(parent);
         return Math.max(0, parentSize.height() - parentBox.getBorderVertical() - parentBox.getPaddingVertical());
@@ -755,7 +860,7 @@ public record Size(double width, double height) {
             Size viewport = Position.viewportContainingBlockSize(element);
             return Math.max(0, horizontal ? viewport.width() : viewport.height());
         }
-        Size cbSize = cb.getRenderer().size.get();
+        Size cbSize = cb.getLayout().size.get();
         if (cbSize == null) return null;
         Box cbBox = Box.of(cb);
         return Math.max(0, horizontal
@@ -773,7 +878,7 @@ public record Size(double width, double height) {
 
     private static Double resolveOwnExplicitContentHeight(Element element) {
         if (element == null) return null;
-        com.sighs.apricityui.dom.RenderElement renderer = element.getRenderer();
+        LayoutState renderer = element.getLayout();
         long memoDep = renderer.layoutDependency();
         if (renderer.explicitHeightMemoDep == memoDep) {
             double memo = renderer.explicitHeightMemoValue;
@@ -842,13 +947,20 @@ public record Size(double width, double height) {
      * 既不撑满包含块，也不被 left/right（或 inset）拉伸。浏览器里的 {@code <iframe>} 正是
      * 如此：不加宽度就是 300×150，写 {@code inset:0} 也不会被撑开。</p>
      */
-    private static boolean hasIntrinsicSize(Element element) {
+    static boolean hasIntrinsicSize(Element element) {
         return element instanceof com.sighs.apricityui.element.Canvas
                 || element instanceof com.sighs.apricityui.element.Iframe
                 || element instanceof com.sighs.apricityui.element.Select;
     }
 
-    /** Public form of {@link #shouldFillAvailableBlockWidth} for the flex layout. */
+    private static boolean isReplacedInline(Element element) {
+        if (element instanceof AbstractText || hasIntrinsicSize(element)) return true;
+        return Layout.isReplacedElement(element);
+    }
+
+    /**
+     * Public form of {@link #shouldFillAvailableBlockWidth} for the flex layout.
+     */
     public static boolean fillsAvailableBlockWidth(Element element) {
         return element != null && shouldFillAvailableBlockWidth(element, element.getComputedStyle());
     }
@@ -874,7 +986,7 @@ public record Size(double width, double height) {
     private static boolean shouldFillAvailableBlockWidth(Element element, Style style) {
         if (element == null || style == null) return false;
         if (element.parentElement == null) return true;
-        if (!Layout.isInFlow(style)) return false;
+        if (!Layout.isInFlow(style) || FloatFlow.floats(element)) return false;
         // CSS 2.1 §10.3.4：块级替换元素的 width:auto 取固有宽度，不撑满包含块。
         // 浏览器里 <iframe style="display:block"> 不加宽度就是 300px 宽，这里对齐它。
         if (hasIntrinsicSize(element)) return false;
@@ -885,15 +997,17 @@ public record Size(double width, double height) {
         Element parent = element.parentElement;
         if (parent != null) {
             Style parentStyle = parent.getRawComputedStyle();
+            if (parentStyle.isFlexDisplay()) return false;
             if (isAutoWidthPositionedContainer(parent, parentStyle)) {
                 // An auto-width positioned container is first measured from the
                 // intrinsic contributions of its children. During that pass the
                 // children must remain content-sized. Once the container has a
                 // used width, normal block children resolve width:auto against it.
-                return parent.getRenderer().size.get() != null && !isResolving(parent);
+                return parent.getLayout().size.get() != null && !isResolving(parent);
             }
         }
         String display = style.display == null ? "" : style.display.trim().toLowerCase(Locale.ROOT);
+        if (Table.isStructure(display) || "table-cell".equals(display)) return false;
         if ("inline".equals(display)
                 || "inline-block".equals(display)
                 || "inline-flex".equals(display)
@@ -926,32 +1040,8 @@ public record Size(double width, double height) {
         if (parent == null) return false;
         if (hasDefiniteAutoResolvedWidthInternal(parent)) return true;
         if (isNaturalMeasurementContext()) return false;
-        Size used = parent.getRenderer().size.get();
+        Size used = parent.getLayout().size.get();
         return used != null && used.width() > 0;
-    }
-
-    private static boolean shouldUseContentBasedAutoWidthInNaturalFlexMeasurement(Element element, boolean allowFlexAdjustments) {
-        if (element == null || allowFlexAdjustments || !isNaturalMeasurementContext()) return false;
-        Element current = element;
-        while (current != null) {
-            Element parent = current.parentElement;
-            if (parent == null) {
-                return false;
-            }
-            if (Layout.isFlexDisplay(parent.getComputedStyle().display) && Flex.of(parent).flexDirection.contains("row")) {
-                return true;
-            }
-            current = parent;
-        }
-        return false;
-    }
-
-    private static boolean shouldUseContentBasedAutoWidthForWrappedFlex(Element element) {
-        if (element == null) return false;
-        Style style = element.getComputedStyle();
-        return "inline-flex".equalsIgnoreCase(style.display) && Flex.of(element).flexDirection.contains("row")
-                && Flex.flexWraps(Flex.of(element))
-                && !style.widthLength().hasNumber();
     }
 
     private static boolean hasDefiniteAutoResolvedWidthInternal(Element element) {
@@ -965,14 +1055,7 @@ public record Size(double width, double height) {
             return true;
         }
 
-        if (Layout.isFlexDisplay(parent.getComputedStyle().display)) {
-            Flex parentFlex = Flex.of(parent);
-            if (parentFlex.flexDirection.contains("column") && Flex.shouldStretchCrossAxis(element, parent)) {
-                return true;
-            }
-        }
-
-        return false;
+        return Layout.stretchesAutoWidth(element);
     }
 
     public static double lerp(double current, double target) {
@@ -1018,14 +1101,24 @@ public record Size(double width, double height) {
             CSS.Declaration declared = document.documentElement.cssCache.get("fontSize");
             fontSize = declared == null ? null : declared.value();
         }
-        return tryResolveLength(fontSize, defaultFontSize, defaultFontSize);
+        LayoutState state = document.documentElement.getLayout();
+        double width = getWindowWidth(), height = getWindowHeight();
+        if (state.rootFontMemoValid && java.util.Objects.equals(fontSize, state.rootFontMemoDeclaration)
+                && state.rootFontMemoWidth == width && state.rootFontMemoHeight == height) {
+            return state.rootFontMemoValue;
+        }
+        Double resolved = tryResolveLength(fontSize, defaultFontSize, defaultFontSize);
+        state.rootFontMemoDeclaration = fontSize;
+        state.rootFontMemoWidth = width;
+        state.rootFontMemoHeight = height;
+        state.rootFontMemoValue = resolved;
+        state.rootFontMemoValid = true;
+        return resolved;
     }
 
     static Double parseAspectRatio(String raw) {
         return CssLength.parseAspectRatio(raw);
     }
-
-    private static final Canvas METRICS_CANVAS = new Canvas();
 
     public static double measureText(Element element, String text) {
         if (text == null || text.isEmpty()) return 0;
@@ -1044,10 +1137,15 @@ public record Size(double width, double height) {
         measuring.verticalAlign = base.verticalAlign;
         measuring.whiteSpace = base.whiteSpace;
         measuring.wordBreak = base.wordBreak;
+        measuring.hyphenBreak = base.hyphenBreak;
         measuring.textIndent = 0;
         measuring.letterSpacing = base.letterSpacing;
         measuring.content = text;
         return Text.measureText(measuring);
+    }
+
+    public Size add(Size size) {
+        return new Size(width + size.width, height + size.height);
     }
 }
 

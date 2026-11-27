@@ -15,6 +15,132 @@ public class Gradient {
         this.angle = angle;
     }
 
+    private static int lerpColor(int c1, int c2, float t) {
+        int a1 = (c1 >> 24) & 0xFF, r1 = (c1 >> 16) & 0xFF, g1 = (c1 >> 8) & 0xFF, b1 = c1 & 0xFF;
+        int a2 = (c2 >> 24) & 0xFF, r2 = (c2 >> 16) & 0xFF, g2 = (c2 >> 8) & 0xFF, b2 = c2 & 0xFF;
+        return ((int) (a1 + (a2 - a1) * t) << 24) |
+                ((int) (r1 + (r2 - r1) * t) << 16) |
+                ((int) (g1 + (g2 - g1) * t) << 8) |
+                (int) (b1 + (b2 - b1) * t);
+    }
+
+    public static Gradient parse(String css) {
+        return parse(css, Color.DEFAULT_CURRENT_COLOR);
+    }
+
+    /**
+     * 解析线性渐变。{@code currentColor} 色标按调用方给出的元素文字色解析
+     * （CSS Color 4：currentColor 取元素自身计算出的 {@code color}）。
+     */
+    public static Gradient parse(String css, int currentColor) {
+        if (css == null) return null;
+        String trimmed = css.trim();
+        boolean repeating = trimmed.startsWith("repeating-linear-gradient");
+        if (!repeating && !trimmed.startsWith("linear-gradient")) return null;
+
+        String content = trimmed.substring(trimmed.indexOf('(') + 1, trimmed.lastIndexOf(')'));
+        List<String> parts = CssString.splitTopLevel(content, ',');
+
+        if (parts.size() < 2) return null;
+
+        float angle = 180f;
+        int startIndex = 0;
+
+        String first = parts.get(0).trim().toLowerCase();
+        if (first.endsWith("deg")) {
+            try {
+                angle = Float.parseFloat(first.replace("deg", ""));
+                startIndex = 1;
+            } catch (NumberFormatException ignored) {
+            }
+        } else if (first.startsWith("to ")) {
+            angle = parseDirection(first);
+            startIndex = 1;
+        }
+
+        Gradient gradient = new Gradient(angle);
+        gradient.repeating = repeating;
+
+        for (int i = startIndex; i < parts.size(); i++) {
+            String part = parts.get(i).trim();
+            StopTokens stop = splitStop(part);
+            int color = Color.parse(stop.colorToken(), currentColor);
+            boolean added = false;
+            if (stop.positionToken() != null) {
+                // CSS 允许双位置色标（color start end），等价于同色的两个硬停止。
+                for (String token : stop.positionToken().trim().split("\\s+")) {
+                    float pos = -1;
+                    boolean absolutePx = false;
+                    if (token.endsWith("%")) {
+                        try {
+                            pos = Float.parseFloat(token.replace("%", "")) / 100f;
+                        } catch (NumberFormatException ignored) {
+                        }
+                    } else if (token.endsWith("px")) {
+                        try {
+                            pos = Float.parseFloat(token.replace("px", ""));
+                            absolutePx = true;
+                        } catch (NumberFormatException ignored) {
+                        }
+                    } else {
+                        // CSS 里裸数字只允许 0（无单位的零长度），按 0px 处理。
+                        try {
+                            pos = Float.parseFloat(token);
+                            absolutePx = true;
+                            if (pos != 0f) pos = -1;
+                        } catch (NumberFormatException ignored) {
+                        }
+                    }
+                    if (pos >= 0) {
+                        gradient.stops.add(new Stop(pos, color, absolutePx));
+                        added = true;
+                    }
+                }
+            }
+            if (!added) gradient.stops.add(new Stop(-1, color, false));
+        }
+
+        gradient.fixStops();
+        return gradient;
+    }
+
+    private static float parseDirection(String dir) {
+        return switch (dir) {
+            case "to top" -> 0f;
+            case "to right" -> 90f;
+            case "to bottom" -> 180f;
+            case "to left" -> 270f;
+            case "to top right" -> 45f;
+            case "to bottom right" -> 135f;
+            case "to bottom left" -> 225f;
+            case "to top left" -> 315f;
+            default -> 180f;
+        };
+    }
+
+    private static StopTokens splitStop(String raw) {
+        String part = raw == null ? "" : raw.trim();
+        if (part.isEmpty()) {
+            return new StopTokens("", null);
+        }
+
+        int parens = 0;
+        for (int i = 0; i < part.length(); i++) {
+            char c = part.charAt(i);
+            if (c == '(') {
+                parens++;
+            } else if (c == ')') {
+                parens = Math.max(0, parens - 1);
+            } else if (Character.isWhitespace(c) && parens == 0) {
+                String colorToken = part.substring(0, i).trim();
+                String positionToken = part.substring(i).trim();
+                return new StopTokens(colorToken, positionToken.isEmpty() ? null : positionToken);
+            }
+        }
+
+        return new StopTokens(part, null);
+    }
+
     public float angle() {
         return angle;
     }
@@ -27,7 +153,9 @@ public class Gradient {
         return repeating;
     }
 
-    /** Consecutive equal stop positions are CSS hard color stops. */
+    /**
+     * Consecutive equal stop positions are CSS hard color stops.
+     */
     public boolean hasHardStops() {
         for (int i = 1; i < stops.size(); i++) {
             if (Math.abs(stops.get(i).position - stops.get(i - 1).position) < 0.0001f) return true;
@@ -42,27 +170,6 @@ public class Gradient {
             if (stop.absolutePx) max = Math.max(max, stop.position);
         }
         return max;
-    }
-
-    public static class Stop implements Comparable<Stop> {
-        public float position; // 0.0 ~ 1.0
-        public int color;
-        public boolean absolutePx;
-
-        public Stop(float position, int color) {
-            this(position, color, false);
-        }
-
-        public Stop(float position, int color, boolean absolutePx) {
-            this.position = position;
-            this.color = color;
-            this.absolutePx = absolutePx;
-        }
-
-        @Override
-        public int compareTo(Stop o) {
-            return Float.compare(this.position, o.position);
-        }
     }
 
     public int getColorAt(float x, float y, float bx, float by, float bw, float bh) {
@@ -124,87 +231,6 @@ public class Gradient {
         return stops.get(0).color;
     }
 
-    private static int lerpColor(int c1, int c2, float t) {
-        int a1 = (c1 >> 24) & 0xFF, r1 = (c1 >> 16) & 0xFF, g1 = (c1 >> 8) & 0xFF, b1 = c1 & 0xFF;
-        int a2 = (c2 >> 24) & 0xFF, r2 = (c2 >> 16) & 0xFF, g2 = (c2 >> 8) & 0xFF, b2 = c2 & 0xFF;
-        return ((int) (a1 + (a2 - a1) * t) << 24) |
-                ((int) (r1 + (r2 - r1) * t) << 16) |
-                ((int) (g1 + (g2 - g1) * t) << 8) |
-                (int) (b1 + (b2 - b1) * t);
-    }
-
-    public static Gradient parse(String css) {
-        if (css == null) return null;
-        String trimmed = css.trim();
-        boolean repeating = trimmed.startsWith("repeating-linear-gradient");
-        if (!repeating && !trimmed.startsWith("linear-gradient")) return null;
-
-        String content = trimmed.substring(trimmed.indexOf('(') + 1, trimmed.lastIndexOf(')'));
-        List<String> parts = CssString.splitTopLevel(content, ',');
-
-        if (parts.size() < 2) return null;
-
-        float angle = 180f;
-        int startIndex = 0;
-
-        String first = parts.get(0).trim().toLowerCase();
-        if (first.endsWith("deg")) {
-            try {
-                angle = Float.parseFloat(first.replace("deg", ""));
-                startIndex = 1;
-            } catch (NumberFormatException ignored) {
-            }
-        } else if (first.startsWith("to ")) {
-            angle = parseDirection(first);
-            startIndex = 1;
-        }
-
-        Gradient gradient = new Gradient(angle);
-        gradient.repeating = repeating;
-
-        for (int i = startIndex; i < parts.size(); i++) {
-            String part = parts.get(i).trim();
-            StopTokens stop = splitStop(part);
-            int color = Color.parse(stop.colorToken());
-            boolean added = false;
-            if (stop.positionToken() != null) {
-                // CSS 允许双位置色标（color start end），等价于同色的两个硬停止。
-                for (String token : stop.positionToken().trim().split("\\s+")) {
-                    float pos = -1;
-                    boolean absolutePx = false;
-                    if (token.endsWith("%")) {
-                        try {
-                            pos = Float.parseFloat(token.replace("%", "")) / 100f;
-                        } catch (NumberFormatException ignored) {
-                        }
-                    } else if (token.endsWith("px")) {
-                        try {
-                            pos = Float.parseFloat(token.replace("px", ""));
-                            absolutePx = true;
-                        } catch (NumberFormatException ignored) {
-                        }
-                    } else {
-                        // CSS 里裸数字只允许 0（无单位的零长度），按 0px 处理。
-                        try {
-                            pos = Float.parseFloat(token);
-                            absolutePx = true;
-                            if (pos != 0f) pos = -1;
-                        } catch (NumberFormatException ignored) {
-                        }
-                    }
-                    if (pos >= 0) {
-                        gradient.stops.add(new Stop(pos, color, absolutePx));
-                        added = true;
-                    }
-                }
-            }
-            if (!added) gradient.stops.add(new Stop(-1, color, false));
-        }
-
-        gradient.fixStops();
-        return gradient;
-    }
-
     private void fixStops() {
         if (stops.isEmpty()) return;
         boolean absoluteGradient = stops.stream().anyMatch(stop -> stop.absolutePx);
@@ -246,41 +272,25 @@ public class Gradient {
         return fallback;
     }
 
-    private static float parseDirection(String dir) {
-        return switch (dir) {
-            case "to top" -> 0f;
-            case "to right" -> 90f;
-            case "to bottom" -> 180f;
-            case "to left" -> 270f;
-            case "to top right" -> 45f;
-            case "to bottom right" -> 135f;
-            case "to bottom left" -> 225f;
-            case "to top left" -> 315f;
-            default -> 180f;
-        };
-    }
+    public static class Stop implements Comparable<Stop> {
+        public float position; // 0.0 ~ 1.0
+        public int color;
+        public boolean absolutePx;
 
-    private static StopTokens splitStop(String raw) {
-        String part = raw == null ? "" : raw.trim();
-        if (part.isEmpty()) {
-            return new StopTokens("", null);
+        public Stop(float position, int color) {
+            this(position, color, false);
         }
 
-        int parens = 0;
-        for (int i = 0; i < part.length(); i++) {
-            char c = part.charAt(i);
-            if (c == '(') {
-                parens++;
-            } else if (c == ')') {
-                parens = Math.max(0, parens - 1);
-            } else if (Character.isWhitespace(c) && parens == 0) {
-                String colorToken = part.substring(0, i).trim();
-                String positionToken = part.substring(i).trim();
-                return new StopTokens(colorToken, positionToken.isEmpty() ? null : positionToken);
-            }
+        public Stop(float position, int color, boolean absolutePx) {
+            this.position = position;
+            this.color = color;
+            this.absolutePx = absolutePx;
         }
 
-        return new StopTokens(part, null);
+        @Override
+        public int compareTo(Stop o) {
+            return Float.compare(this.position, o.position);
+        }
     }
 
     private record StopTokens(String colorToken, String positionToken) {

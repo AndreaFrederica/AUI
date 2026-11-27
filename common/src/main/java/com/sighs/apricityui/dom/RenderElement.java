@@ -1,43 +1,61 @@
 package com.sighs.apricityui.dom;
 
-import com.sighs.apricityui.layout.Box;
-import com.sighs.apricityui.layout.Position;
-import com.sighs.apricityui.layout.Size;
-import com.sighs.apricityui.style.*;
-import com.sighs.apricityui.render.Rect;
-import org.joml.Matrix4f;
+import com.sighs.apricityui.element.Svg;
 
-import java.util.ArrayDeque;
-import java.util.HashMap;
+import com.sighs.apricityui.layout.LayoutInvalidation;
+import com.sighs.apricityui.style.DynamicRangeLimit;
+import com.sighs.apricityui.util.Cache;
+
 import java.util.List;
 import java.util.Objects;
 import java.util.Set;
 import java.util.function.Predicate;
+
 import com.sighs.apricityui.style.Style;
 import com.sighs.apricityui.render.Drawer;
-import com.sighs.apricityui.init.Document;
 import com.sighs.apricityui.init.Element;
 import com.sighs.apricityui.style.Animation;
 import com.sighs.apricityui.style.Background;
 import com.sighs.apricityui.style.Filter;
-import com.sighs.apricityui.style.Interaction;
 import com.sighs.apricityui.style.Text;
 import com.sighs.apricityui.style.Transform;
 import com.sighs.apricityui.render.CssBlendMode;
 
 public class RenderElement {
+    private static final Set<String> VISUAL_BOX_PROPS = Set.of(
+            "color", "visibility", "opacity", "dynamicRangeLimit", "mixBlendMode", "isolation",
+            "borderRadius",
+            "boxShadow",
+            "backgroundColor", "backgroundImage", "backgroundRepeat", "backgroundSize", "backgroundPosition",
+            "borderImage", "borderImageSource", "borderImageSlice", "borderImageWidth", "borderImageOutset", "borderImageRepeat",
+            "outline", "outlineWidth", "outlineStyle", "outlineColor", "outlineOffset",
+            "scrollbarColor"
+    );
+    private static final Set<String> BORDER_PAINT_PROPS = Set.of("border", "borderTop", "borderRight", "borderBottom", "borderLeft");
+    private static final Set<String> BACKGROUND_PROPS = Set.of(
+            "backgroundColor", "backgroundImage", "backgroundRepeat", "backgroundSize", "backgroundPosition"
+    );
+    private static final Set<String> CURSOR_PROPS = Set.of("cursor");
+    private static final Set<String> HIT_TEST_PROPS = Set.of("visibility", "pointerEvents");
+    private static final Set<String> STRUCTURAL_PROPS = Set.of(
+            "clipPath", "filter", "backdropFilter", "mixBlendMode", "isolation", "overflow", "overflowX", "overflowY", "maskImage"
+    );
+    private static final Set<String> MASK_PROPS = Set.of(
+            "maskImage", "maskMode", "maskRepeat", "maskPosition", "maskSize",
+            "maskClip", "maskOrigin", "maskComposite"
+    );
     private final Element element;
     public Cache<Element[]> route = new Cache<>() {
         @Override
         public void expandClear() {
-            clearCommittedLayout();
+            element.getLayout().clearCommittedLayout();
             element.children.forEach(e -> e.getRenderer().route.clear());
         }
     };
     public Cache<List<Transform>> transform = new Cache<>() {
         @Override
         public void expandClear() {
-            clearCommittedWorldTransform();
+            element.getLayout().clearCommittedWorldTransform();
             element.children.forEach(e -> e.getRenderer().transform.clear());
         }
     };
@@ -48,9 +66,36 @@ public class RenderElement {
         }
     };
     public Cache<Style> computedStyle = new Cache<>();
+    public Cache<Text> naturalText = new Cache<>() {
+        private long layoutDependency;
+        private long textDependency;
+        private long fontRevision;
+        private double rootFontSize;
+
+        @Override
+        public Text get() {
+            if (value != null && (layoutDependency != element.getLayout().layoutDependency()
+                    || textDependency != element.getLayout().textDependency()
+                    || fontRevision != com.sighs.apricityui.resource.Font.getMetricsRevision()
+                    || rootFontSize != com.sighs.apricityui.layout.Size.getRootFontSize(element.document))) {
+                value = null;
+            }
+            return value;
+        }
+
+        @Override
+        public void set(Text value) {
+            this.value = value;
+            layoutDependency = element.getLayout().layoutDependency();
+            textDependency = element.getLayout().textDependency();
+            fontRevision = com.sighs.apricityui.resource.Font.getMetricsRevision();
+            rootFontSize = com.sighs.apricityui.layout.Size.getRootFontSize(element.document);
+        }
+    };
     public Cache<Text> text = new Cache<>() {
         @Override
         public void expandClear() {
+            naturalText.clear();
             element.children.forEach(e -> e.getRenderer().text.clear());
         }
     };
@@ -58,48 +103,6 @@ public class RenderElement {
         @Override
         public void expandClear() {
             element.children.forEach(e -> e.getRenderer().wrappedText.clear());
-        }
-    };
-    public Cache<Size> size = new Cache<>() {
-        private long dependency = Long.MIN_VALUE;
-
-        @Override
-        public Size get() {
-            if (value == null) return null;
-            if (dependency != usedSizeDependency()) {
-                value = null;
-                // 本元素的已用尺寸作废，意味着它以"包含块"身份提供给子项的那个尺寸也变了。
-                // 网格轨道、百分比、文本换行的子项位置都建立在它之上，而子项的 position
-                // 缓存不带依赖戳（它只靠显式 clear），这里不主动清就会让子项停在旧轨道上
-                // ——页面表现为个别卡片错位且不自愈。向上不传播：祖先的尺寸不由本元素决定。
-                invalidateChildrenPositions(element);
-                return null;
-            }
-            return value;
-        }
-
-        @Override
-        public void set(Size value) {
-            this.value = value;
-            this.dependency = usedSizeDependency();
-        }
-
-        @Override
-        public void expandClear() {
-            clearCommittedLayout();
-        }
-    };
-    public Cache<Box> box = new Cache<>() {
-        @Override
-        public void expandClear() {
-            clearCommittedLayout();
-        }
-    };
-    public Cache<Position> position = new Cache<>() {
-        @Override
-        public void expandClear() {
-            clearCommittedLayout();
-            element.children.forEach(e -> e.getRenderer().position.clear());
         }
     };
     public Cache<Background> background = new Cache<>();
@@ -112,349 +115,47 @@ public class RenderElement {
     public Cache<Filter.FilterState> filter = new Cache<>();
     public Cache<Filter.FilterState> backdropFilter = new Cache<>();
     public Cache<java.util.List<com.sighs.apricityui.style.MaskImage.ResolvedLayer>> maskLayers = new Cache<>();
-    /**
-     * Flex.of 的按元素缓存。不做主动失效：Flex.of 每次用五个关键字与当前
-     * computed style 逐值校验，关键字相同则内容必然相同（Flex 构造后不可变）。
-     */
-    public com.sighs.apricityui.layout.Flex flexCache = null;
-    // resolveOwnExplicitContentHeight 的按 layoutDependency 验证的记忆：结果恒 >= 0
-    // 或 null，NaN 表示"结果为 null"，memoDep 不等表示无记忆。高度解析沿祖先链
-    // 递归，逐层装箱 Double（JFR 归因约 107MB）；记忆把整条链摊成每层一次。
-    public double explicitHeightMemoValue = Double.NaN;
-    public long explicitHeightMemoDep = Long.MIN_VALUE;
-    private Rect committedRect = null;
-    private Matrix4f committedWorldTransform = null;
-    private long styleVersion = 1L;
-    private long textVersion = 1L;
-    private long layoutVersion = 1L;
-    private long scrollVersion = 1L;
-    private long transformVersion = 1L;
-    private long committedRectDependency = Long.MIN_VALUE;
-    private long committedTransformDependency = Long.MIN_VALUE;
-    // 提交时刻的 scroll-free 依赖（不含任何 scrollVersion）。滚动平移快速路径用它判定
-    // “committed 几何只有滚动分量过期”——成立则整体平移即可，否则退回完整重建。
-    private long committedRectScrollFreeDependency = Long.MIN_VALUE;
-    private long committedTransformScrollFreeDependency = Long.MIN_VALUE;
 
     public RenderElement(Element element) {
         this.element = element;
     }
 
-    public Rect getCommittedRect() {
-        return committedRect;
-    }
-
-    public Rect getCommittedRectIfValid() {
-        return hasCommittedRect(rectDependency(element.document)) ? committedRect : null;
-    }
-
-    public Matrix4f getCommittedWorldTransform() {
-        return committedWorldTransform;
-    }
-
-    public Matrix4f getCommittedWorldTransformIfValid() {
-        return hasCommittedWorldTransform(transformDependency(element.document)) ? committedWorldTransform : null;
-    }
-
-    public boolean hasCommittedRect(long dependency) {
-        return committedRect != null && committedRectDependency == dependency;
-    }
-
-    public boolean hasCommittedWorldTransform(long dependency) {
-        return committedWorldTransform != null && committedTransformDependency == dependency;
-    }
-
-    public void commitRect(Rect rect, long dependency) {
-        committedRect = rect;
-        committedRectDependency = dependency;
-        committedRectScrollFreeDependency = rectDependencyExcludingScroll(element.document);
-    }
-
-    public void commitWorldTransform(Matrix4f worldTransform, long dependency) {
-        committedWorldTransform = worldTransform;
-        committedTransformDependency = dependency;
-        committedTransformScrollFreeDependency = transformDependencyExcludingScroll(element.document);
-    }
-
-    /**
-     * committed rect 是否只差滚动分量没有同步：scroll-free 依赖未变，
-     * 说明自提交以来只有 route 上的 scrollVersion 变了，整体平移即可恢复有效。
-     */
-    public boolean hasScrollStableCommittedRect() {
-        return committedRect != null
-                && committedRectScrollFreeDependency == rectDependencyExcludingScroll(element.document);
-    }
-
-    public boolean hasScrollStableCommittedWorldTransform() {
-        return committedWorldTransform != null
-                && committedTransformScrollFreeDependency == transformDependencyExcludingScroll(element.document);
-    }
-
-    public void invalidateLayoutVersion() {
-        layoutVersion++;
-    }
-
-    /**
-     * Version of all geometry inputs that can affect this element's used size.
-     * Layout caches use this stamp instead of requiring every mutation path to
-     * know which cache table must be cleared.
-     */
-    public long layoutDependency() {
-        return usedSizeDependency();
-    }
-
-    /**
-     * Version of text styling inherited by this element's layout objects.
-     * Text runs are stored inside normal/flex layout results, so their cache
-     * dependency must be separate from geometry and hit-test dependencies.
-     */
-    public long textDependency() {
-        long value = 17L;
-        for (Element routeElement : element.getRouteArray()) {
-            value = mix(value, routeElement.getRenderer().textVersion);
+    /** Updates cached paint data for one sampled style. Layout scheduling stays with the document. */
+    public static boolean updateSampledStyle(Element element, Style before, Style after, boolean rebuildLayout) {
+        var renderer = element.getRenderer();
+        var layout = element.getLayout();
+        if (!rebuildLayout && (LayoutInvalidation.differsAny(before, after, BORDER_PAINT_PROPS)
+                || !Objects.equals(before.color, after.color)
+                || !Objects.equals(before.boxShadow, after.boxShadow)
+                || !Objects.equals(before.borderRadius, after.borderRadius))) {
+            layout.clearVisualBoxCache();
+            layout.invalidateStyleVersion();
         }
-        return value;
-    }
-
-    private long usedSizeDependency() {
-        long value = 17L;
-        if (element.document != null) value = mix(value, element.document.getViewportVersion());
-        Element[] route = element.getRouteArray();
-        for (int i = 0; i < route.length; i++) {
-            RenderElement renderer = route[i].getRenderer();
-            value = mix(value, renderer.layoutVersion);
-            if (i == 0) continue;
-            Size ancestorSize = renderer.size.value;
-            if (ancestorSize != null) {
-                value = mix(value, Double.doubleToLongBits(ancestorSize.width()));
-                value = mix(value, Double.doubleToLongBits(ancestorSize.height()));
-            }
+        if (LayoutInvalidation.differsAny(before, after, Style.getTextPropWithoutColor())) {
+            renderer.text.clear();
+            renderer.wrappedText.clear();
+            element.forEachRoute(node -> node.getLayout().invalidateTextVersion());
         }
-        return value;
-    }
-
-    /**
-     * Invalidates cached used values whose containing block may have changed.
-     * Descendant percentages, flex/grid assignments, text wrapping and
-     * percentage transforms all depend on ancestor geometry.
-     */
-    public void invalidateLayoutSubtree() {
-        ArrayDeque<Element> stack = new ArrayDeque<>();
-        stack.push(element);
-        while (!stack.isEmpty()) {
-            Element current = stack.pop();
-            RenderElement renderer = current.getRenderer();
-            renderer.layoutVersion++;
-            renderer.size.value = null;
-            renderer.box.value = null;
-            renderer.position.value = null;
-            renderer.text.value = null;
-            renderer.wrappedText.value = null;
-            renderer.transform.value = null;
-            renderer.clearCommittedLayout();
-            for (Element child : current.getExistingLayoutChildren()) {
-                stack.push(child);
-            }
+        if (!Objects.equals(before.opacity, after.opacity)) renderer.opacity.clear();
+        if (!Objects.equals(before.opacity, after.opacity) || !Objects.equals(before.filter, after.filter)) {
+            renderer.filter.clear();
         }
-    }
-
-    public void invalidateStyleVersion() {
-        styleVersion++;
-    }
-
-    public void invalidateTextVersion() {
-        textVersion++;
-    }
-
-    public void invalidateScrollVersion() {
-        scrollVersion++;
-    }
-
-    public void invalidateTransformVersion() {
-        transformVersion++;
-    }
-
-    public long rectDependency(Document document) {
-        return dependency(document, false, true);
-    }
-
-    public long transformDependency(Document document) {
-        return dependency(document, true, true);
-    }
-
-    /** 与 {@link #rectDependency} 相同，但不混入 route 上任何 scrollVersion。 */
-    public long rectDependencyExcludingScroll(Document document) {
-        return dependency(document, false, false);
-    }
-
-    /** 与 {@link #transformDependency} 相同，但不混入 route 上任何 scrollVersion。 */
-    public long transformDependencyExcludingScroll(Document document) {
-        return dependency(document, true, false);
-    }
-
-    private long dependency(Document document, boolean includeTransform, boolean includeScroll) {
-        long value = 17L;
-        if (document != null) {
-            value = mix(value, document.getViewportVersion());
+        if (!Objects.equals(before.backdropFilter, after.backdropFilter)) renderer.backdropFilter.clear();
+        if (LayoutInvalidation.differsAny(before, after, BACKGROUND_PROPS)) {
+            renderer.background.clear();
+            layout.invalidateStyleVersion();
         }
-        Element[] route = element.getRouteArray();
-        for (int i = 0; i < route.length; i++) {
-            RenderElement renderer = route[i].getRenderer();
-            if (!includeTransform && route[i] == element) {
-                value = mix(value, renderer.styleVersion);
-            }
-            value = mix(value, renderer.layoutVersion);
-            if (includeScroll) {
-                value = mix(value, renderer.scrollVersion);
-            }
-            if (includeTransform) {
-                value = mix(value, renderer.transformVersion);
-            }
-            // 祖先的**已用尺寸**同样是本元素几何的输入：网格轨道、百分比、文本换行都
-            // 取决于它。它变了却不一定会有人 bump layoutVersion（例如祖先在同一次布局里
-            // 被重新分配了宽度），只混计数器就会让已提交的 rect 被误判为"仍然有效"，
-            // 于是元素停在旧轨道上——页面表现为个别卡片错位且不自愈。
-            // 这里与 usedSizeDependency()（布局缓存用的戳）保持一致的输入集合。
-            if (i > 0) {
-                Size ancestorSize = renderer.size.value;
-                if (ancestorSize != null) {
-                    value = mix(value, Double.doubleToLongBits(ancestorSize.width()));
-                    value = mix(value, Double.doubleToLongBits(ancestorSize.height()));
-                }
-            }
+        if (!Objects.equals(before.color, after.color)) {
+            renderer.text.clear();
+            renderer.background.clear();
+            renderer.maskLayers.clear();
         }
-        return value;
+        if (Objects.equals(before.transform, after.transform)
+                && Objects.equals(before.transformOrigin, after.transformOrigin)) return false;
+        renderer.transform.clear();
+        layout.invalidateTransformVersion();
+        return true;
     }
-
-    private static long mix(long value, long version) {
-        return (value * 0x9E3779B185EBCA87L) ^ version;
-    }
-
-    public void clearCommittedLayout() {
-        committedRect = null;
-        committedWorldTransform = null;
-        committedRectDependency = Long.MIN_VALUE;
-        committedTransformDependency = Long.MIN_VALUE;
-        committedRectScrollFreeDependency = Long.MIN_VALUE;
-        committedTransformScrollFreeDependency = Long.MIN_VALUE;
-    }
-
-    public void clearCommittedWorldTransform() {
-        committedWorldTransform = null;
-        committedTransformDependency = Long.MIN_VALUE;
-        committedTransformScrollFreeDependency = Long.MIN_VALUE;
-    }
-
-    /** Clears visual box parsing without invalidating the unchanged hit-test geometry. */
-    public void clearVisualBoxCache() {
-        box.value = null;
-    }
-
-    public void clearCommittedLayoutSubtree() {
-        clearCommittedLayout();
-        for (Element child : element.children) {
-            child.getRenderer().clearCommittedLayoutSubtree();
-        }
-    }
-
-    public void clearCommittedWorldTransformSubtree() {
-        clearCommittedWorldTransform();
-        for (Element child : element.children) {
-            child.getRenderer().clearCommittedWorldTransformSubtree();
-        }
-    }
-
-    public static class Cache<T> {
-        T value = null;
-
-        public T get() {
-            return value;
-        }
-
-        public void set(T value) {
-            this.value = value;
-        }
-
-        public void clear() {
-            value = null;
-            expandClear();
-        }
-
-        public void expandClear() {
-        }
-    }
-
-    /**
-     * 本元素已用尺寸变化后，丢弃子项的位置缓存。
-     *
-     * <p>{@code position} 缓存不带依赖戳，只靠显式 {@code clear()} 失效；而 Grid/Flex/百分比
-     * 子项的位置由父级分配，父级尺寸由依赖戳判定为过期时并不会经过样式失效路径，
-     * 于是子项会一直停在旧轨道上。这里只清一层：更深的子项由它们自己父级的尺寸变化
-     * 递归处理（尺寸变化会沿树向下逐层触发本方法）。</p>
-     */
-    static void invalidateChildrenPositions(Element element) {
-        if (element == null) return;
-        List<Element> children = element.children;
-        for (int i = 0; i < children.size(); i++) {
-            Element child = children.get(i);
-            if (child == null) continue;
-            RenderElement childRenderer = child.getRenderer();
-            childRenderer.position.clear();
-            childRenderer.clearCommittedLayout();
-        }
-    }
-
-    private static final Set<String> LAYOUT_PROPS = Set.of(
-            "width", "height", "boxSizing",
-            "margin", "marginTop", "marginBottom", "marginLeft", "marginRight",
-            "flexDirection", "flexWrap", "alignContent", "justifyContent", "alignItems", "order",
-            "gridTemplateColumns", "gridTemplateRows",
-            "gap", "rowGap", "columnGap",
-            "scrollbarWidth",
-            "justifyItems",
-            "gridRow", "gridColumn", "justifySelf", "alignSelf",
-            "position", "top", "bottom", "left", "right", "display"
-    );
-
-    private static final Set<String> PADDING_PROPS = Set.of(
-            "padding", "paddingTop", "paddingBottom", "paddingLeft", "paddingRight"
-    );
-
-    // border 单独处理：ShorthandParser.applyBorderColor 会把 border-color 改写进
-    // borderTop/Right/Bottom/Left 字符串，颜色/线型变化不影响几何，不该触发 RELAYOUT。
-    private static final Set<String> BORDER_PROPS = Set.of(
-            "border", "borderTop", "borderBottom", "borderLeft", "borderRight"
-    );
-
-    private static final Set<String> VISUAL_BOX_PROPS = Set.of(
-            "color", "visibility", "opacity", "dynamicRangeLimit", "mixBlendMode", "isolation",
-            "borderRadius",
-            "boxShadow",
-            "backgroundColor", "backgroundImage", "backgroundRepeat", "backgroundSize", "backgroundPosition",
-            "borderImage", "borderImageSource", "borderImageSlice", "borderImageWidth", "borderImageOutset", "borderImageRepeat",
-            "scrollbarColor"
-    );
-
-    private static final Set<String> BACKGROUND_PROPS = Set.of(
-            "backgroundColor", "backgroundImage", "backgroundRepeat", "backgroundSize", "backgroundPosition"
-    );
-    private static final Set<String> CURSOR_PROPS = Set.of("cursor");
-    private static final Set<String> HIT_TEST_PROPS = Set.of("visibility", "pointerEvents");
-
-    private static final Set<String> TEXT_LAYOUT_PROPS = Set.of(
-            "fontSize", "lineHeight", "fontFamily", "fontWeight", "fontStyle", "textStroke",
-            "direction", "letterSpacing", "textAlign", "verticalAlign", "textIndent", "whiteSpace", "wordBreak", "textOverflow",
-            "lineClamp"
-    );
-
-    private static final Set<String> STRUCTURAL_PROPS = Set.of(
-            "clipPath", "filter", "backdropFilter", "mixBlendMode", "isolation", "overflow", "overflowX", "overflowY", "maskImage"
-    );
-
-    private static final Set<String> MASK_PROPS = Set.of(
-            "maskImage", "maskMode", "maskRepeat", "maskPosition", "maskSize",
-            "maskClip", "maskOrigin", "maskComposite"
-    );
 
     public static void observeStyle(Element element, Style origin, Style current) {
         observeStyleMask(element, origin, current);
@@ -466,6 +167,11 @@ public class RenderElement {
      * 自己的布局子树，所以要把脏位拿出来看。
      */
     public static int observeStyleMask(Element element, Style origin, Style current) {
+        return observeStyleMask(element, origin, current, false);
+    }
+
+    public static int observeStyleMask(Element element, Style origin, Style current,
+                                       boolean deferOutOfFlowPseudoLayout) {
         int dirtyMask = 0;
 
         Predicate<Set<String>> check = set -> {
@@ -481,6 +187,7 @@ public class RenderElement {
         };
 
         RenderElement renderer = element.getRenderer();
+        Svg.invalidatePaintIfChanged(element, origin, current);
 
         for (String prop : STRUCTURAL_PROPS) {
             String oVal = origin.get(prop);
@@ -520,7 +227,7 @@ public class RenderElement {
 
         if (!current.transform.equals(origin.transform) || !current.transformOrigin.equals(origin.transformOrigin)) {
             renderer.transform.clear();
-            renderer.invalidateTransformVersion();
+            element.getLayout().invalidateTransformVersion();
             dirtyMask |= Drawer.REPAINT | Drawer.COMMIT_LAYOUT;
             if (Transform.createsStackingContext(origin.transform) != Transform.createsStackingContext(current.transform)
                     || Math.abs(Transform.getTranslateZ(origin.transform) - Transform.getTranslateZ(current.transform)) > 0.0001) {
@@ -549,71 +256,7 @@ public class RenderElement {
             dirtyMask |= Drawer.REPAINT;
         }
 
-        boolean textChanged = check.test(Style.getTextProp());
-        if (textChanged) {
-            renderer.text.clear();
-            renderer.wrappedText.clear();
-            // A flow result may be cached by an ancestor while this element's
-            // inherited color/font is changing. Bump the route dependency so
-            // that the ancestor rebuilds its stored TextRunLayout objects.
-            element.forEachRoute(routeElement -> routeElement.getRenderer().invalidateTextVersion());
-            dirtyMask |= Drawer.REPAINT;
-
-            if (check.test(TEXT_LAYOUT_PROPS)) {
-                // 字体大小行高变化触发重排
-                element.forEachRoute(routeElement -> {
-                    RenderElement routeRenderer = routeElement.getRenderer();
-                    routeRenderer.invalidateLayoutVersion();
-                    routeRenderer.size.clear();
-                });
-                renderer.box.clear();
-                if (element.parentElement != null) {
-                    element.parentElement.getRenderer().size.clear();
-                    element.parentElement.children.forEach(sibling -> sibling.getRenderer().position.clear());
-                } else renderer.position.clear();
-
-                dirtyMask |= Drawer.RELAYOUT;
-            }
-        }
-
-        boolean paddingChanged = check.test(PADDING_PROPS);
-        boolean borderChanged = check.test(BORDER_PROPS);
-        boolean borderGeometryChanged = borderChanged && borderGeometryChanged(origin, current);
-        boolean layoutChanged = check.test(LAYOUT_PROPS);
-
-        if (paddingChanged || borderGeometryChanged) {
-            element.forEachRoute(e -> e.getRenderer().size.clear());
-            element.forEachRoute(e -> e.getRenderer().box.clear());
-            if (element.parentElement != null) {
-                element.parentElement.getRenderer().size.clear();
-                element.parentElement.children.forEach(sibling -> sibling.getRenderer().position.clear());
-            } else renderer.position.clear();
-
-            dirtyMask |= Drawer.RELAYOUT;
-        }
-
-        if (borderChanged && !borderGeometryChanged) {
-            // 纯 border 颜色/线型变化：几何不变，只重解析 Box 视觉字段并重绘。
-            // 避免 hover 切换 border-color 时整棵子树 full relayout。
-            renderer.clearVisualBoxCache();
-            renderer.invalidateStyleVersion();
-            dirtyMask |= Drawer.REPAINT;
-        }
-
-        if (layoutChanged) {
-            element.forEachRoute(e -> e.getRenderer().size.clear());
-            renderer.box.clear();
-            if (element.parentElement != null) {
-                element.parentElement.getRenderer().size.clear();
-                element.parentElement.children.forEach(sibling -> sibling.getRenderer().position.clear());
-            } else renderer.position.clear();
-
-            dirtyMask |= Drawer.RELAYOUT;
-        }
-
-        if (paddingChanged || borderGeometryChanged || layoutChanged) {
-            renderer.invalidateLayoutSubtree();
-        }
+        dirtyMask |= LayoutInvalidation.styleChanged(element, origin, current, check);
 
         if (!origin.display.equals(current.display)) {
             dirtyMask |= Drawer.REORDER;
@@ -625,13 +268,21 @@ public class RenderElement {
 
         if (check.test(BACKGROUND_PROPS)) {
             renderer.background.clear();
-            renderer.invalidateStyleVersion();
+            element.getLayout().invalidateStyleVersion();
+            dirtyMask |= Drawer.REPAINT;
+        }
+
+        if (!Objects.equals(origin.color, current.color)) {
+            // currentColor 在解析阶段被烘焙进背景/遮罩（背景色、渐变色标），
+            // 文字色变化（含继承）必须让这些缓存按新颜色重建。
+            renderer.background.clear();
+            renderer.maskLayers.clear();
             dirtyMask |= Drawer.REPAINT;
         }
 
         if (check.test(VISUAL_BOX_PROPS)) {
-            renderer.clearVisualBoxCache();
-            renderer.invalidateStyleVersion();
+            element.getLayout().clearVisualBoxCache();
+            element.getLayout().invalidateStyleVersion();
             dirtyMask |= Drawer.REPAINT;
         }
 
@@ -646,7 +297,7 @@ public class RenderElement {
         if (!origin.animation.equals(current.animation)) {
             Animation.stop(element);
             renderer.transform.clear();
-            renderer.invalidateTransformVersion();
+            element.getLayout().invalidateTransformVersion();
             renderer.filter.clear();
             dirtyMask |= Drawer.REPAINT;
         }
@@ -655,26 +306,13 @@ public class RenderElement {
             dirtyMask |= Drawer.REORDER;
         }
 
-        if (dirtyMask != 0 && element.document != null) {
-            element.document.markDirty(element, dirtyMask);
+        int committedDirtyMask = deferOutOfFlowPseudoLayout
+                ? dirtyMask & ~Drawer.RELAYOUT
+                : dirtyMask;
+        if (committedDirtyMask != 0 && element.document != null) {
+            element.document.markDirty(element, committedDirtyMask);
         }
         return dirtyMask;
     }
 
-    /**
-     * 判断 border 变化是否影响几何（宽度或线型）。解析失败时 SideBorder 落到默认值，
-     * 与另一侧默认值比较仍成立则视为纯视觉变化；只有 size/type 有差异才需要重排。
-     */
-    private static boolean borderGeometryChanged(Style origin, Style current) {
-        for (String prop : BORDER_PROPS) {
-            String oVal = origin.get(prop);
-            String cVal = current.get(prop);
-            if (oVal == null && cVal == null) continue;
-            if (oVal != null && oVal.equals(cVal)) continue;
-            Box.SideBorder oSide = Box.parseSideBorder(oVal);
-            Box.SideBorder cSide = Box.parseSideBorder(cVal);
-            if (oSide.size() != cSide.size() || !oSide.type().equals(cSide.type())) return true;
-        }
-        return false;
-    }
 }

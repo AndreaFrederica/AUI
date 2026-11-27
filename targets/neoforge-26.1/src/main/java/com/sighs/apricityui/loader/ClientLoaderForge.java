@@ -33,7 +33,9 @@ import java.util.concurrent.Executor;
  */
 @EventBusSubscriber(modid = ApricityUI.MODID, value = Dist.CLIENT)
 public final class ClientLoaderForge {
-    /** Probe template: once visible, the scan has reached the client resource manager. */
+    /**
+     * Probe template: once visible, the scan has reached the client resource manager.
+     */
     private static final String TEMPLATE_PROBE = "devtools/resource.html";
     private static final int TEMPLATE_RETRY_INTERVAL_TICKS = 10;
     private static final int TEMPLATE_RETRY_LIMIT = 30;
@@ -70,7 +72,9 @@ public final class ClientLoaderForge {
         HTML.scan();
     }
 
-    /** Hooks template scanning into client resource reloads (F3+T, pack toggles). */
+    /**
+     * Hooks template scanning into client resource reloads (F3+T, pack toggles).
+     */
     @SubscribeEvent
     public static void registerResourceReloadListener(AddClientReloadListenersEvent event) {
         // 26.1 may fire this event more than once for the same resource manager
@@ -97,6 +101,7 @@ public final class ClientLoaderForge {
     }
 
     private static void rescanAfterReload() {
+        com.sighs.apricityui.model.ModelRenderService.invalidate();
         // The first invocation is the initial startup reload: documents cannot
         // exist yet, so scan quietly without the refresh pass and toast.
         if (initialPackScanPending) {

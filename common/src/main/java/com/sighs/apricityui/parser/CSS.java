@@ -25,30 +25,12 @@ import java.util.regex.Pattern;
 import java.util.concurrent.ConcurrentHashMap;
 
 public class CSS {
-    /** 提取 CSS url(...) 引用的公共正则，resource 包共用。 */
+    /**
+     * 提取 CSS url(...) 引用的公共正则，resource 包共用。
+     */
     public static final Pattern URL_EXTRACTOR = Pattern.compile("url\\s*\\(\\s*['\"]?(.*?)['\"]?\\s*\\)");
     private static final Map<StylesheetCacheKey, CompiledStylesheet> COMPILED_STYLESHEETS = new ConcurrentHashMap<>();
     private static final Set<String> WARMED_FONT_FAMILIES = ConcurrentHashMap.newKeySet();
-
-    /**
-     * 带 !important 标志的 CSS 声明。value 中不再包含 "!important" 后缀。
-     */
-    public record Declaration(String value, boolean important) {
-    }
-
-    /**
-     * One author stylesheet of a document in document order: an external {@code <link>}
-     * ({@code external=true}, {@code value}=href) or an inline {@code <style>}
-     * ({@code external=false}, {@code value}=CSS text).
-     */
-    public record StylesheetSource(boolean external, String value) {
-    }
-
-    public record DebugRule(String selector, Map<String, Declaration> properties, String sourcePath, int order) {
-        public DebugRule {
-            properties = properties == null ? new LinkedHashMap<>() : new LinkedHashMap<>(properties);
-        }
-    }
 
     public static void readCSS(String css, Map<String, Map<String, Declaration>> targetCache, String contextPath) {
         Parser.parse(css, targetCache, null, contextPath, 0, null);
@@ -129,6 +111,54 @@ public class CSS {
         );
     }
 
+    /**
+     * Rebuilds the selector cache from the author declarations exposed to DevTools.
+     */
+    public static void rebuildCacheFromDebugRules(List<DebugRule> debugRules,
+                                                  Map<String, Map<String, Declaration>> targetCache) {
+        if (targetCache == null) return;
+        targetCache.clear();
+        if (debugRules == null || debugRules.isEmpty()) return;
+        ArrayList<DebugRule> ordered = new ArrayList<>(debugRules);
+        ordered.sort(Comparator.comparingInt(DebugRule::order));
+        for (DebugRule rule : ordered) {
+            if (rule == null || rule.selector() == null || rule.selector().isBlank()) continue;
+            Map<String, Declaration> expanded = Parser.expandAuthorProperties(rule.properties());
+            for (String selector : rule.selector().split("\\s*,\\s*")) {
+                String normalized = selector.trim();
+                if (normalized.isEmpty()) continue;
+                targetCache.merge(normalized, new LinkedHashMap<>(expanded), (oldMap, newMap) -> {
+                    newMap.forEach((property, declaration) -> Parser.putDeclaration(oldMap, property, declaration));
+                    return oldMap;
+                });
+            }
+        }
+    }
+
+    /**
+     * 带 !important 标志的 CSS 声明。value 中不再包含 "!important" 后缀。
+     * pendingShorthand identifies the source shorthand of an unresolved longhand value.
+     */
+    public record Declaration(String value, boolean important, String pendingShorthand) {
+        public Declaration(String value, boolean important) {
+            this(value, important, null);
+        }
+    }
+
+    /**
+     * One author stylesheet of a document in document order: an external {@code <link>}
+     * ({@code external=true}, {@code value}=href) or an inline {@code <style>}
+     * ({@code external=false}, {@code value}=CSS text).
+     */
+    public record StylesheetSource(boolean external, String value) {
+    }
+
+    public record DebugRule(String selector, Map<String, Declaration> properties, String sourcePath, int order) {
+        public DebugRule {
+            properties = properties == null ? new LinkedHashMap<>() : new LinkedHashMap<>(properties);
+        }
+    }
+
     private record StylesheetCacheKey(String css, String contextPath, int viewportWidth, int viewportHeight) {
     }
 
@@ -163,37 +193,15 @@ public class CSS {
         }
     }
 
-    /** Rebuilds the selector cache from the author declarations exposed to DevTools. */
-    public static void rebuildCacheFromDebugRules(List<DebugRule> debugRules,
-                                                  Map<String, Map<String, Declaration>> targetCache) {
-        if (targetCache == null) return;
-        targetCache.clear();
-        if (debugRules == null || debugRules.isEmpty()) return;
-        ArrayList<DebugRule> ordered = new ArrayList<>(debugRules);
-        ordered.sort(Comparator.comparingInt(DebugRule::order));
-        for (DebugRule rule : ordered) {
-            if (rule == null || rule.selector() == null || rule.selector().isBlank()) continue;
-            Map<String, Declaration> expanded = Parser.expandAuthorProperties(rule.properties());
-            for (String selector : rule.selector().split("\\s*,\\s*")) {
-                String normalized = selector.trim();
-                if (normalized.isEmpty()) continue;
-                targetCache.merge(normalized, new LinkedHashMap<>(expanded), (oldMap, newMap) -> {
-                    newMap.forEach((property, declaration) -> Parser.putDeclaration(oldMap, property, declaration));
-                    return oldMap;
-                });
-            }
-        }
-    }
-
     public static class Extractor extends TagExtractor {
         private static final Pattern STYLE_TAG_PATTERN =
-                Pattern.compile("(?i)<style\\b([^>]*)>(.*?)</style\\s*>", Pattern.DOTALL);
+                Pattern.compile("(?i)<style\\b((?:\"[^\"]*\"|'[^']*'|[^>\"'])*)>(.*?)</style\\s*>", Pattern.DOTALL);
         private static final Pattern LINK_TAG_PATTERN =
-            Pattern.compile("(?i)<link\\b([^>]*?)>", Pattern.DOTALL);
+                Pattern.compile("(?i)<link\\b((?:\"[^\"]*\"|'[^']*'|[^>\"'])*)>", Pattern.DOTALL);
         private static final Pattern STYLE_OPEN_MARKER = Pattern.compile("(?i)<style\\b");
         private static final Pattern STYLE_CLOSE_MARKER = Pattern.compile("(?i)</style\\s*>");
         private static final Pattern STYLESHEET_TAG_PATTERN = Pattern.compile(
-                "(?is)<style\\b([^>]*)>(.*?)</style\\s*>|<link\\b([^>]*?)>");
+                "(?is)<style\\b((?:\"[^\"]*\"|'[^']*'|[^>\"'])*)>(.*?)</style\\s*>|<link\\b((?:\"[^\"]*\"|'[^']*'|[^>\"'])*)>");
 
         private final List<StylesheetSource> orderedSources = new ArrayList<>();
 
@@ -201,92 +209,13 @@ public class CSS {
             super(contextPath, STYLE_OPEN_MARKER, STYLE_CLOSE_MARKER, "CSS", "style");
         }
 
-        @Override
-        protected String extract(String html) {
-            collectOrderedSources(html);
-            return extractLinks(removeTags(html, STYLE_TAG_PATTERN));
-        }
-
         /**
-         * Records {@code <link rel="stylesheet">} and {@code <style>} in document order.
-         *
-         * <p>The tags themselves are collected by {@link #removeTags} and {@link #extractLinks},
-         * which visit each kind in its own pass and therefore lose their relative order. The
-         * cascade needs that order: a browser applies the sheets in document order, so a later
-         * inline {@code <style>} overrides an earlier {@code <link>} at equal specificity.</p>
+         * 取某个捕获组的原文片段；该组未参与匹配时返回 null。
          */
-        private void collectOrderedSources(String html) {
-            orderedSources.clear();
-            if (html == null || html.isEmpty()) return;
-            Matcher matcher = STYLESHEET_TAG_PATTERN.matcher(html);
-            while (matcher.find()) {
-                String linkAttrs = matcher.group(3);
-                if (linkAttrs != null) {
-                    if (!isStylesheetLink(linkAttrs)) continue;
-                    String hrefValue = HTML.findAttrValue(linkAttrs, "href");
-                    if (hrefValue == null || hrefValue.isEmpty() || isBinaryStylesheetResource(hrefValue)) {
-                        continue;
-                    }
-                    orderedSources.add(new StylesheetSource(true, hrefValue));
-                    continue;
-                }
-                String inner = matcher.group(2);
-                if (inner != null && !inner.isBlank()) {
-                    orderedSources.add(new StylesheetSource(false, inner.trim()));
-                }
-            }
-        }
-
-        /** Stylesheets of this document in document order. */
-        public List<StylesheetSource> orderedStylesheetSources() {
-            return List.copyOf(orderedSources);
-        }
-
-        @Override
-        protected void onTag(String attrText, String inner) {
-            String srcValue = HTML.findAttrValue(attrText, "src");
-            if (srcValue != null && !srcValue.isEmpty()) {
-                ApricityUI.LOGGER.warn(
-                        "[AUI CSS] style tag uses unsupported src attribute path={} src={}",
-                        AuiLog.source(contextPath),
-                        srcValue
-                );
-            }
-
-            if (inner != null && !inner.isBlank()) {
-                cachedContents.add(inner.trim());
-            }
-        }
-
-        /** 处理 <link rel="stylesheet">：缓存 href，移除或保留非样式表链接。 */
-        private String extractLinks(String html) {
-            Matcher linkMatcher = LINK_TAG_PATTERN.matcher(html);
-            StringBuffer linkFree = new StringBuffer();
-            while (linkMatcher.find()) {
-                String attrText = linkMatcher.group(1);
-                if (!isStylesheetLink(attrText)) {
-                    linkMatcher.appendReplacement(linkFree, Matcher.quoteReplacement(linkMatcher.group()));
-                    continue;
-                }
-
-                String hrefValue = HTML.findAttrValue(attrText, "href");
-                if (hrefValue != null && !hrefValue.isEmpty()) {
-                    if (isBinaryStylesheetResource(hrefValue)) {
-                        linkMatcher.appendReplacement(linkFree, "");
-                        continue;
-                    }
-                    cachedSrcs.add(hrefValue);
-                } else {
-                    ApricityUI.LOGGER.warn(
-                            "[AUI CSS] stylesheet link has no href path={} attributes={}",
-                            AuiLog.source(contextPath),
-                            AuiLog.compact(attrText)
-                    );
-                }
-                linkMatcher.appendReplacement(linkFree, "");
-            }
-            linkMatcher.appendTail(linkFree);
-            return linkFree.toString();
+        private static String slice(String source, Matcher matcher, int group) {
+            int start = matcher.start(group);
+            if (start < 0) return null;
+            return source.substring(start, matcher.end(group));
         }
 
         private static boolean isStylesheetLink(String attrText) {
@@ -313,6 +242,104 @@ public class CSS {
                     || lower.endsWith(".eot");
         }
 
+        @Override
+        protected String extract(String html) {
+            String scanned = HTML.maskForTagScan(html);
+            return extract(html, scanned);
+        }
+
+        @Override
+        protected String extract(String html, String scanned) {
+            collectOrderedSources(html, scanned);
+            collectLinks(html, scanned);
+            return removeTags(html, scanned, STYLE_TAG_PATTERN);
+        }
+
+        /**
+         * Records {@code <link rel="stylesheet">} and {@code <style>} in document order.
+         *
+         * <p>The sources are also collected by {@link #removeTags} and {@link #collectLinks},
+         * which visit each kind in its own pass and therefore lose their relative order. The
+         * cascade needs that order: a browser applies the sheets in document order, so a later
+         * inline {@code <style>} overrides an earlier {@code <link>} at equal specificity.</p>
+         */
+        private void collectOrderedSources(String html, String scanned) {
+            orderedSources.clear();
+            if (html == null || html.isEmpty()) return;
+            /* 在遮罩文本上匹配（注释 / raw text 正文里的字面 link、style 不算），
+               属性与正文则回原文按范围取，保证内容原样。 */
+            Matcher matcher = STYLESHEET_TAG_PATTERN.matcher(scanned);
+            while (matcher.find()) {
+                String linkAttrs = slice(html, matcher, 3);
+                if (linkAttrs != null) {
+                    if (!isStylesheetLink(linkAttrs)) continue;
+                    String hrefValue = HTML.findAttrValue(linkAttrs, "href");
+                    if (hrefValue == null || hrefValue.isEmpty() || isBinaryStylesheetResource(hrefValue)) {
+                        continue;
+                    }
+                    orderedSources.add(new StylesheetSource(true, hrefValue));
+                    continue;
+                }
+                String inner = slice(html, matcher, 2);
+                if (inner != null && !inner.isBlank()) {
+                    orderedSources.add(new StylesheetSource(false, inner.trim()));
+                }
+            }
+        }
+
+        /**
+         * Stylesheets of this document in document order.
+         */
+        public List<StylesheetSource> orderedStylesheetSources() {
+            return List.copyOf(orderedSources);
+        }
+
+        @Override
+        protected void onTag(String attrText, String inner) {
+            String srcValue = HTML.findAttrValue(attrText, "src");
+            if (srcValue != null && !srcValue.isEmpty()) {
+                ApricityUI.LOGGER.warn(
+                        "[AUI CSS] style tag uses unsupported src attribute path={} src={}",
+                        AuiLog.source(contextPath),
+                        srcValue
+                );
+            }
+
+            if (inner != null && !inner.isBlank()) {
+                cachedContents.add(inner.trim());
+            }
+        }
+
+        /**
+         * 缓存 <link rel="stylesheet"> 的 href，不在提取阶段剥掉原标签。
+         */
+        private void collectLinks(String html, String scanned) {
+            if (html == null || html.indexOf('<') < 0) return;
+            Matcher linkMatcher = LINK_TAG_PATTERN.matcher(scanned);
+            while (linkMatcher.find()) {
+                String attrText = html.substring(linkMatcher.start(1), linkMatcher.end(1));
+                if (!isStylesheetLink(attrText)) continue;
+
+                String hrefValue = HTML.findAttrValue(attrText, "href");
+                if (hrefValue != null && !hrefValue.isEmpty()) {
+                    if (!isBinaryStylesheetResource(hrefValue)) cachedSrcs.add(hrefValue);
+                } else {
+                    ApricityUI.LOGGER.warn(
+                            "[AUI CSS] stylesheet link has no href path={} attributes={}",
+                            AuiLog.source(contextPath),
+                            AuiLog.compact(attrText)
+                    );
+                }
+            }
+        }
+
+        /**
+         * 仅测试入口：main 里没有调用点。热重载的重新挂载走 {@link Document#refreshStyles()}，
+         * 它手工复刻了这里的两步副作用（{@code ResourceUsageIndex.recordCss} 与
+         * {@code StyleAsyncHandler.INSTANCE.attach}），再补上模板 link 保留与运行时表格重挂。
+         * 保留本方法只是为了让测试一次性驱动"提取 → 挂载"链路（见 ResourcePipelineTest），
+         * main 不要再新增调用。
+         */
         @Override
         public void pushToDocument(Document document) {
             if (document == null) {
@@ -409,61 +436,61 @@ public class CSS {
             }
             try {
                 if (css == null || css.isBlank()) return orderStart;
-            String normalizedCss = evaluateMediaRules(parseAndRegisterAnimations(css, contextPath), viewport, contextPath);
-            int openBraces = countCharacter(normalizedCss, '{');
-            int closeBraces = countCharacter(normalizedCss, '}');
-            if (openBraces != closeBraces) {
-                ApricityUI.LOGGER.error(
-                        "[AUI CSS] unmatched braces path={} open={} close={} snippet={}",
-                        AuiLog.source(contextPath),
-                        openBraces,
-                        closeBraces,
-                        AuiLog.compact(normalizedCss)
-                );
-            }
-
-            Matcher matcher = RULE_PATTERN.matcher(normalizedCss);
-            int order = orderStart;
-
-            while (matcher.find()) {
-                String selector = matcher.group(1).trim();
-                // 忽略空的或可能是残留的 @ 规则
-                if (selector.isEmpty()) continue;
-                if (selector.startsWith("@")) {
-                    ApricityUI.LOGGER.debug(
-                            "[AUI CSS] unsupported or leftover at-rule was ignored path={} rule={}",
+                String normalizedCss = evaluateMediaRules(parseAndRegisterAnimations(css, contextPath), viewport, contextPath);
+                int openBraces = countCharacter(normalizedCss, '{');
+                int closeBraces = countCharacter(normalizedCss, '}');
+                if (openBraces != closeBraces) {
+                    ApricityUI.LOGGER.error(
+                            "[AUI CSS] unmatched braces path={} open={} close={} snippet={}",
                             AuiLog.source(contextPath),
-                            AuiLog.compact(selector)
+                            openBraces,
+                            closeBraces,
+                            AuiLog.compact(normalizedCss)
                     );
-                    continue;
                 }
 
-                String rules = matcher.group(2).trim();
-                List<String> selectors = Selector.splitSelectorList(selector);
-                if (selectors.isEmpty()) {
-                    ApricityUI.LOGGER.warn(
-                            "[AUI CSS] rule has no selector path={} rule={}",
-                            AuiLog.source(contextPath),
-                            AuiLog.compact(selector)
-                    );
-                    continue;
-                }
-                Map<String, Declaration> authoredProperties = parseProperties(rules, contextPath, false);
-                Map<String, Declaration> properties = expandAuthorProperties(authoredProperties);
+                Matcher matcher = RULE_PATTERN.matcher(normalizedCss);
+                int order = orderStart;
 
-                for (String sel : selectors) {
-                    String normalizedSelector = sel.trim();
-                    if (normalizedSelector.isEmpty()) continue;
-                    targetCache.merge(normalizedSelector, new LinkedHashMap<>(properties), (oldMap, newMap) -> {
-                        newMap.forEach((property, declaration) -> putDeclaration(oldMap, property, declaration));
-                        return oldMap;
-                    });
+                while (matcher.find()) {
+                    String selector = matcher.group(1).trim();
+                    // 忽略空的或可能是残留的 @ 规则
+                    if (selector.isEmpty()) continue;
+                    if (selector.startsWith("@")) {
+                        ApricityUI.LOGGER.debug(
+                                "[AUI CSS] unsupported or leftover at-rule was ignored path={} rule={}",
+                                AuiLog.source(contextPath),
+                                AuiLog.compact(selector)
+                        );
+                        continue;
+                    }
+
+                    String rules = matcher.group(2).trim();
+                    List<String> selectors = Selector.splitSelectorList(selector);
+                    if (selectors.isEmpty()) {
+                        ApricityUI.LOGGER.warn(
+                                "[AUI CSS] rule has no selector path={} rule={}",
+                                AuiLog.source(contextPath),
+                                AuiLog.compact(selector)
+                        );
+                        continue;
+                    }
+                    Map<String, Declaration> authoredProperties = parseProperties(rules, contextPath, false);
+                    Map<String, Declaration> properties = expandAuthorProperties(authoredProperties);
+
+                    for (String sel : selectors) {
+                        String normalizedSelector = sel.trim();
+                        if (normalizedSelector.isEmpty()) continue;
+                        targetCache.merge(normalizedSelector, new LinkedHashMap<>(properties), (oldMap, newMap) -> {
+                            newMap.forEach((property, declaration) -> putDeclaration(oldMap, property, declaration));
+                            return oldMap;
+                        });
+                    }
+                    int ruleOrder = order++;
+                    if (debugRules != null) {
+                        debugRules.add(new DebugRule(selector, authoredProperties, contextPath, ruleOrder));
+                    }
                 }
-                int ruleOrder = order++;
-                if (debugRules != null) {
-                    debugRules.add(new DebugRule(selector, authoredProperties, contextPath, ruleOrder));
-                }
-            }
                 return order;
             } catch (RuntimeException exception) {
                 ApricityUI.LOGGER.error(
@@ -656,7 +683,7 @@ public class CSS {
         }
 
         private static Map<String, Declaration> parseProperties(String rules, String contextPath,
-                                                                 boolean expand) {
+                                                                boolean expand) {
             Map<String, Declaration> properties = new LinkedHashMap<>();
             if (rules == null || rules.isBlank()) return properties;
             int malformedPairs = 0;
@@ -728,6 +755,9 @@ public class CSS {
                                             Declaration declaration) {
             String normalized = property.trim().toLowerCase(Locale.ROOT);
             switch (normalized) {
+                case "flex" -> putFlex(properties, declaration);
+                case "grid", "grid-template", "grid-row", "grid-column", "grid-area",
+                     "place-items", "place-self", "place-content" -> putGrid(properties, normalized, declaration);
                 case "margin", "padding" -> putFourSides(properties, normalized, declaration);
                 case "inset" -> putFourProperties(
                         properties, new String[]{"top", "right", "bottom", "left"}, declaration);
@@ -741,6 +771,10 @@ public class CSS {
                     for (String side : List.of("top", "right", "bottom", "left")) {
                         putDeclaration(properties, "border-" + side, declaration);
                     }
+                }
+                case "outline" -> {
+                    ShorthandParser.expandOutline(declaration.value()).forEach((longhand, value) ->
+                            putDeclaration(properties, longhand, new Declaration(value, declaration.important())));
                 }
                 case "gap" -> {
                     List<String> values = splitCssValueTokens(declaration.value());
@@ -757,6 +791,10 @@ public class CSS {
                     ShorthandParser.expandFont(declaration.value()).forEach((longhand, value) ->
                             putDeclaration(properties, longhand, new Declaration(value, declaration.important())));
                 }
+                case "transition" -> {
+                    ShorthandParser.expandTransition(declaration.value()).forEach((longhand, value) ->
+                            putDeclaration(properties, longhand, new Declaration(value, declaration.important())));
+                }
                 default -> {
                 }
             }
@@ -767,6 +805,34 @@ public class CSS {
             putFourProperties(properties, new String[]{
                     base + "-top", base + "-right", base + "-bottom", base + "-left"
             }, declaration);
+        }
+
+        private static void putGrid(Map<String, Declaration> properties, String shorthand,
+                                    Declaration declaration) {
+            if (declaration.value().contains("var(")) {
+                putPendingShorthand(properties, shorthand, declaration,
+                        ShorthandParser.expandGrid(shorthand, "initial").keySet());
+                return;
+            }
+            ShorthandParser.expandGrid(shorthand, declaration.value()).forEach((name, value) ->
+                    putDeclaration(properties, name, new Declaration(value, declaration.important())));
+        }
+
+        private static void putFlex(Map<String, Declaration> properties, Declaration declaration) {
+            if (declaration.value().contains("var(")) {
+                putPendingShorthand(properties, "flex", declaration,
+                        ShorthandParser.expandFlex("initial").keySet());
+                return;
+            }
+            ShorthandParser.expandFlex(declaration.value()).forEach((name, value) ->
+                    putDeclaration(properties, name, new Declaration(value, declaration.important())));
+        }
+
+        private static void putPendingShorthand(Map<String, Declaration> properties, String shorthand,
+                                                Declaration declaration, Set<String> longhands) {
+            // Pending values still cascade per longhand before substitution determines their grammar.
+            Declaration pending = new Declaration(declaration.value(), declaration.important(), shorthand);
+            longhands.forEach(name -> putDeclaration(properties, name, pending));
         }
 
         private static void putFourProperties(Map<String, Declaration> properties, String[] names,
@@ -812,6 +878,8 @@ public class CSS {
 
         private static void putDeclaration(Map<String, Declaration> properties, String property,
                                            Declaration declaration) {
+            if (!ShorthandParser.isValidGridDeclaration(property, declaration.value())) return;
+            if (!ShorthandParser.isValidFlexDeclaration(property, declaration.value())) return;
             Declaration existing = properties.get(property);
             if (existing != null && existing.important() && !declaration.important()) return;
             properties.put(property, declaration);

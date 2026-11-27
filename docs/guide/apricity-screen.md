@@ -86,14 +86,14 @@ new ApricityScreen(path)      // 只保存路径，不读 HTML
 
 几个容易踩的点：
 
-- `init()` 可能被重复调用（比如 resize），每次都会重建 Document；
+- `init()` 可能被重复调用（比如 resize）；AUI 会复用仍存活的 Document，不会重建 DOM，所以表单值、滚动位置和脚本状态都能保留。只有首次打开或 Document 已销毁时才会重新创建；
 - `Document.refresh()` 保留 Document 本身但重建 DOM、重跑脚本。刷新后旧的 Element 引用和事件监听器全部失效，用 `document.getRefreshGeneration()` / `isCurrentGeneration(gen)` 判断代数；
 - 覆盖 `init()` / `onClose()` / `removed()` 时必须调 super，否则 Document 不会创建或不会清理；
 - 不要在子类里再调一次 `Document.create(同路径)`，会同时存在两个 Document，绘制和输入都翻倍。
 
 ## 页面 Meta 配置
 
-这两个 meta 标签是 AUI 的页面级配置，**所有宿主通用**（Screen、Overlay、Container、WorldWindow 都读它们）。完整说明只在这里维护一份，其他文档不再重复。
+这些 meta 标签是 AUI 的页面级配置，**所有宿主通用**（Screen、Overlay、Container、WorldWindow 都读它们）。完整说明只在这里维护一份，其他文档不再重复。
 
 ### aui-viewport：逻辑视口
 
@@ -126,7 +126,7 @@ fixed 模式的 `scale` 可以是数值（`scale=1`）、`fit`（等比放进窗
 | `zoom-step` | 0.1 | 每次缩放步进 |
 | `user-scalable` | true | 是否允许快捷键缩放 |
 
-允许缩放时：Ctrl+滚轮、Ctrl+`+`/`-` 缩放，Ctrl+`0` 重置。缩放值按页面路径存到 `config/apricityui/viewport-zoom.properties`，重开页面会记住上次的值。
+允许缩放时：Ctrl+滚轮、Ctrl+`+`/`-` 缩放，Ctrl+`0` 重置。缩放时右下角会显示当前百分比和“重置”按钮；缩放值按页面路径存到 `config/apricityui/viewport-zoom.properties`，重开页面会记住上次的值。
 
 把 `user-scalable` 设为 `false` 可禁用这套快捷键——Ctrl+滚轮退化为普通滚动，Java 的 `document.setViewportZoom(...)` 不受影响。细节见[浏览器辅助功能](browser-features#页面缩放)。
 
@@ -154,6 +154,22 @@ Overlay 里放全屏 Canvas 时，Canvas 的 `width`/`height` 用 `getViewportSi
 `intercept`（也接受 `block`、`true`、`yes`、`on`、`1`）让命中区域的鼠标事件不再传给下方的 Minecraft 输入或其他 Document。不设它，HTML 事件照样派发，只是不强制消费原生输入。
 
 两点注意：拦截按命中区域生效，不可见、被裁剪或 `pointer-events: none` 的元素不会因此获得命中；想让整个页面都吃输入，就保证可交互区域盖满视口。这是个"是否消费原生输入"的开关，不是事件监听器的开关。
+
+### aui-hyphen-break：连字符断行
+
+```html
+<meta name="aui-hyphen-break" content="none">
+```
+
+按 CSS 标准，`-`（以及 `‐`）是换行机会，英文文本会在这里折行；编号、版本号、日期等不希望被连字符拆开的文本可以用这个 meta 关闭它。`none`（也接受 `off`、`false`、`no`、`0`）关闭连字符断行，缺省 `auto` 保持浏览器行为。空格、CJK 与 `word-break: break-all` 的断行不受影响。
+
+### aui-preload：启动预加载
+
+```html
+<meta name="aui-preload" content="true">
+```
+
+默认情况下 HTML 模板在首次打开时才解析、构建 token 并预编译样式。给页面加上这个 meta 后，游戏启动和资源重载扫描时会把该页面一起预构建，首次打开更快；标签存在即开启（`content` 可省略），`none`（也接受 `off`、`false`、`no`、`0`）显式关闭。页面较多时只给常用页面加，避免拖慢启动。
 
 ## 输入事件
 

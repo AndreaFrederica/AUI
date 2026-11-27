@@ -141,10 +141,22 @@ public class JS {
                 if (c == '`') inTemplate = false;
                 continue;
             }
-            if (c == '\'') { inSingle = true; continue; }
-            if (c == '"') { inDouble = true; continue; }
-            if (c == '`') { inTemplate = true; continue; }
-            if (c == '(') { depth++; continue; }
+            if (c == '\'') {
+                inSingle = true;
+                continue;
+            }
+            if (c == '"') {
+                inDouble = true;
+                continue;
+            }
+            if (c == '`') {
+                inTemplate = true;
+                continue;
+            }
+            if (c == '(') {
+                depth++;
+                continue;
+            }
             if (c == ')') {
                 depth--;
                 if (depth == 0) return i;
@@ -195,15 +207,51 @@ public class JS {
                 if (c == '`') inTemplate = false;
                 continue;
             }
-            if (c == '\'') { current.append(c); inSingle = true; continue; }
-            if (c == '"') { current.append(c); inDouble = true; continue; }
-            if (c == '`') { current.append(c); inTemplate = true; continue; }
-            if (c == '(') { paren++; current.append(c); continue; }
-            if (c == ')') { paren--; current.append(c); continue; }
-            if (c == '[') { bracket++; current.append(c); continue; }
-            if (c == ']') { bracket--; current.append(c); continue; }
-            if (c == '{') { brace++; current.append(c); continue; }
-            if (c == '}') { brace--; current.append(c); continue; }
+            if (c == '\'') {
+                current.append(c);
+                inSingle = true;
+                continue;
+            }
+            if (c == '"') {
+                current.append(c);
+                inDouble = true;
+                continue;
+            }
+            if (c == '`') {
+                current.append(c);
+                inTemplate = true;
+                continue;
+            }
+            if (c == '(') {
+                paren++;
+                current.append(c);
+                continue;
+            }
+            if (c == ')') {
+                paren--;
+                current.append(c);
+                continue;
+            }
+            if (c == '[') {
+                bracket++;
+                current.append(c);
+                continue;
+            }
+            if (c == ']') {
+                bracket--;
+                current.append(c);
+                continue;
+            }
+            if (c == '{') {
+                brace++;
+                current.append(c);
+                continue;
+            }
+            if (c == '}') {
+                brace--;
+                current.append(c);
+                continue;
+            }
             if (c == delimiter && paren == 0 && bracket == 0 && brace == 0) {
                 result.add(current.toString());
                 current.setLength(0);
@@ -230,20 +278,62 @@ public class JS {
 
         for (int i = 0; i < text.length(); i++) {
             char c = text.charAt(i);
-            if (escape) { escape = false; continue; }
-            if (c == '\\') { escape = true; continue; }
-            if (inSingle) { if (c == '\'') inSingle = false; continue; }
-            if (inDouble) { if (c == '"') inDouble = false; continue; }
-            if (inTemplate) { if (c == '`') inTemplate = false; continue; }
-            if (c == '\'') { inSingle = true; continue; }
-            if (c == '"') { inDouble = true; continue; }
-            if (c == '`') { inTemplate = true; continue; }
-            if (c == '(') { paren++; continue; }
-            if (c == ')') { paren--; continue; }
-            if (c == '[') { bracket++; continue; }
-            if (c == ']') { bracket--; continue; }
-            if (c == '{') { brace++; continue; }
-            if (c == '}') { brace--; continue; }
+            if (escape) {
+                escape = false;
+                continue;
+            }
+            if (c == '\\') {
+                escape = true;
+                continue;
+            }
+            if (inSingle) {
+                if (c == '\'') inSingle = false;
+                continue;
+            }
+            if (inDouble) {
+                if (c == '"') inDouble = false;
+                continue;
+            }
+            if (inTemplate) {
+                if (c == '`') inTemplate = false;
+                continue;
+            }
+            if (c == '\'') {
+                inSingle = true;
+                continue;
+            }
+            if (c == '"') {
+                inDouble = true;
+                continue;
+            }
+            if (c == '`') {
+                inTemplate = true;
+                continue;
+            }
+            if (c == '(') {
+                paren++;
+                continue;
+            }
+            if (c == ')') {
+                paren--;
+                continue;
+            }
+            if (c == '[') {
+                bracket++;
+                continue;
+            }
+            if (c == ']') {
+                bracket--;
+                continue;
+            }
+            if (c == '{') {
+                brace++;
+                continue;
+            }
+            if (c == '}') {
+                brace--;
+                continue;
+            }
             if (c == '=' && paren == 0 && bracket == 0 && brace == 0) {
                 // 排除 ==、===、!=、!==、<=、>=、=>
                 boolean prevIsOp = i > 0 && "=!<>".indexOf(text.charAt(i - 1)) >= 0;

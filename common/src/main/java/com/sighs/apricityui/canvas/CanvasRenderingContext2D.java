@@ -18,6 +18,7 @@ import java.awt.geom.Path2D;
 import java.awt.geom.Rectangle2D;
 import java.awt.image.BufferedImage;
 import java.util.ArrayDeque;
+import java.util.Arrays;
 import java.util.Deque;
 import java.util.Locale;
 import java.util.function.Consumer;
@@ -27,9 +28,49 @@ public class CanvasRenderingContext2D {
     private final Deque<CanvasState> stack = new ArrayDeque<>();
     private final Path2D.Double currentPath = new Path2D.Double();
     private CanvasState state = new CanvasState();
+    private String cachedCompositeOperation;
+    private int cachedCompositeAlphaBits;
+    private Composite cachedComposite;
+    private double cachedStrokeWidth;
+    private String cachedStrokeCap;
+    private String cachedStrokeJoin;
+    private double cachedMiterLimit;
+    private double cachedStrokeDashOffset;
+    private double[] cachedStrokeDash = new double[0];
+    private BasicStroke cachedStroke;
 
     public CanvasRenderingContext2D(Canvas canvas) {
         this.canvas = canvas;
+    }
+
+    private static boolean isIntegral(double value) {
+        return Double.isFinite(value) && Math.rint(value) == value;
+    }
+
+    static String normalizeFillRule(Object fillRule) {
+        return fillRule != null && "evenodd".equalsIgnoreCase(fillRule.toString().trim()) ? "evenodd" : "nonzero";
+    }
+
+    /**
+     * Re-wraps the shape with the even-odd winding rule when requested.
+     */
+    static Shape applyFillRule(Shape shape, String fillRule) {
+        if (shape == null || !"evenodd".equals(fillRule)) return shape;
+        if (shape instanceof Path2D path && path.getWindingRule() == Path2D.WIND_EVEN_ODD) return shape;
+        Path2D.Double copy = new Path2D.Double(Path2D.WIND_EVEN_ODD);
+        copy.append(shape, false);
+        copy.setWindingRule(Path2D.WIND_EVEN_ODD);
+        return copy;
+    }
+
+    private static String inherentFillRule(CanvasPath2D path) {
+        return path.raw().getWindingRule() == Path2D.WIND_EVEN_ODD ? "evenodd" : "nonzero";
+    }
+
+    private static String normalizeMime(String type) {
+        if (type == null || type.isBlank()) return "image/png";
+        String normalized = type.trim().toLowerCase(Locale.ROOT);
+        return ("image/jpeg".equals(normalized) || "image/jpg".equals(normalized)) ? "image/jpeg" : "image/png";
     }
 
     public Canvas getCanvas() {
@@ -122,10 +163,10 @@ public class CanvasRenderingContext2D {
         String normalized = globalCompositeOperation.trim().toLowerCase(Locale.ROOT);
         state.globalCompositeOperation = switch (normalized) {
             case "source-in", "source-out", "source-atop", "destination-over", "destination-in",
-                    "destination-out", "destination-atop", "xor", "copy", "lighter",
-                    "multiply", "screen", "darken", "lighten",
-                    "overlay", "soft-light", "hard-light", "difference", "exclusion",
-                    "color-dodge", "color-burn" -> normalized;
+                 "destination-out", "destination-atop", "xor", "copy", "lighter",
+                 "multiply", "screen", "darken", "lighten",
+                 "overlay", "soft-light", "hard-light", "difference", "exclusion",
+                 "color-dodge", "color-burn" -> normalized;
             default -> "source-over";
         };
     }
@@ -236,19 +277,39 @@ public class CanvasRenderingContext2D {
 
     public void clearRect(double x, double y, double width, double height) {
         if (width <= 0 || height <= 0) return;
-        if (state.transform.isIdentity() && state.clip == null) {
-            int ix = (int) Math.floor(x);
-            int iy = (int) Math.floor(y);
-            int iw = (int) Math.ceil(x + width) - ix;
-            int ih = (int) Math.ceil(y + height) - iy;
-            canvas.clearSurfaceRect(ix, iy, iw, ih);
-            return;
-        }
+        if (state.clip == null && clearAxisAlignedRect(x, y, width, height)) return;
+
+        Rectangle2D rect = new Rectangle2D.Double(x, y, width, height);
         canvas.renderOperation(g -> {
             applyTransformAndClip(g);
             g.setComposite(AlphaComposite.Clear);
-            g.fill(new Rectangle2D.Double(x, y, width, height));
-        }, dirtyBounds(new Rectangle2D.Double(x, y, width, height), true));
+            g.fill(rect);
+        }, dirtyBounds(rect, true));
+    }
+
+    private boolean clearAxisAlignedRect(double x, double y, double width, double height) {
+        AffineTransform transform = deviceTransform();
+        double shearX = transform.getShearX();
+        double shearY = transform.getShearY();
+        if (shearX != 0.0D || shearY != 0.0D) return false;
+
+        double scaleX = transform.getScaleX();
+        double scaleY = transform.getScaleY();
+        double translateX = transform.getTranslateX();
+        double translateY = transform.getTranslateY();
+        if (!isIntegral(scaleX) || !isIntegral(scaleY)
+                || !isIntegral(translateX) || !isIntegral(translateY)) return false;
+
+        double x0 = x * scaleX + translateX;
+        double x1 = (x + width) * scaleX + translateX;
+        double y0 = y * scaleY + translateY;
+        double y1 = (y + height) * scaleY + translateY;
+        int left = (int) Math.floor(Math.min(x0, x1));
+        int top = (int) Math.floor(Math.min(y0, y1));
+        int right = (int) Math.ceil(Math.max(x0, x1));
+        int bottom = (int) Math.ceil(Math.max(y0, y1));
+        canvas.clearSurfaceRect(left, top, right - left, bottom - top);
+        return true;
     }
 
     public void fillRect(double x, double y, double width, double height) {
@@ -298,13 +359,18 @@ public class CanvasRenderingContext2D {
         return new CanvasImageData(source.width, source.height);
     }
 
+    /**
+     * Reads pixels from the raster. Coordinates are <b>raster</b> pixels, not the CSS-pixel
+     * space of the drawing API: the canvas is rasterised at the display's device resolution,
+     * so {@code getImageData(0, 0, getBitmapWidth(), getBitmapHeight())} is the whole canvas.
+     */
     public CanvasImageData getImageData(int x, int y, int width, int height) {
         BufferedImage surface = canvas.getSurface();
         CanvasImageData imageData = new CanvasImageData(width, height);
         int sx0 = Math.max(0, x);
         int sy0 = Math.max(0, y);
-        int sx1 = Math.min(x + imageData.width, canvas.getWidth());
-        int sy1 = Math.min(y + imageData.height, canvas.getHeight());
+        int sx1 = Math.min(x + imageData.width, canvas.getBitmapWidth());
+        int sy1 = Math.min(y + imageData.height, canvas.getBitmapHeight());
         if (sx1 <= sx0 || sy1 <= sy0) return imageData;
 
         int w = sx1 - sx0;
@@ -347,8 +413,8 @@ public class CanvasRenderingContext2D {
 
         int dx0 = Math.max(0, dx + rx0);
         int dy0 = Math.max(0, dy + ry0);
-        int dx1 = Math.min(dx + rx1, canvas.getWidth());
-        int dy1 = Math.min(dy + ry1, canvas.getHeight());
+        int dx1 = Math.min(dx + rx1, canvas.getBitmapWidth());
+        int dy1 = Math.min(dy + ry1, canvas.getBitmapHeight());
         if (dx1 <= dx0 || dy1 <= dy0) return;
 
         canvas.renderOperation(g -> {
@@ -585,24 +651,6 @@ public class CanvasRenderingContext2D {
         state.clip = area;
     }
 
-    static String normalizeFillRule(Object fillRule) {
-        return fillRule != null && "evenodd".equalsIgnoreCase(fillRule.toString().trim()) ? "evenodd" : "nonzero";
-    }
-
-    /** Re-wraps the shape with the even-odd winding rule when requested. */
-    static Shape applyFillRule(Shape shape, String fillRule) {
-        if (shape == null || !"evenodd".equals(fillRule)) return shape;
-        if (shape instanceof Path2D path && path.getWindingRule() == Path2D.WIND_EVEN_ODD) return shape;
-        Path2D.Double copy = new Path2D.Double(Path2D.WIND_EVEN_ODD);
-        copy.append(shape, false);
-        copy.setWindingRule(Path2D.WIND_EVEN_ODD);
-        return copy;
-    }
-
-    private static String inherentFillRule(CanvasPath2D path) {
-        return path.raw().getWindingRule() == Path2D.WIND_EVEN_ODD ? "evenodd" : "nonzero";
-    }
-
     public void save() {
         stack.push(state.copy());
     }
@@ -629,6 +677,10 @@ public class CanvasRenderingContext2D {
         return DOMMatrix.fromAffineTransform(state.transform);
     }
 
+    public void setTransform(Object matrix) {
+        state.transform = DOMMatrix.from(matrix);
+    }
+
     public void transform(double a, double b, double c, double d, double e, double f) {
         state.transform.concatenate(new AffineTransform(a, b, c, d, e, f));
     }
@@ -641,10 +693,6 @@ public class CanvasRenderingContext2D {
         state.transform = new AffineTransform(a, b, c, d, e, f);
     }
 
-    public void setTransform(Object matrix) {
-        state.transform = DOMMatrix.from(matrix);
-    }
-
     public void resetTransform() {
         state.transform = new AffineTransform();
     }
@@ -652,8 +700,11 @@ public class CanvasRenderingContext2D {
     public void clear() {
         canvas.renderOperation(g -> {
             applyClip(g);
+            // Clear the raster itself: applyClip leaves the base scale on the graphics, but the
+            // surface is addressed in bitmap pixels here.
+            g.setTransform(new AffineTransform());
             g.setComposite(AlphaComposite.Clear);
-            g.fillRect(0, 0, canvas.getWidth(), canvas.getHeight());
+            g.fillRect(0, 0, canvas.getBitmapWidth(), canvas.getBitmapHeight());
         }, null);
     }
 
@@ -671,7 +722,15 @@ public class CanvasRenderingContext2D {
 
     public CanvasPattern createPattern(Object image, String repetition) {
         BufferedImage source = resolveImageSource(image);
-        return source == null ? null : new CanvasPattern(source, repetition);
+        if (source == null) return null;
+        // A Canvas source comes back at device resolution; the pattern tile is anchored in the
+        // CSS-pixel user space, so hand it a CSS-pixel copy or the tile grows with the display
+        // scale.
+        if (image instanceof Canvas canvasSource) {
+            source = CanvasImageSupport.scaledCopy(source,
+                    canvasSource.getWidth(), canvasSource.getHeight());
+        }
+        return new CanvasPattern(source, repetition);
     }
 
     public CanvasBlob toBlob() {
@@ -716,7 +775,16 @@ public class CanvasRenderingContext2D {
     public void drawImage(Object image, double dx, double dy) {
         BufferedImage source = resolveImageSource(image);
         if (source == null) return;
-        drawImageInternal(source, 0, 0, source.getWidth(), source.getHeight(), dx, dy, source.getWidth(), source.getHeight());
+        // A Canvas source is rasterised at device resolution while its logical size is in CSS
+        // pixels; drawing it 1:1 in the logical space would make it larger than the canvas it
+        // came from.
+        double dw = source.getWidth();
+        double dh = source.getHeight();
+        if (image instanceof Canvas canvasSource) {
+            dw = canvasSource.getWidth();
+            dh = canvasSource.getHeight();
+        }
+        drawImageInternal(source, 0, 0, source.getWidth(), source.getHeight(), dx, dy, dw, dh);
     }
 
     public void drawImage(Object image, double dx, double dy, double dw, double dh) {
@@ -737,10 +805,12 @@ public class CanvasRenderingContext2D {
         currentPath.reset();
     }
 
-    /** Standard {@code ctx.reset()}: restores the default rendering state and clears the canvas. */
+    /**
+     * Standard {@code ctx.reset()}: restores the default rendering state and clears the canvas.
+     */
     public void reset() {
         resetState();
-        canvas.clearSurfaceRect(0, 0, canvas.getWidth(), canvas.getHeight());
+        canvas.clearSurfaceRect(0, 0, canvas.getBitmapWidth(), canvas.getBitmapHeight());
     }
 
     private void renderShape(Graphics2D g, Shape shape, boolean fill) {
@@ -787,22 +857,22 @@ public class CanvasRenderingContext2D {
             Rectangle2D.union(device, shadowBounds, device);
         }
         if (state.clip != null) {
-            Rectangle2D.intersect(device, state.clip.getBounds2D(), device);
+            Rectangle2D.intersect(device,
+                    baseTransform().createTransformedShape(state.clip).getBounds2D(), device);
         }
         return device;
     }
 
-    /** Transforms user-space bounds (expanded by pad) into device space. */
+    /**
+     * Transforms user-space bounds (expanded by pad) into device space.
+     */
     private Rectangle2D transformBounds(Rectangle2D bounds, double pad) {
         double x0 = bounds.getMinX() - pad;
         double y0 = bounds.getMinY() - pad;
         double x1 = bounds.getMaxX() + pad;
         double y1 = bounds.getMaxY() + pad;
-        if (state.transform.isIdentity()) {
-            return new Rectangle2D.Double(x0, y0, x1 - x0, y1 - y0);
-        }
         double[] corners = {x0, y0, x1, y0, x0, y1, x1, y1};
-        state.transform.transform(corners, 0, corners, 0, 4);
+        deviceTransform().transform(corners, 0, corners, 0, 4);
         double minX = Math.min(Math.min(corners[0], corners[2]), Math.min(corners[4], corners[6]));
         double maxX = Math.max(Math.max(corners[0], corners[2]), Math.max(corners[4], corners[6]));
         double minY = Math.min(Math.min(corners[1], corners[3]), Math.min(corners[5], corners[7]));
@@ -816,7 +886,7 @@ public class CanvasRenderingContext2D {
         Graphics2D patternGraphics = (Graphics2D) g.create();
         try {
             applyClip(patternGraphics);
-            patternGraphics.setTransform(state.transform);
+            patternGraphics.setTransform(deviceTransform());
             patternGraphics.clip(shape);
             patternGraphics.setComposite(resolveComposite((float) state.globalAlpha));
             patternGraphics.transform(pattern.getTransform());
@@ -867,9 +937,9 @@ public class CanvasRenderingContext2D {
         if (alpha <= 0) return;
 
         Shape paintShape = fill ? shape : createStroke(state.lineWidth).createStrokedShape(shape);
-        AffineTransform deviceTransform = new AffineTransform(state.transform);
-        deviceTransform.translate(state.shadowOffsetX, state.shadowOffsetY);
-        Shape deviceShape = deviceTransform.createTransformedShape(paintShape);
+        AffineTransform shadowTransform = deviceTransform();
+        shadowTransform.translate(state.shadowOffsetX, state.shadowOffsetY);
+        Shape deviceShape = shadowTransform.createTransformedShape(paintShape);
 
         double blur = Math.max(0, state.shadowBlur);
         ShadowLayer layer = createShadowLayer(deviceShape.getBounds2D(), blur);
@@ -896,6 +966,9 @@ public class CanvasRenderingContext2D {
         Graphics2D target = (Graphics2D) g.create();
         try {
             applyClip(target);
+            // The layer is stored in device pixels; applyClip leaves the base scale on the
+            // graphics, so drop back to device space before blitting it 1:1.
+            target.setTransform(new AffineTransform());
             target.setComposite(resolveComposite(alpha));
             target.drawImage(image, layer.x(), layer.y(), null);
         } finally {
@@ -917,14 +990,11 @@ public class CanvasRenderingContext2D {
         int reach = (int) Math.ceil(pad);
         int rx = Math.max(bx, -reach);
         int ry = Math.max(by, -reach);
-        int rx1 = Math.min(bx1, canvas.getWidth() + reach);
-        int ry1 = Math.min(by1, canvas.getHeight() + reach);
+        int rx1 = Math.min(bx1, canvas.getBitmapWidth() + reach);
+        int ry1 = Math.min(by1, canvas.getBitmapHeight() + reach);
         if (rx1 <= rx || ry1 <= ry) return null;
 
         return new ShadowLayer(new BufferedImage(rx1 - rx, ry1 - ry, BufferedImage.TYPE_INT_ARGB), rx, ry);
-    }
-
-    private record ShadowLayer(BufferedImage image, int x, int y) {
     }
 
     private void applyPaintState(Graphics2D g, boolean fill) {
@@ -936,25 +1006,61 @@ public class CanvasRenderingContext2D {
     }
 
     private BasicStroke createStroke(double width) {
+        double safeWidth = Math.max(0.1, width);
+        double safeMiterLimit = Math.max(1.0, state.miterLimit);
+        if (cachedStroke != null
+                && Double.compare(cachedStrokeWidth, safeWidth) == 0
+                && cachedStrokeCap.equals(state.lineCap)
+                && cachedStrokeJoin.equals(state.lineJoin)
+                && Double.compare(cachedMiterLimit, safeMiterLimit) == 0
+                && Double.compare(cachedStrokeDashOffset, state.lineDashOffset) == 0
+                && Arrays.equals(cachedStrokeDash, state.lineDash)) {
+            return cachedStroke;
+        }
+
         float[] dashArray = state.lineDash.length == 0 ? null : CanvasStyleUtil.toFloatDashArray(state.lineDash);
         float dashPhase = dashArray == null ? 0f : (float) state.lineDashOffset;
-        return new BasicStroke(
-                (float) Math.max(0.1, width),
+        cachedStroke = new BasicStroke(
+                (float) safeWidth,
                 CanvasStyleUtil.resolveLineCap(state.lineCap),
                 CanvasStyleUtil.resolveLineJoin(state.lineJoin),
-                (float) Math.max(1.0, state.miterLimit),
+                (float) safeMiterLimit,
                 dashArray,
                 dashPhase
         );
+        cachedStrokeWidth = safeWidth;
+        cachedStrokeCap = state.lineCap;
+        cachedStrokeJoin = state.lineJoin;
+        cachedMiterLimit = safeMiterLimit;
+        cachedStrokeDashOffset = state.lineDashOffset;
+        cachedStrokeDash = state.lineDash.clone();
+        return cachedStroke;
+    }
+
+    /**
+     * Device-space transform of the current state: the bitmap's device scale, then the
+     * author-visible transform. The context's user space is CSS pixels; every call that hands
+     * Java2D a coordinate goes through this, otherwise a scaled display paints at CSS resolution
+     * and the texture is upscaled.
+     */
+    private AffineTransform baseTransform() {
+        double scale = canvas.getDeviceScale();
+        return AffineTransform.getScaleInstance(scale, scale);
+    }
+
+    private AffineTransform deviceTransform() {
+        AffineTransform transform = baseTransform();
+        transform.concatenate(state.transform);
+        return transform;
     }
 
     private void applyTransformAndClip(Graphics2D g) {
         applyClip(g);
-        g.setTransform(state.transform);
+        g.setTransform(deviceTransform());
     }
 
     private void applyClip(Graphics2D g) {
-        g.setTransform(new AffineTransform());
+        g.setTransform(baseTransform());
         g.setClip(null);
         if (state.clip != null) {
             g.clip(state.clip);
@@ -962,7 +1068,15 @@ public class CanvasRenderingContext2D {
     }
 
     private Composite resolveComposite(float alpha) {
-        return switch (state.globalCompositeOperation) {
+        String operation = state.globalCompositeOperation;
+        int alphaBits = Float.floatToIntBits(alpha);
+        if (cachedComposite != null
+                && alphaBits == cachedCompositeAlphaBits
+                && operation.equals(cachedCompositeOperation)) {
+            return cachedComposite;
+        }
+
+        Composite resolved = switch (operation) {
             case "source-in" -> AlphaComposite.getInstance(AlphaComposite.SRC_IN, alpha);
             case "source-out" -> AlphaComposite.getInstance(AlphaComposite.SRC_OUT, alpha);
             case "source-atop" -> AlphaComposite.getInstance(AlphaComposite.SRC_ATOP, alpha);
@@ -986,6 +1100,10 @@ public class CanvasRenderingContext2D {
             case "color-burn" -> new BlendComposite(BlendComposite.Mode.COLOR_BURN, alpha);
             default -> AlphaComposite.getInstance(AlphaComposite.SRC_OVER, alpha);
         };
+        cachedCompositeOperation = operation;
+        cachedCompositeAlphaBits = alphaBits;
+        cachedComposite = resolved;
+        return resolved;
     }
 
     private Paint resolvePaint(Object style) {
@@ -1007,12 +1125,6 @@ public class CanvasRenderingContext2D {
 
     private BufferedImage resolveImageSource(Object image) {
         return CanvasImageSupport.resolveImageSource(image);
-    }
-
-    private static String normalizeMime(String type) {
-        if (type == null || type.isBlank()) return "image/png";
-        String normalized = type.trim().toLowerCase(Locale.ROOT);
-        return ("image/jpeg".equals(normalized) || "image/jpg".equals(normalized)) ? "image/jpeg" : "image/png";
     }
 
     private void drawImageInternal(BufferedImage source, double sx, double sy, double sw, double sh, double dx, double dy, double dw, double dh) {
@@ -1049,9 +1161,9 @@ public class CanvasRenderingContext2D {
         BufferedImage shadowSource = CanvasImageSupport.tintImageAlpha(source, shadow);
         if (shadowSource == null) return;
 
-        AffineTransform deviceTransform = new AffineTransform(state.transform);
-        deviceTransform.translate(state.shadowOffsetX, state.shadowOffsetY);
-        Shape deviceBounds = deviceTransform.createTransformedShape(new Rectangle2D.Double(dx, dy, dw, dh));
+        AffineTransform shadowTransform = deviceTransform();
+        shadowTransform.translate(state.shadowOffsetX, state.shadowOffsetY);
+        Shape deviceBounds = shadowTransform.createTransformedShape(new Rectangle2D.Double(dx, dy, dw, dh));
 
         double blur = Math.max(0, state.shadowBlur);
         ShadowLayer layer = createShadowLayer(deviceBounds.getBounds2D(), blur);
@@ -1061,7 +1173,7 @@ public class CanvasRenderingContext2D {
         try {
             Canvas.applyGraphicsDefaults(layerGraphics);
             layerGraphics.translate(-layer.x(), -layer.y());
-            layerGraphics.transform(deviceTransform);
+            layerGraphics.transform(shadowTransform);
             int srcX1 = (int) Math.round(sx);
             int srcY1 = (int) Math.round(sy);
             int srcX2 = (int) Math.round(sx + sw);
@@ -1075,6 +1187,9 @@ public class CanvasRenderingContext2D {
             layerGraphics.dispose();
         }
         compositeShadowLayer(g, layer, blur, alpha);
+    }
+
+    private record ShadowLayer(BufferedImage image, int x, int y) {
     }
 
 }

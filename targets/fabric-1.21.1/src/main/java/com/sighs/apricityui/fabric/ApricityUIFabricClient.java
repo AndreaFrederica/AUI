@@ -32,6 +32,13 @@ import net.minecraft.server.packs.PackType;
 import net.minecraft.server.packs.resources.ResourceManager;
 
 public final class ApricityUIFabricClient implements ClientModInitializer {
+    private static void registerKeys() {
+        KeyBindingHelper.registerKeyBinding(Keybindings.RELEASE_MOUSE);
+        KeyBindingHelper.registerKeyBinding(Keybindings.RELOAD);
+        KeyBindingHelper.registerKeyBinding(Keybindings.DEV_TOOLS);
+        KeyBindingHelper.registerKeyBinding(Keybindings.RESOURCE_MANAGER);
+    }
+
     public void onInitializeClient() {
         FabricServicesBootstrap.initClient();
         // The common entrypoint runs before the client service exists. Register
@@ -75,16 +82,10 @@ public final class ApricityUIFabricClient implements ClientModInitializer {
 
             @Override
             public void onResourceManagerReload(ResourceManager resourceManager) {
+                com.sighs.apricityui.model.ModelRenderService.invalidate();
                 RecipeExpander.clearCache();
                 Minecraft.getInstance().execute(com.sighs.apricityui.loader.ClientLoader::reloadResources);
             }
         });
-    }
-
-    private static void registerKeys() {
-        KeyBindingHelper.registerKeyBinding(Keybindings.RELEASE_MOUSE);
-        KeyBindingHelper.registerKeyBinding(Keybindings.RELOAD);
-        KeyBindingHelper.registerKeyBinding(Keybindings.DEV_TOOLS);
-        KeyBindingHelper.registerKeyBinding(Keybindings.RESOURCE_MANAGER);
     }
 }

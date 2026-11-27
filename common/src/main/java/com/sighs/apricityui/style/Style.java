@@ -3,6 +3,9 @@ package com.sighs.apricityui.style;
 import com.sighs.apricityui.ApricityUI;
 import com.sighs.apricityui.style.Interaction;
 
+import java.lang.invoke.MethodHandle;
+import java.lang.invoke.MethodHandles;
+import java.lang.invoke.MethodType;
 import java.lang.reflect.Field;
 import java.lang.reflect.Modifier;
 import java.util.AbstractMap;
@@ -13,6 +16,7 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
+
 import com.sighs.apricityui.init.Element;
 import com.sighs.apricityui.layout.CssLength;
 import com.sighs.apricityui.parser.Color;
@@ -21,13 +25,83 @@ import com.sighs.apricityui.parser.HTML;
 
 public class Style extends AbstractMap<String, String> implements Cloneable {
     public static final Style DEFAULT = new Style();
-    private static final Set<String> UNSUPPORTED_PROPERTIES = ConcurrentHashMap.newKeySet();
     static final Set<String> INHERITED_PROPERTIES = Set.of(
             "color", "selection-color", "font-size", "font-family", "font-weight", "font-style",
             "line-height", "direction", "letter-spacing", "text-align", "text-indent", "text-transform",
             "white-space", "word-break", "cursor", "visibility", "accent-color", "text-stroke",
-            "dynamic-range-limit"
+            "dynamic-range-limit", "image-rendering",
+            "fill", "fill-opacity", "fill-rule", "stroke", "stroke-opacity", "stroke-width",
+            "stroke-linecap", "stroke-linejoin"
     );
+    static final Field[] STYLE_FIELDS;
+    static final String[] STYLE_FIELD_CSS_NAMES;
+    private static final MethodHandle[] STYLE_FIELD_GETTERS;
+    private static final MethodHandle[] STYLE_FIELD_SETTERS;
+    private static final Set<String> UNSUPPORTED_PROPERTIES = ConcurrentHashMap.newKeySet();
+    private static final Map<String, Field> FIELD_CACHE = new HashMap<>();
+    private static final Map<String, String> STYLE_NAME = new HashMap<>();
+    private static final Set<String> TEXT_PROPS = Set.of(
+            "color", "font-size", "font-family", "font-weight", "font-style", "text-stroke", "text-decoration", "line-height",
+            "direction", "letter-spacing", "text-align", "vertical-align", "text-indent", "text-transform", "white-space", "word-break", "text-overflow",
+            "line-clamp"
+    );
+    private static final Set<String> TEXT_PROPS_WITHOUT_COLOR = Set.of(
+            "font-size", "font-family", "font-weight", "font-style", "text-stroke", "text-decoration", "line-height",
+            "direction", "letter-spacing", "text-align", "vertical-align", "text-indent", "text-transform", "white-space", "word-break", "text-overflow",
+            "line-clamp"
+    );
+    /**
+     * Shorthand properties that {@link #update} expands into several longhands.
+     *
+     * <p>They must be applied before the longhands of the same cascade pass: the rule map already
+     * holds the winner for every property (shorthands are expanded by the parser), so applying a
+     * shorthand afterwards would clobber a longhand that outranked it — for example
+     * {@code .list-group{margin:0}} silently resetting {@code .mt-3{margin-top:16px}} when the
+     * map happened to iterate in the other order.</p>
+     */
+    private static final Set<String> SHORTHAND_PROPERTIES = Set.of(
+            "background", "mask", "flex", "gap", "inset", "margin", "padding", "border",
+            "border-width", "border-color", "animation", "transition", "rotate", "overflow", "visibility", "outline", "font",
+            "grid", "grid-template", "grid-row", "grid-column", "grid-area", "place-items", "place-self", "place-content"
+    );
+
+    static {
+        java.util.List<Field> fields = new java.util.ArrayList<>();
+        java.util.List<String> cssNames = new java.util.ArrayList<>();
+        for (Field field : Style.class.getDeclaredFields()) {
+            // 只缓存非静态的 String 类型字段
+            if (field.getType() == String.class && !Modifier.isStatic(field.getModifiers())) {
+                field.setAccessible(true); // 预先设置访问权限，绕过运行时的安全检查，提升性能
+
+                String fieldName = field.getName(); // 例如: "fontSize"
+                String cssName = "cssFloat".equals(fieldName) ? "float" : camelToKebab(fieldName); // 例如: "font-size"
+
+                // 将驼峰名 ("fontSize") 和 CSS名 ("font-size") 都指向同一个 Field 对象
+                FIELD_CACHE.put(fieldName, field);
+                if (!fieldName.equals(cssName)) {
+                    FIELD_CACHE.put(cssName, field);
+                }
+                fields.add(field);
+                cssNames.add(cssName);
+            }
+        }
+        STYLE_FIELDS = fields.toArray(new Field[0]);
+        STYLE_FIELD_CSS_NAMES = cssNames.toArray(new String[0]);
+        STYLE_FIELD_GETTERS = new MethodHandle[STYLE_FIELDS.length];
+        STYLE_FIELD_SETTERS = new MethodHandle[STYLE_FIELDS.length];
+        try {
+            MethodHandles.Lookup lookup = MethodHandles.lookup();
+            MethodType getterType = MethodType.methodType(String.class, Style.class);
+            MethodType setterType = MethodType.methodType(void.class, Style.class, String.class);
+            for (int i = 0; i < STYLE_FIELDS.length; i++) {
+                Field field = STYLE_FIELDS[i];
+                STYLE_FIELD_GETTERS[i] = lookup.unreflectGetter(field).asType(getterType);
+                STYLE_FIELD_SETTERS[i] = lookup.unreflectSetter(field).asType(setterType);
+            }
+        } catch (IllegalAccessException exception) {
+            throw new ExceptionInInitializerError(exception);
+        }
+    }
 
     public String width = "unset";
     public String height = "unset";
@@ -51,22 +125,24 @@ public class Style extends AbstractMap<String, String> implements Cloneable {
     public String zIndex = "auto";
     public String display = "block";
     public String content = "unset";
-
     public String gridTemplateColumns = "unset";
     public String gridTemplateRows = "unset";
-
+    public String gridTemplateAreas = "none";
+    public String gridAutoRows = "auto";
+    public String gridAutoColumns = "auto";
+    public String gridAutoFlow = "row";
+    public String gridRowStart = "auto";
+    public String gridRowEnd = "auto";
+    public String gridColumnStart = "auto";
+    public String gridColumnEnd = "auto";
     public String gap = "0px";
     public String rowGap = "unset";
     public String columnGap = "unset";
-
-    public String justifyItems = "stretch";
-
+    public String justifyItems = "normal";
     public String justifySelf = "unset";
     public String alignSelf = "unset";
-
     public String gridRow = "auto";
     public String gridColumn = "auto";
-
     public String backgroundColor = "unset";
     public String backgroundImage = "unset";
     public String backgroundRepeat = "unset";
@@ -74,21 +150,22 @@ public class Style extends AbstractMap<String, String> implements Cloneable {
     public String backgroundPosition = "unset";
     public String objectFit = "fill";
     public String objectPosition = "50% 50%";
+    /**
+     * CSS image-rendering；初始值 auto 由 {@link ComputedStyleResolver} 解析，取值在绘制时归一化，见 {@link ImageRendering}。
+     */
+    public String imageRendering = "unset";
     public String appearance = "auto";
     public String resize = "none";
-
     public String margin = "unset";
     public String marginTop = "unset";
     public String marginBottom = "unset";
     public String marginLeft = "unset";
     public String marginRight = "unset";
-
     public String padding = "unset";
     public String paddingTop = "unset";
     public String paddingBottom = "unset";
     public String paddingLeft = "unset";
     public String paddingRight = "unset";
-
     public String border = "unset";
     public String borderTop = "unset";
     public String borderBottom = "unset";
@@ -97,15 +174,27 @@ public class Style extends AbstractMap<String, String> implements Cloneable {
     public String borderWidth = "unset";
     public String borderColor = "unset";
     public String borderRadius = "unset";
-
     public String borderImage = "unset";
     public String borderImageSource = "unset";
     public String borderImageSlice = "unset";
     public String borderImageWidth = "unset";
     public String borderImageOutset = "unset";
     public String borderImageRepeat = "unset";
-
+    public String outline = "unset";
+    public String outlineWidth = "unset";
+    public String outlineStyle = "unset";
+    public String outlineColor = "unset";
+    public String outlineOffset = "unset";
     public String color = "unset";
+    // Inherited SVG paint properties also cascade through HTML ancestors.
+    public String fill = "unset";
+    public String fillOpacity = "unset";
+    public String fillRule = "unset";
+    public String stroke = "unset";
+    public String strokeWidth = "unset";
+    public String strokeOpacity = "unset";
+    public String strokeLinecap = "unset";
+    public String strokeLinejoin = "unset";
     public String selectionColor = "unset";
     public String accentColor = "unset";
     public String fontSize = "unset";
@@ -128,24 +217,23 @@ public class Style extends AbstractMap<String, String> implements Cloneable {
     public String wordBreak = "unset";
     public String textOverflow = "clip";
     public String lineClamp = "none";
-
     public String flexDirection = "row";
     public String flexWrap = "nowrap";
     public String alignContent = "stretch";
-    public String justifyContent = "flex-start";
-    public String alignItems = "stretch";
+    public String justifyContent = "normal";
+    public String alignItems = "normal";
     public String flex = "unset";
     public String flexGrow = "0";
     public String flexShrink = "1";
     public String flexBasis = "auto";
     public String order = "0";
-
     public String top = "unset";
     public String bottom = "unset";
     public String left = "unset";
     public String right = "unset";
     public String position = "static";
-
+    public String cssFloat = "none";
+    public String clear = "none";
     /**
      * CSS cursor property.
      *
@@ -154,10 +242,13 @@ public class Style extends AbstractMap<String, String> implements Cloneable {
      */
     public String cursor = "auto";
     public String userSelect = "unset";
-
     public String pointerEvents = "auto";
     public String visibility = "unset";
     public String transition = "none";
+    public String transitionProperty = "all";
+    public String transitionDuration = "0s";
+    public String transitionDelay = "0s";
+    public String transitionTimingFunction = "ease";
     public String transform = "none";
     public String transformOrigin = "50% 50%";
     public String rotate = "none";
@@ -172,7 +263,6 @@ public class Style extends AbstractMap<String, String> implements Cloneable {
     public String maskClip = "border-box";
     public String maskOrigin = "border-box";
     public String maskComposite = "add";
-
     public String animation = "unset";
     public String animationName = "unset";
     public String animationDuration = "unset";
@@ -182,9 +272,9 @@ public class Style extends AbstractMap<String, String> implements Cloneable {
     public String animationFillMode = "unset";
     public String animationTimingFunction = "unset";
     public String animationPlayState = "unset";
+    transient Map<String, CSS.Declaration> pendingShorthands;
     private Map<String, String> customProperties = new HashMap<>();
     private transient Element inlineOwner;
-
     // 计算样式阶段一次性编译出来的类型化长度/盒模型。惰性编译，首访时解析当前字符串字段；
     // 值只保留 token+单位，百分比/em/rem/vw/vh 在 resolve 时实时求值（viewport 变化不清 computedStyle）。
     // 这些字段不是 String，因此对 STYLE_FIELDS 反射表 / changesComparedTo / toCss / entrySet 不可见。
@@ -205,46 +295,9 @@ public class Style extends AbstractMap<String, String> implements Cloneable {
     private transient Boolean clipsOverflowMemo;
     private transient Interaction.Visibility visibilityMemo;
 
-    private static final Map<String, Field> FIELD_CACHE = new HashMap<>();
-    private static final Map<String, String> STYLE_NAME = new HashMap<>();
-    static final Field[] STYLE_FIELDS;
-    static final String[] STYLE_FIELD_CSS_NAMES;
-    private static final Set<String> TEXT_PROPS = Set.of(
-            "color", "font-size", "font-family", "font-weight", "font-style", "text-stroke", "text-decoration", "line-height",
-            "direction", "letter-spacing", "text-align", "vertical-align", "text-indent", "text-transform", "white-space", "word-break", "text-overflow",
-            "line-clamp"
-    );
-    private static final Set<String> TEXT_PROPS_WITHOUT_COLOR = Set.of(
-            "font-size", "font-family", "font-weight", "font-style", "text-stroke", "text-decoration", "line-height",
-            "direction", "letter-spacing", "text-align", "vertical-align", "text-indent", "text-transform", "white-space", "word-break", "text-overflow",
-            "line-clamp"
-    );
-
-    static {
-        java.util.List<Field> fields = new java.util.ArrayList<>();
-        java.util.List<String> cssNames = new java.util.ArrayList<>();
-        for (Field field : Style.class.getDeclaredFields()) {
-            // 只缓存非静态的 String 类型字段
-            if (field.getType() == String.class && !Modifier.isStatic(field.getModifiers())) {
-                field.setAccessible(true); // 预先设置访问权限，绕过运行时的安全检查，提升性能
-
-                String fieldName = field.getName(); // 例如: "fontSize"
-                String cssName = camelToKebab(fieldName); // 例如: "font-size"
-
-                // 将驼峰名 ("fontSize") 和 CSS名 ("font-size") 都指向同一个 Field 对象
-                FIELD_CACHE.put(fieldName, field);
-                if (!fieldName.equals(cssName)) {
-                    FIELD_CACHE.put(cssName, field);
-                }
-                fields.add(field);
-                cssNames.add(cssName);
-            }
-        }
-        STYLE_FIELDS = fields.toArray(new Field[0]);
-        STYLE_FIELD_CSS_NAMES = cssNames.toArray(new String[0]);
-    }
-
-    /** Forces one-time reflection metadata initialization outside document creation. */
+    /**
+     * Forces one-time reflection metadata initialization outside document creation.
+     */
     public static void warmUpMetadata() {
         if (STYLE_FIELDS.length != STYLE_FIELD_CSS_NAMES.length) {
             throw new IllegalStateException("Style metadata is inconsistent");
@@ -261,15 +314,99 @@ public class Style extends AbstractMap<String, String> implements Cloneable {
 
     public static Style createInlineDeclarationStyle(Element owner) {
         Style style = new Style();
-        for (Field field : STYLE_FIELDS) {
-            try {
-                field.set(style, "");
-            } catch (IllegalAccessException ignored) {
-            }
-        }
-        style.customProperties.clear();
+        style.resetInlineDeclaration();
         style.inlineOwner = owner;
         return style;
+    }
+
+    /** Reuses this Style as an empty inline declaration buffer without changing its owner. */
+    public void resetInlineDeclaration() {
+        for (int i = 0; i < STYLE_FIELD_SETTERS.length; i++) {
+            try {
+                STYLE_FIELD_SETTERS[i].invokeExact(this, "");
+            } catch (Throwable exception) {
+                throw new IllegalStateException("Failed to reset inline Style field " + STYLE_FIELDS[i].getName(), exception);
+            }
+        }
+        customProperties.clear();
+        pendingShorthands = null;
+        resetMetrics();
+    }
+
+    private static String defaultDisplayFor(Element element) {
+        if (element != null && element.isPseudoElement()) return "inline";
+        if (element == null || element.tagName == null) return "block";
+        String tag = element.tagName.trim().toUpperCase(Locale.ROOT);
+        if ("INPUT".equals(tag) && "hidden".equalsIgnoreCase(element.getAttribute("type"))) return "none";
+        return switch (tag) {
+            case "TABLE" -> "table";
+            case "THEAD" -> "table-header-group";
+            case "TBODY" -> "table-row-group";
+            case "TFOOT" -> "table-footer-group";
+            case "TR" -> "table-row";
+            case "TD", "TH" -> "table-cell";
+            case "A", "ABBR", "B", "BDI", "BDO", "CITE", "CODE", "DATA", "DEL", "DFN", "EM", "I",
+                 "INS", "KBD", "LABEL", "MARK", "Q", "S", "SAMP", "SMALL", "SPAN", "STRONG", "SUB",
+                 "SUP", "TIME", "U", "VAR", "WBR", "IMG", "INPUT", "SELECT", "TEXTAREA", "CANVAS",
+                 "SVG", "TEXTURE", "BUTTON", "TRANSLATION", "IFRAME" -> "inline";
+            case "HEAD", "SCRIPT", "STYLE", "TITLE", "META", "LINK", "OPTION", "OPTGROUP" -> "none";
+            default -> "block";
+        };
+    }
+
+    // font-size转为fontSize这样的
+    public static String transformStyleName(String input) {
+        if (input == null || input.isEmpty()) {
+            return input;
+        }
+        String cache = STYLE_NAME.get(input);
+        if (cache != null) return cache;
+
+        StringBuilder result = new StringBuilder();
+        boolean nextUpperCase = false;
+
+        for (int i = 0; i < input.length(); i++) {
+            char currentChar = input.charAt(i);
+
+            if (currentChar == '-') {
+                // 遇到连字符，标记下一个字符需要大写
+                nextUpperCase = true;
+            } else {
+                if (nextUpperCase) {
+                    result.append(Character.toUpperCase(currentChar));
+                    nextUpperCase = false;
+                } else {
+                    result.append(currentChar);
+                }
+            }
+        }
+
+        STYLE_NAME.put(input, result.toString());
+        return result.toString();
+    }
+
+    // fontSize -> font-size
+    private static String camelToKebab(String input) {
+        StringBuilder result = new StringBuilder();
+        for (char c : input.toCharArray()) {
+            if (Character.isUpperCase(c)) {
+                result.append('-').append(Character.toLowerCase(c));
+            } else {
+                result.append(c);
+            }
+        }
+        return result.toString();
+    }
+
+    public static Set<String> getTextProp() {
+        return TEXT_PROPS;
+    }
+
+    /**
+     * Text properties that can change layout or raster appearance independently of a tint color.
+     */
+    public static Set<String> getTextPropWithoutColor() {
+        return TEXT_PROPS_WITHOUT_COLOR;
     }
 
     public String getPropertyValue(String name) {
@@ -388,7 +525,9 @@ public class Style extends AbstractMap<String, String> implements Cloneable {
         return entries;
     }
 
-    /** Returns authored field changes made directly through the legacy mutable Style object. */
+    /**
+     * Returns authored field changes made directly through the legacy mutable Style object.
+     */
     public Map<String, String> changesComparedTo(Style previous) {
         LinkedHashMap<String, String> changes = new LinkedHashMap<>();
         if (previous == null) return changes;
@@ -413,8 +552,7 @@ public class Style extends AbstractMap<String, String> implements Cloneable {
 
     public void merge(String styleString) {
         if (styleString == null || styleString.isBlank()) return;
-        InlineStyleDeclaration.parse(styleString).forEach((property, value) ->
-                update(property, InlineStyleDeclaration.valueWithoutPriority(value)));
+        mergeCascade(null, styleString);
     }
 
     /**
@@ -423,25 +561,13 @@ public class Style extends AbstractMap<String, String> implements Cloneable {
      * 内联普通高于样式表普通但被样式表 !important 覆盖；内联 !important 优先级最高。
      */
     public void mergeCascade(Map<String, CSS.Declaration> stylesheet, String inlineStyle) {
+        Map<String, String> inlineDeclarations = inlineStyle == null || inlineStyle.isBlank()
+                ? null : InlineStyleDeclaration.parse(inlineStyle);
         applyStylesheet(stylesheet, false);
-        applyInline(inlineStyle, false);
+        applyInline(inlineDeclarations, false);
         applyStylesheet(stylesheet, true);
-        applyInline(inlineStyle, true);
+        applyInline(inlineDeclarations, true);
     }
-
-    /**
-     * Shorthand properties that {@link #update} expands into several longhands.
-     *
-     * <p>They must be applied before the longhands of the same cascade pass: the rule map already
-     * holds the winner for every property (shorthands are expanded by the parser), so applying a
-     * shorthand afterwards would clobber a longhand that outranked it — for example
-     * {@code .list-group{margin:0}} silently resetting {@code .mt-3{margin-top:16px}} when the
-     * map happened to iterate in the other order.</p>
-     */
-    private static final Set<String> SHORTHAND_PROPERTIES = Set.of(
-            "background", "mask", "flex", "gap", "inset", "margin", "padding", "border",
-            "border-width", "border-color", "animation", "rotate", "overflow", "visibility", "font"
-    );
 
     private void applyStylesheet(Map<String, CSS.Declaration> stylesheet, boolean important) {
         if (stylesheet == null) return;
@@ -456,14 +582,19 @@ public class Style extends AbstractMap<String, String> implements Cloneable {
             CSS.Declaration declaration = entry.getValue();
             if (declaration != null && declaration.important() == important
                     && !SHORTHAND_PROPERTIES.contains(entry.getKey())) {
-                update(entry.getKey(), declaration.value());
+                if (declaration.pendingShorthand() != null) {
+                    if (pendingShorthands == null) pendingShorthands = new HashMap<>();
+                    pendingShorthands.put(entry.getKey(), declaration);
+                } else {
+                    update(entry.getKey(), declaration.value());
+                }
             }
         }
     }
 
-    private void applyInline(String inlineStyle, boolean important) {
-        if (inlineStyle == null || inlineStyle.isBlank()) return;
-        for (Map.Entry<String, String> entry : InlineStyleDeclaration.parse(inlineStyle).entrySet()) {
+    private void applyInline(Map<String, String> declarations, boolean important) {
+        if (declarations == null || declarations.isEmpty()) return;
+        for (Map.Entry<String, String> entry : declarations.entrySet()) {
             String value = entry.getValue();
             if (value == null || value.isBlank()) continue;
             if (("important".equals(InlineStyleDeclaration.priorityOf(value))) == important) {
@@ -483,6 +614,10 @@ public class Style extends AbstractMap<String, String> implements Cloneable {
             return;
         }
         if ("-webkit-appearance".equalsIgnoreCase(name)) name = "appearance";
+        String cssName = InlineStyleDeclaration.normalizeProperty(name);
+        if (!ShorthandParser.isValidGridDeclaration(cssName, value)) return;
+        if (!ShorthandParser.isValidFlexDeclaration(cssName, value)) return;
+        if (pendingShorthands != null) pendingShorthands.remove(cssName);
         String styleName = transformStyleName(name);
         if ("background".equals(styleName)) {
             ShorthandParser.applyBackground(this, value);
@@ -490,6 +625,11 @@ public class Style extends AbstractMap<String, String> implements Cloneable {
         }
         if ("mask".equals(styleName)) {
             ShorthandParser.applyMask(this, value);
+            return;
+        }
+        if (Set.of("grid", "gridTemplate", "gridRow", "gridColumn", "gridArea",
+                "placeItems", "placeSelf", "placeContent").contains(styleName)) {
+            ShorthandParser.applyGrid(this, cssName, value);
             return;
         }
         if ("flex".equals(styleName)) {
@@ -516,6 +656,10 @@ public class Style extends AbstractMap<String, String> implements Cloneable {
             ShorthandParser.applyBorder(this, value);
             return;
         }
+        if ("outline".equals(styleName)) {
+            ShorthandParser.applyOutline(this, value);
+            return;
+        }
         if ("borderWidth".equals(styleName)) {
             ShorthandParser.applyBorderWidth(this, value);
             return;
@@ -530,6 +674,10 @@ public class Style extends AbstractMap<String, String> implements Cloneable {
         }
         if (styleName.startsWith("border") && styleName.endsWith("Color")) {
             ShorthandParser.applyBorderSidePart(this, styleName, value, false);
+            return;
+        }
+        if ("transition".equals(styleName)) {
+            ShorthandParser.applyTransition(this, value);
             return;
         }
         if ("animation".equals(styleName)) {
@@ -566,14 +714,8 @@ public class Style extends AbstractMap<String, String> implements Cloneable {
         if ("visibility".equals(styleName)) {
             value = Interaction.normalizeVisibility(value);
         }
-        try {
-            Field field = FIELD_CACHE.get(styleName);
-            if (field == null) {
-                field = this.getClass().getDeclaredField(styleName);
-                FIELD_CACHE.put(styleName, field);
-            }
-            field.set(this, value);
-        } catch (NoSuchFieldException exception) {
+        Field field = FIELD_CACHE.get(styleName);
+        if (field == null) {
             if (UNSUPPORTED_PROPERTIES.add(styleName)) {
                 ApricityUI.LOGGER.warn(
                         "[AUI CSS] unsupported property ignored property={} value={}",
@@ -581,6 +723,10 @@ public class Style extends AbstractMap<String, String> implements Cloneable {
                         value
                 );
             }
+            return;
+        }
+        try {
+            field.set(this, value);
         } catch (IllegalAccessException exception) {
             ApricityUI.LOGGER.error("[AUI CSS] failed to apply property={} value={}", name, value, exception);
         }
@@ -588,6 +734,13 @@ public class Style extends AbstractMap<String, String> implements Cloneable {
 
     public void applyUserAgentDefaults(Element element) {
         display = defaultDisplayFor(element);
+        if (element != null && ("TD".equalsIgnoreCase(element.tagName) || "TH".equalsIgnoreCase(element.tagName))) {
+            verticalAlign = "top";
+            String align = element.getAttribute("align");
+            if (align != null && Set.of("left", "center", "right").contains(align.toLowerCase(Locale.ROOT))) {
+                textAlign = align.toLowerCase(Locale.ROOT);
+            }
+        }
         if (element != null && "PRE".equalsIgnoreCase(element.tagName)) {
             whiteSpace = "pre";
         }
@@ -631,7 +784,6 @@ public class Style extends AbstractMap<String, String> implements Cloneable {
         }
     }
 
-
     public String get(String name) {
         if (name == null || name.isBlank()) return null;
         if (name.startsWith("--")) {
@@ -647,6 +799,10 @@ public class Style extends AbstractMap<String, String> implements Cloneable {
         }
         return null;
     }
+
+    // ------------------------------------------------------------------
+    // 类型化几何访问器（惰性编译，委托 CssLength 解析；求值实时读根字号/视口）
+    // ------------------------------------------------------------------
 
     public String getCustomProperty(String name) {
         if (name == null || name.isBlank()) return null;
@@ -674,6 +830,13 @@ public class Style extends AbstractMap<String, String> implements Cloneable {
         VarResolver.resolveReferences(this, context);
     }
 
+    void deferShorthand(String property, String value, Set<String> longhands) {
+        setFieldValue(transformStyleName(property), value.trim());
+        if (pendingShorthands == null) pendingShorthands = new HashMap<>();
+        CSS.Declaration pending = new CSS.Declaration(value.trim(), false, property);
+        longhands.forEach(name -> pendingShorthands.put(name, pending));
+    }
+
     public void finalizeComputedValues(Element context) {
         ComputedStyleResolver.finalize(this, context);
         // 计算样式阶段结束：此前所有 String 字段都已定型，这里一次性编译成类型化数值，
@@ -689,11 +852,9 @@ public class Style extends AbstractMap<String, String> implements Cloneable {
         isBorderBox();
     }
 
-    // ------------------------------------------------------------------
-    // 类型化几何访问器（惰性编译，委托 CssLength 解析；求值实时读根字号/视口）
-    // ------------------------------------------------------------------
-
-    /** width 的类型化长度；不可解析（auto/unset/…）时 resolve 返回 null。 */
+    /**
+     * width 的类型化长度；不可解析（auto/unset/…）时 resolve 返回 null。
+     */
     public CssLength widthLength() {
         CssLength value = widthLengthMemo;
         if (value == null) {
@@ -720,6 +881,16 @@ public class Style extends AbstractMap<String, String> implements Cloneable {
         }
         return value;
     }
+
+    // ------------------------------------------------------------------
+    // display / overflow / visibility 归一化访问器（惰性 memo）
+    //
+    // 各访问器的归一化程度**刻意不同**，不能互相复用同一个 memo：
+    //  - isFlexDisplay()/isGridDisplay() 复刻 Layout.isFlexDisplay(String)/isGridDisplay(String)，
+    //    要 trim + lowercase（" FLEX " 算 flex）；
+    //  - isDisplayNone()/isInFlow() 复刻 Interaction.isDisplayed 与 Layout.isInFlow(Style) 的
+    //    **裸比较**（不 trim、不 lowercase，只认精确 "none"/"absolute"/"fixed"）。
+    // ------------------------------------------------------------------
 
     public CssLength maxWidthLength() {
         CssLength value = maxWidthLengthMemo;
@@ -757,7 +928,9 @@ public class Style extends AbstractMap<String, String> implements Cloneable {
         return value;
     }
 
-    /** {@code box-sizing} 归一后是否为 border-box（等价于 Box.normalizeBoxSizing 判定）。 */
+    /**
+     * {@code box-sizing} 归一后是否为 border-box（等价于 Box.normalizeBoxSizing 判定）。
+     */
     public boolean isBorderBox() {
         Boolean value = borderBoxMemo;
         if (value == null) {
@@ -768,17 +941,9 @@ public class Style extends AbstractMap<String, String> implements Cloneable {
         return value;
     }
 
-    // ------------------------------------------------------------------
-    // display / overflow / visibility 归一化访问器（惰性 memo）
-    //
-    // 各访问器的归一化程度**刻意不同**，不能互相复用同一个 memo：
-    //  - isFlexDisplay()/isGridDisplay() 复刻 Layout.isFlexDisplay(String)/isGridDisplay(String)，
-    //    要 trim + lowercase（" FLEX " 算 flex）；
-    //  - isDisplayNone()/isInFlow() 复刻 Interaction.isDisplayed 与 Layout.isInFlow(Style) 的
-    //    **裸比较**（不 trim、不 lowercase，只认精确 "none"/"absolute"/"fixed"）。
-    // ------------------------------------------------------------------
-
-    /** {@code display} 归一后是否为 flex（trim + lowercase）。 */
+    /**
+     * {@code display} 归一后是否为 flex（trim + lowercase）。
+     */
     public boolean isFlexDisplay() {
         Boolean value = flexDisplayMemo;
         if (value == null) {
@@ -794,7 +959,9 @@ public class Style extends AbstractMap<String, String> implements Cloneable {
         return value;
     }
 
-    /** {@code display} 归一后是否为 grid（trim + lowercase）。 */
+    /**
+     * {@code display} 归一后是否为 grid（trim + lowercase）。
+     */
     public boolean isGridDisplay() {
         Boolean value = gridDisplayMemo;
         if (value == null) {
@@ -810,7 +977,9 @@ public class Style extends AbstractMap<String, String> implements Cloneable {
         return value;
     }
 
-    /** 裸比较 {@code "none".equals(display)}，等价于 {@code Interaction.isDisplayed} 的祖先链判定。 */
+    /**
+     * 裸比较 {@code "none".equals(display)}，等价于 {@code Interaction.isDisplayed} 的祖先链判定。
+     */
     public boolean isDisplayNone() {
         Boolean value = displayNoneMemo;
         if (value == null) {
@@ -820,7 +989,9 @@ public class Style extends AbstractMap<String, String> implements Cloneable {
         return value;
     }
 
-    /** 裸比较，等价于 {@code Layout.isInFlow(Style)}：display 精确为 none，或 position 精确为 absolute/fixed 时不在流。 */
+    /**
+     * 裸比较，等价于 {@code Layout.isInFlow(Style)}：display 精确为 none，或 position 精确为 absolute/fixed 时不在流。
+     */
     public boolean isInFlow() {
         Boolean value = inFlowMemo;
         if (value == null) {
@@ -848,7 +1019,9 @@ public class Style extends AbstractMap<String, String> implements Cloneable {
         return value;
     }
 
-    /** 同 {@link #overflowX()}，作用于 {@code overflow-y}。 */
+    /**
+     * 同 {@link #overflowX()}，作用于 {@code overflow-y}。
+     */
     public Interaction.Overflow overflowY() {
         Interaction.Overflow value = overflowYMemo;
         if (value == null) {
@@ -861,7 +1034,9 @@ public class Style extends AbstractMap<String, String> implements Cloneable {
         return value;
     }
 
-    /** 任一轴裁剪内容时返回 true（等价于 {@code Interaction.clipsOverflow(Style)}）。 */
+    /**
+     * 任一轴裁剪内容时返回 true（等价于 {@code Interaction.clipsOverflow(Style)}）。
+     */
     public boolean clipsOverflow() {
         Boolean value = clipsOverflowMemo;
         if (value == null) {
@@ -872,7 +1047,9 @@ public class Style extends AbstractMap<String, String> implements Cloneable {
         return value;
     }
 
-    /** 本 Style 自身的 {@code visibility} 归一值（不含祖先继承逻辑，那在 Interaction.getVisibility）。 */
+    /**
+     * 本 Style 自身的 {@code visibility} 归一值（不含祖先继承逻辑，那在 Interaction.getVisibility）。
+     */
     public Interaction.Visibility visibility() {
         Interaction.Visibility value = visibilityMemo;
         if (value == null) {
@@ -909,65 +1086,6 @@ public class Style extends AbstractMap<String, String> implements Cloneable {
         visibilityMemo = null;
     }
 
-    private static String defaultDisplayFor(Element element) {
-        if (element != null && element.isPseudoElement()) return "inline";
-        if (element == null || element.tagName == null) return "block";
-        String tag = element.tagName.trim().toUpperCase(Locale.ROOT);
-        if ("INPUT".equals(tag) && "hidden".equalsIgnoreCase(element.getAttribute("type"))) return "none";
-        return switch (tag) {
-            case "A", "ABBR", "B", "BDI", "BDO", "CITE", "CODE", "DATA", "DEL", "DFN", "EM", "I",
-                 "INS", "KBD", "LABEL", "MARK", "Q", "S", "SAMP", "SMALL", "SPAN", "STRONG", "SUB",
-                 "SUP", "TIME", "U", "VAR", "WBR", "IMG", "INPUT", "SELECT", "TEXTAREA", "CANVAS",
-                 "SVG", "TEXTURE", "BUTTON", "TRANSLATION", "IFRAME" -> "inline";
-            case "HEAD", "SCRIPT", "STYLE", "TITLE", "META", "LINK", "OPTION", "OPTGROUP" -> "none";
-            default -> "block";
-        };
-    }
-
-    // font-size转为fontSize这样的
-    public static String transformStyleName(String input) {
-        if (input == null || input.isEmpty()) {
-            return input;
-        }
-        String cache = STYLE_NAME.get(input);
-        if (cache != null) return cache;
-
-        StringBuilder result = new StringBuilder();
-        boolean nextUpperCase = false;
-
-        for (int i = 0; i < input.length(); i++) {
-            char currentChar = input.charAt(i);
-
-            if (currentChar == '-') {
-                // 遇到连字符，标记下一个字符需要大写
-                nextUpperCase = true;
-            } else {
-                if (nextUpperCase) {
-                    result.append(Character.toUpperCase(currentChar));
-                    nextUpperCase = false;
-                } else {
-                    result.append(currentChar);
-                }
-            }
-        }
-
-        STYLE_NAME.put(input, result.toString());
-        return result.toString();
-    }
-
-    // fontSize -> font-size
-    private static String camelToKebab(String input) {
-        StringBuilder result = new StringBuilder();
-        for (char c : input.toCharArray()) {
-            if (Character.isUpperCase(c)) {
-                result.append('-').append(Character.toLowerCase(c));
-            } else {
-                result.append(c);
-            }
-        }
-        return result.toString();
-    }
-
     public String toCss() {
         StringBuilder css = new StringBuilder();
 
@@ -990,41 +1108,33 @@ public class Style extends AbstractMap<String, String> implements Cloneable {
         return css.toString();
     }
 
-    public static Set<String> getTextProp() {
-        return TEXT_PROPS;
-    }
-
-    /** Text properties that can change layout or raster appearance independently of a tint color. */
-    public static Set<String> getTextPropWithoutColor() {
-        return TEXT_PROPS_WITHOUT_COLOR;
-    }
-
-    /** Copies the mutable CSS fields without allocating another Style object. */
+    /**
+     * Copies the mutable CSS fields without allocating another Style object.
+     */
     public void copyFrom(Style other) {
         if (other == null || other == this) return;
-        for (Field field : STYLE_FIELDS) {
+        for (int i = 0; i < STYLE_FIELD_GETTERS.length; i++) {
             try {
-                field.set(this, field.get(other));
-            } catch (IllegalAccessException ignored) {
+                String value = (String) STYLE_FIELD_GETTERS[i].invokeExact(other);
+                STYLE_FIELD_SETTERS[i].invokeExact(this, value);
+            } catch (Throwable exception) {
+                throw new IllegalStateException("Failed to copy Style field " + STYLE_FIELDS[i].getName(), exception);
             }
         }
         customProperties.clear();
         customProperties.putAll(other.customProperties);
+        pendingShorthands = other.pendingShorthands == null ? null : new HashMap<>(other.pendingShorthands);
         // 动画/过渡每帧复用同一缓冲 copyFrom(base) 后再原地改写字段：必须清 memo，
         // 否则本帧会读到上一帧编译出来的几何。
         resetMetrics();
     }
-
-    public record TextStroke(double width, int color) {
-        public static final TextStroke NONE = new TextStroke(0, 0);
-    }
-
 
     @Override
     public Style clone() {
         try {
             Style style = (Style) super.clone();
             style.customProperties = new HashMap<>(this.customProperties);
+            style.pendingShorthands = pendingShorthands == null ? null : new HashMap<>(pendingShorthands);
             // A clone is a value snapshot. Keeping the owner would make CSSOM reads on
             // snapshots observe future element mutations instead of the cloned fields.
             style.inlineOwner = null;
@@ -1062,5 +1172,9 @@ public class Style extends AbstractMap<String, String> implements Cloneable {
         customProperties.forEach((name, value) -> sb.append(name).append(":").append(value).append(";"));
 
         return sb.toString();
+    }
+
+    public record TextStroke(double width, int color) {
+        public static final TextStroke NONE = new TextStroke(0, 0);
     }
 }

@@ -17,6 +17,7 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Properties;
 import java.util.concurrent.ConcurrentHashMap;
+
 import com.sighs.apricityui.parser.CSS;
 
 /**
@@ -110,22 +111,49 @@ public record ApricityViewport(
                                                      Map<String, String> options) {
         GLFWVidMode videoMode = resolveVideoMode(window);
         double cssScale = browserCssScale(window);
-        // Legacy adapters may not expose a GLFW monitor handle.  They provide
-        // their live GUI viewport through the client SPI instead of requiring
-        // common code to identify a loader by inspecting a synthetic Window.
-        Size adapterReference = AuiServices.client().getBrowserViewportSize();
-        int physicalWidth = videoMode == null
-                ? (adapterReference == null ? DEFAULT_BROWSER_WIDTH :
-                Math.max(1, (int) Math.round(adapterReference.width())))
-                : videoMode.width();
-        int physicalHeight = videoMode == null
-                ? (adapterReference == null ? DEFAULT_BROWSER_HEIGHT :
-                Math.max(1, (int) Math.round(adapterReference.height())))
-                : videoMode.height();
+        Size adapterReference = videoMode == null ? AuiServices.client().getBrowserViewportSize() : null;
+        int physicalWidth = videoMode != null ? videoMode.width() : adapterReference != null
+                ? Math.max(1, (int) Math.round(adapterReference.width())) : windowPhysicalWidth(window);
+        int physicalHeight = videoMode != null ? videoMode.height() : adapterReference != null
+                ? Math.max(1, (int) Math.round(adapterReference.height())) : windowPhysicalHeight(window);
         int width = Math.max(1, parseInt(options.get("width"), (int) Math.round(physicalWidth / cssScale)));
         int height = Math.max(1, parseInt(options.get("height"), (int) Math.round(physicalHeight / cssScale)));
         float renderScale = (float) Math.max(0.0001d, cssScale / actualGuiScale);
         return new ApricityViewport(width, height, renderScale, cssScale);
+    }
+
+    /**
+     * Window framebuffer width in physical pixels, or the fallback when it cannot be asked.
+     */
+    private static int windowPhysicalWidth(Window window) {
+        if (window != null) {
+            try {
+                int width = window.getScreenWidth();
+                if (width > 0) {
+                    return width;
+                }
+            } catch (Throwable ignored) {
+                // Fall through to the constant.
+            }
+        }
+        return DEFAULT_BROWSER_WIDTH;
+    }
+
+    /**
+     * Window framebuffer height in physical pixels, or the fallback when it cannot be asked.
+     */
+    private static int windowPhysicalHeight(Window window) {
+        if (window != null) {
+            try {
+                int height = window.getScreenHeight();
+                if (height > 0) {
+                    return height;
+                }
+            } catch (Throwable ignored) {
+                // Fall through to the constant.
+            }
+        }
+        return DEFAULT_BROWSER_HEIGHT;
     }
 
     private static ApricityViewport browser(Window window, double actualGuiScale,
@@ -265,6 +293,65 @@ public record ApricityViewport(
         };
     }
 
+    private static String normalizeTemplatePath(String templatePath) {
+        return templatePath == null ? "" : templatePath.trim().replace('\\', '/');
+    }
+
+    private static double readStoredZoom(String templatePath, double fallback) {
+        ensureZoomStoreLoaded();
+        synchronized (ZOOM_STORE_LOCK) {
+            return parseDouble(STORED_ZOOMS.getProperty(templatePath), fallback);
+        }
+    }
+
+    private static void writeStoredZoom(String templatePath, double zoom) {
+        if (templatePath == null || templatePath.isBlank()) return;
+        ensureZoomStoreLoaded();
+        synchronized (ZOOM_STORE_LOCK) {
+            STORED_ZOOMS.setProperty(templatePath, String.format(Locale.ROOT, "%.6f", zoom));
+            Path file = zoomStorePath();
+            try {
+                Files.createDirectories(file.getParent());
+                try (OutputStream out = Files.newOutputStream(file)) {
+                    STORED_ZOOMS.store(out, "ApricityUI viewport zoom values");
+                }
+            } catch (IOException ignored) {
+            }
+        }
+    }
+
+    private static void ensureZoomStoreLoaded() {
+        if (zoomStoreLoaded) return;
+        synchronized (ZOOM_STORE_LOCK) {
+            if (zoomStoreLoaded) return;
+            Path file = zoomStorePath();
+            if (Files.exists(file) && Files.isRegularFile(file)) {
+                try (InputStream in = Files.newInputStream(file)) {
+                    STORED_ZOOMS.load(in);
+                } catch (IOException ignored) {
+                }
+            }
+            zoomStoreLoaded = true;
+        }
+    }
+
+    private static Path zoomStorePath() {
+        return configDir().resolve("apricityui").resolve("viewport-zoom.properties");
+    }
+
+    private static Path configDir() {
+        Path dir = com.sighs.apricityui.spi.AuiServices.client().getConfigDirectory();
+        return dir != null ? dir : Path.of("config").toAbsolutePath().normalize();
+    }
+
+    private static double sanitizeZoom(double value, double fallback) {
+        return value > 0 && Double.isFinite(value) ? value : fallback;
+    }
+
+    private static double clamp(double value, double min, double max) {
+        return Math.max(min, Math.min(max, value));
+    }
+
     public record Spec(
             String mode,
             Map<String, String> options,
@@ -290,11 +377,22 @@ public record ApricityViewport(
             zoomStep = clamp(sanitizeZoom(zoomStep, 0.1d), 0.01d, 5.0d);
         }
 
+        private static boolean isGuiMode(String mode) {
+            return "gui".equals(mode) || "mc".equals(mode);
+        }
+
+        private static boolean isWindowMode(String mode) {
+            return "window".equals(mode) || "native".equals(mode)
+                    || "screen".equals(mode) || "fullscreen".equals(mode);
+        }
+
         public ApricityViewport resolve(Window window, double zoom) {
             return applyZoom(resolveBase(mode, options, window), clamp(sanitizeZoom(zoom, initialZoom), minZoom, maxZoom));
         }
 
-        /** Resolves the same CSS viewport contract when no Minecraft window is available. */
+        /**
+         * Resolves the same CSS viewport contract when no Minecraft window is available.
+         */
         public ApricityViewport resolveHeadless(int availableWidth, int availableHeight, double zoom) {
             int fallbackWidth = Math.max(1, availableWidth);
             int fallbackHeight = Math.max(1, availableHeight);
@@ -323,15 +421,6 @@ public record ApricityViewport(
                 base = new ApricityViewport(width, height, (float) scale, scale);
             }
             return applyZoom(base, clamp(sanitizeZoom(zoom, initialZoom), minZoom, maxZoom));
-        }
-
-        private static boolean isGuiMode(String mode) {
-            return "gui".equals(mode) || "mc".equals(mode);
-        }
-
-        private static boolean isWindowMode(String mode) {
-            return "window".equals(mode) || "native".equals(mode)
-                    || "screen".equals(mode) || "fullscreen".equals(mode);
         }
 
         public State createState() {
@@ -405,7 +494,9 @@ public record ApricityViewport(
             }
         }
 
-        /** Sets an editor-controlled zoom value, even when wheel scaling is disabled. */
+        /**
+         * Sets an editor-controlled zoom value, even when wheel scaling is disabled.
+         */
         public synchronized boolean setZoom(double nextZoom) {
             double clamped = clamp(sanitizeZoom(nextZoom, zoom), spec.minZoom(), spec.maxZoom());
             if (Math.abs(clamped - zoom) < 0.000001d) return false;
@@ -413,64 +504,5 @@ public record ApricityViewport(
             writeStoredZoom(templatePath, zoom);
             return true;
         }
-    }
-
-    private static String normalizeTemplatePath(String templatePath) {
-        return templatePath == null ? "" : templatePath.trim().replace('\\', '/');
-    }
-
-    private static double readStoredZoom(String templatePath, double fallback) {
-        ensureZoomStoreLoaded();
-        synchronized (ZOOM_STORE_LOCK) {
-            return parseDouble(STORED_ZOOMS.getProperty(templatePath), fallback);
-        }
-    }
-
-    private static void writeStoredZoom(String templatePath, double zoom) {
-        if (templatePath == null || templatePath.isBlank()) return;
-        ensureZoomStoreLoaded();
-        synchronized (ZOOM_STORE_LOCK) {
-            STORED_ZOOMS.setProperty(templatePath, String.format(Locale.ROOT, "%.6f", zoom));
-            Path file = zoomStorePath();
-            try {
-                Files.createDirectories(file.getParent());
-                try (OutputStream out = Files.newOutputStream(file)) {
-                    STORED_ZOOMS.store(out, "ApricityUI viewport zoom values");
-                }
-            } catch (IOException ignored) {
-            }
-        }
-    }
-
-    private static void ensureZoomStoreLoaded() {
-        if (zoomStoreLoaded) return;
-        synchronized (ZOOM_STORE_LOCK) {
-            if (zoomStoreLoaded) return;
-            Path file = zoomStorePath();
-            if (Files.exists(file) && Files.isRegularFile(file)) {
-                try (InputStream in = Files.newInputStream(file)) {
-                    STORED_ZOOMS.load(in);
-                } catch (IOException ignored) {
-                }
-            }
-            zoomStoreLoaded = true;
-        }
-    }
-
-    private static Path zoomStorePath() {
-        return configDir().resolve("apricityui").resolve("viewport-zoom.properties");
-    }
-
-    private static Path configDir() {
-        Path dir = com.sighs.apricityui.spi.AuiServices.client().getConfigDirectory();
-        return dir != null ? dir : Path.of("config").toAbsolutePath().normalize();
-    }
-
-    private static double sanitizeZoom(double value, double fallback) {
-        return value > 0 && Double.isFinite(value) ? value : fallback;
-    }
-
-    private static double clamp(double value, double min, double max) {
-        return Math.max(min, Math.min(max, value));
     }
 }

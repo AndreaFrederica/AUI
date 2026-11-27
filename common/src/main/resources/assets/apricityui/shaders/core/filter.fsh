@@ -16,6 +16,7 @@ uniform vec4 ShadowColor;
 uniform float ForceAlpha;
 uniform vec4 ClipRect;
 uniform vec4 ClipRadii;
+uniform vec4 ClipRadiiY;
 uniform float ClipEnabled;
 uniform vec2 UvPerGuiPixel;
 
@@ -39,6 +40,14 @@ vec3 linearToSrgb(vec3 c) {
                step(vec3(0.0031308), c));
 }
 
+bool outsideEllipse(vec2 edge, int corner) {
+    vec2 radius = vec2(ClipRadii[corner], ClipRadiiY[corner]);
+    if (radius.x <= 0.0 || radius.y <= 0.0) return false;
+    if (edge.x >= radius.x || edge.y >= radius.y) return false;
+    vec2 distance = (radius - edge) / radius;
+    return dot(distance, distance) > 1.0;
+}
+
 void main() {
     if (ClipEnabled > 0.5) {
         vec2 pos = screenPos;
@@ -50,32 +59,23 @@ void main() {
             discard;
         }
 
-        float tl = ClipRadii.x;
-        float tr = ClipRadii.y;
-        float br = ClipRadii.z;
-        float bl = ClipRadii.w;
-        float maxR = min(rectSize.x, rectSize.y) * 0.5;
-        tl = min(tl, maxR);
-        tr = min(tr, maxR);
-        br = min(br, maxR);
-        bl = min(bl, maxR);
-
-        if (tl > 0.0 && local.x < tl && local.y < tl) {
-            if (distance(local, vec2(tl, tl)) > tl) discard;
-        }
-        if (tr > 0.0 && local.x > rectSize.x - tr && local.y < tr) {
-            if (distance(local, vec2(rectSize.x - tr, tr)) > tr) discard;
-        }
-        if (br > 0.0 && local.x > rectSize.x - br && local.y > rectSize.y - br) {
-            if (distance(local, vec2(rectSize.x - br, rectSize.y - br)) > br) discard;
-        }
-        if (bl > 0.0 && local.x < bl && local.y > rectSize.y - bl) {
-            if (distance(local, vec2(bl, rectSize.y - bl)) > bl) discard;
-        }
+        vec2 opposite = rectSize - local;
+        if (outsideEllipse(local, 0)
+                || outsideEllipse(vec2(opposite.x, local.y), 1)
+                || outsideEllipse(opposite, 2)
+                || outsideEllipse(vec2(local.x, opposite.y), 3)) discard;
     }
 
     vec4 rawColor = texture(Sampler0, texCoord);
     if (ForceAlpha > 0.5) {
+        // backdrop-filter 用采样结果"替换"它覆盖的区域。快照里的半透明层是预乘的，
+        // 先按真实 α 反乘回来，否则那些像素的预乘 RGB（接近黑）会被当成实色画出来，
+        // 表现为 header 一带发暗的矩形。
+        bool sampled = rawColor.a > 0.001;
+        if (sampled) rawColor.rgb /= rawColor.a;
+        // 快照来自主目标，而主目标的 α 并不可靠（不透明绘制处常常是 0），所以不能按 α
+        // 丢弃；只有 α 与 RGB 同时为 0（清空态）才跳过，其余一律按不透明替换。
+        if (!sampled && max(max(rawColor.r, rawColor.g), rawColor.b) <= 0.002) discard;
         rawColor.a = 1.0;
     }
     if (rawColor.a <= 0.001 && ShadowColor.a <= 0.001) discard;

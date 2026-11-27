@@ -7,62 +7,12 @@ import java.util.List;
 import java.util.Locale;
 
 public final class Interaction {
+    private static final java.util.Set<String> COLOR_KEYWORDS = java.util.Set.of(
+            "black", "silver", "gray", "grey", "white", "maroon", "red", "purple", "fuchsia",
+            "green", "lime", "olive", "yellow", "navy", "blue", "teal", "aqua", "orange"
+    );
+
     private Interaction() {
-    }
-
-    /**
-     * 归一化后的 {@code overflow} 关键字。枚举是唯一实现来源：{@link #normalizeOverflow(String)}
-     * 委托 {@link #parse(String)}，{@link Style} 上的惰性 memo 也存枚举，避免每次调用都 trim+lowercase。
-     */
-    public enum Overflow {
-        VISIBLE("visible"), HIDDEN("hidden"), SCROLL("scroll"), AUTO("auto"), CLIP("clip");
-
-        private final String css;
-
-        Overflow(String css) {
-            this.css = css;
-        }
-
-        public String cssValue() {
-            return css;
-        }
-
-        /** 等价于旧的 {@code normalizeOverflow}：null/空白/非法值回退到 {@code VISIBLE}。 */
-        public static Overflow parse(String raw) {
-            if (raw == null || raw.isBlank()) return VISIBLE;
-            return switch (raw.trim().toLowerCase(Locale.ROOT)) {
-                case "hidden" -> HIDDEN;
-                case "scroll" -> SCROLL;
-                case "auto" -> AUTO;
-                case "clip" -> CLIP;
-                default -> VISIBLE;
-            };
-        }
-    }
-
-    /** 归一化后的 {@code visibility} 关键字。 */
-    public enum Visibility {
-        VISIBLE("visible"), HIDDEN("hidden"), COLLAPSE("collapse");
-
-        private final String css;
-
-        Visibility(String css) {
-            this.css = css;
-        }
-
-        public String cssValue() {
-            return css;
-        }
-
-        /** 等价于旧的 {@code normalizeVisibility}：null/空白/非法值回退到 {@code VISIBLE}。 */
-        public static Visibility parse(String raw) {
-            if (raw == null || raw.isBlank()) return VISIBLE;
-            return switch (raw.trim().toLowerCase(Locale.ROOT)) {
-                case "hidden" -> HIDDEN;
-                case "collapse" -> COLLAPSE;
-                default -> VISIBLE;
-            };
-        }
     }
 
     public static String getUserSelect(Element element) {
@@ -127,12 +77,16 @@ public final class Interaction {
         return true;
     }
 
-    /** 保留旧签名，唯一实现来源是 {@link Visibility#parse(String)}。 */
+    /**
+     * 保留旧签名，唯一实现来源是 {@link Visibility#parse(String)}。
+     */
     public static String normalizeVisibility(String raw) {
         return Visibility.parse(raw).cssValue();
     }
 
-    /** 保留旧签名，唯一实现来源是 {@link Overflow#parse(String)}。 */
+    /**
+     * 保留旧签名，唯一实现来源是 {@link Overflow#parse(String)}。
+     */
     public static String normalizeOverflow(String raw) {
         return Overflow.parse(raw).cssValue();
     }
@@ -154,7 +108,9 @@ public final class Interaction {
         };
     }
 
-    /** 是否需要为滚动条预留稳定 gutter（{@code stable} / {@code stable both-edges}）。 */
+    /**
+     * 是否需要为滚动条预留稳定 gutter（{@code stable} / {@code stable both-edges}）。
+     */
     public static boolean hasStableScrollbarGutter(String raw) {
         String value = normalizeScrollbarGutter(raw);
         return "stable".equals(value) || "stable both-edges".equals(value);
@@ -165,14 +121,29 @@ public final class Interaction {
      * 或非负长度。长度以外的关键词之外的非法值回退到 {@code auto}。
      * {@code none} 隐藏滚动条但保留滚动能力。
      */
+    private static final ThreadLocal<java.util.Map<String, String>> SCROLLBAR_WIDTHS = ThreadLocal.withInitial(
+            () -> new java.util.LinkedHashMap<>(32, 0.75f, true) {
+                @Override
+                protected boolean removeEldestEntry(java.util.Map.Entry<String, String> eldest) {
+                    return size() > 128;
+                }
+            });
+
     public static String normalizeScrollbarWidth(String raw) {
         if (raw == null || raw.isBlank()) return "auto";
+        if (raw.length() > 128) return normalizeScrollbarWidthUncached(raw);
+        return SCROLLBAR_WIDTHS.get().computeIfAbsent(raw, Interaction::normalizeScrollbarWidthUncached);
+    }
+
+    private static String normalizeScrollbarWidthUncached(String raw) {
         String value = raw.trim().toLowerCase(Locale.ROOT);
         if (value.equals("auto") || value.equals("thin") || value.equals("none")) return value;
         return isNonNegativeLength(value) ? value : "auto";
     }
 
-    /** 滚动条是否被 {@code scrollbar-width: none} 显式隐藏。 */
+    /**
+     * 滚动条是否被 {@code scrollbar-width: none} 显式隐藏。
+     */
     public static boolean isScrollbarHidden(String raw) {
         return "none".equals(normalizeScrollbarWidth(raw));
     }
@@ -185,7 +156,7 @@ public final class Interaction {
         if (raw == null || raw.isBlank()) return "auto";
         String value = raw.trim().toLowerCase(Locale.ROOT);
         if (value.equals("auto")) return value;
-        List<String> tokens = com.sighs.apricityui.parser.CssString.splitTopLevelTokens(value);
+        List<String> tokens = com.sighs.apricityui.parser.CssString.splitTopLevelTokensCached(value);
         if (tokens.size() != 2) return "auto";
         for (String token : tokens) {
             if (token == null || token.isBlank() || !isColorToken(token)) return "auto";
@@ -193,12 +164,16 @@ public final class Interaction {
         return tokens.get(0) + " " + tokens.get(1);
     }
 
-    /** thumb 颜色 token（{@code scrollbar-color} 的第一个 token），无则为 null。 */
+    /**
+     * thumb 颜色 token（{@code scrollbar-color} 的第一个 token），无则为 null。
+     */
     public static String scrollbarThumbColor(String raw) {
         return scrollbarColorToken(raw, 0);
     }
 
-    /** track 颜色 token（{@code scrollbar-color} 的第二个 token），无则为 null。 */
+    /**
+     * track 颜色 token（{@code scrollbar-color} 的第二个 token），无则为 null。
+     */
     public static String scrollbarTrackColor(String raw) {
         return scrollbarColorToken(raw, 1);
     }
@@ -206,12 +181,12 @@ public final class Interaction {
     private static String scrollbarColorToken(String raw, int index) {
         String value = normalizeScrollbarColor(raw);
         if ("auto".equals(value)) return null;
-        List<String> tokens = com.sighs.apricityui.parser.CssString.splitTopLevelTokens(value);
+        List<String> tokens = com.sighs.apricityui.parser.CssString.splitTopLevelTokensCached(value);
         return index < tokens.size() ? tokens.get(index) : null;
     }
 
     private static boolean isNonNegativeLength(String value) {
-        for (String token : com.sighs.apricityui.parser.CssString.splitTopLevelTokens(value)) {
+        for (String token : com.sighs.apricityui.parser.CssString.splitTopLevelTokensCached(value)) {
             if (!token.endsWith("px")) return false;
             String number = token.substring(0, token.length() - 2).trim();
             try {
@@ -230,11 +205,6 @@ public final class Interaction {
         if (value.startsWith("#") || value.startsWith("rgb") || value.startsWith("hsl")) return true;
         return COLOR_KEYWORDS.contains(value);
     }
-
-    private static final java.util.Set<String> COLOR_KEYWORDS = java.util.Set.of(
-            "black", "silver", "gray", "grey", "white", "maroon", "red", "purple", "fuchsia",
-            "green", "lime", "olive", "yellow", "navy", "blue", "teal", "aqua", "orange"
-    );
 
     public static String resolveOverflowX(Style style) {
         if (style == null) return "visible";
@@ -261,5 +231,66 @@ public final class Interaction {
     public static boolean allowsUserScroll(String raw) {
         String value = normalizeOverflow(raw);
         return value.equals("auto") || value.equals("scroll");
+    }
+
+    /**
+     * 归一化后的 {@code overflow} 关键字。枚举是唯一实现来源：{@link #normalizeOverflow(String)}
+     * 委托 {@link #parse(String)}，{@link Style} 上的惰性 memo 也存枚举，避免每次调用都 trim+lowercase。
+     */
+    public enum Overflow {
+        VISIBLE("visible"), HIDDEN("hidden"), SCROLL("scroll"), AUTO("auto"), CLIP("clip");
+
+        private final String css;
+
+        Overflow(String css) {
+            this.css = css;
+        }
+
+        /**
+         * 等价于旧的 {@code normalizeOverflow}：null/空白/非法值回退到 {@code VISIBLE}。
+         */
+        public static Overflow parse(String raw) {
+            if (raw == null || raw.isBlank()) return VISIBLE;
+            return switch (raw.trim().toLowerCase(Locale.ROOT)) {
+                case "hidden" -> HIDDEN;
+                case "scroll" -> SCROLL;
+                case "auto" -> AUTO;
+                case "clip" -> CLIP;
+                default -> VISIBLE;
+            };
+        }
+
+        public String cssValue() {
+            return css;
+        }
+    }
+
+    /**
+     * 归一化后的 {@code visibility} 关键字。
+     */
+    public enum Visibility {
+        VISIBLE("visible"), HIDDEN("hidden"), COLLAPSE("collapse");
+
+        private final String css;
+
+        Visibility(String css) {
+            this.css = css;
+        }
+
+        /**
+         * 等价于旧的 {@code normalizeVisibility}：null/空白/非法值回退到 {@code VISIBLE}。
+         */
+        public static Visibility parse(String raw) {
+            if (raw == null || raw.isBlank()) return VISIBLE;
+            return switch (raw.trim().toLowerCase(Locale.ROOT)) {
+                case "hidden" -> HIDDEN;
+                case "collapse" -> COLLAPSE;
+                default -> VISIBLE;
+            };
+        }
+
+        public String cssValue() {
+            return css;
+        }
     }
 }

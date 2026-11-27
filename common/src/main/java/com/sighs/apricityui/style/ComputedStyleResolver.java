@@ -3,8 +3,10 @@ package com.sighs.apricityui.style;
 import java.lang.reflect.Field;
 import java.util.Locale;
 import java.util.Map;
+
 import com.sighs.apricityui.init.Element;
 import com.sighs.apricityui.parser.CSS;
+import com.sighs.apricityui.parser.Color;
 import com.sighs.apricityui.render.CssBlendMode;
 
 /**
@@ -14,9 +16,6 @@ import com.sighs.apricityui.render.CssBlendMode;
  * INHERITED_PROPERTIES）与公开字段/方法，不持有状态。
  */
 public final class ComputedStyleResolver {
-    private ComputedStyleResolver() {
-    }
-
     private static final Map<String, String> INITIAL_VALUES = Map.ofEntries(
             Map.entry("width", "auto"),
             Map.entry("height", "auto"),
@@ -41,10 +40,18 @@ public final class ComputedStyleResolver {
             Map.entry("content", "normal"),
             Map.entry("grid-template-columns", "unset"),
             Map.entry("grid-template-rows", "unset"),
-            Map.entry("gap", "0px"),
-            Map.entry("row-gap", "0px"),
-            Map.entry("column-gap", "0px"),
-            Map.entry("justify-items", "stretch"),
+            Map.entry("grid-template-areas", "none"),
+            Map.entry("grid-auto-rows", "auto"),
+            Map.entry("grid-auto-columns", "auto"),
+            Map.entry("grid-auto-flow", "row"),
+            Map.entry("grid-row-start", "auto"),
+            Map.entry("grid-row-end", "auto"),
+            Map.entry("grid-column-start", "auto"),
+            Map.entry("grid-column-end", "auto"),
+            Map.entry("gap", "normal"),
+            Map.entry("row-gap", "normal"),
+            Map.entry("column-gap", "normal"),
+            Map.entry("justify-items", "normal"),
             Map.entry("justify-self", "auto"),
             Map.entry("align-self", "auto"),
             Map.entry("grid-row", "auto"),
@@ -56,6 +63,7 @@ public final class ComputedStyleResolver {
             Map.entry("background-position", "0 0"),
             Map.entry("object-fit", "fill"),
             Map.entry("object-position", "50% 50%"),
+            Map.entry("image-rendering", "auto"),
             Map.entry("appearance", "auto"),
             Map.entry("resize", "none"),
             Map.entry("margin", "0px"),
@@ -82,7 +90,20 @@ public final class ComputedStyleResolver {
             Map.entry("border-image-width", "unset"),
             Map.entry("border-image-outset", "unset"),
             Map.entry("border-image-repeat", "stretch"),
+            Map.entry("outline", "none"),
+            Map.entry("outline-width", "medium"),
+            Map.entry("outline-style", "none"),
+            Map.entry("outline-color", "auto"),
+            Map.entry("outline-offset", "0px"),
             Map.entry("color", "#000000"),
+            Map.entry("fill", "black"),
+            Map.entry("fill-opacity", "1"),
+            Map.entry("fill-rule", "nonzero"),
+            Map.entry("stroke", "none"),
+            Map.entry("stroke-opacity", "1"),
+            Map.entry("stroke-width", "1"),
+            Map.entry("stroke-linecap", "butt"),
+            Map.entry("stroke-linejoin", "miter"),
             Map.entry("selection-color", "#0078D7"),
             Map.entry("accent-color", "auto"),
             Map.entry("font-size", "16px"),
@@ -104,8 +125,8 @@ public final class ComputedStyleResolver {
             Map.entry("flex-direction", "row"),
             Map.entry("flex-wrap", "nowrap"),
             Map.entry("align-content", "stretch"),
-            Map.entry("justify-content", "flex-start"),
-            Map.entry("align-items", "stretch"),
+            Map.entry("justify-content", "normal"),
+            Map.entry("align-items", "normal"),
             Map.entry("flex", "0 1 auto"),
             Map.entry("flex-grow", "0"),
             Map.entry("flex-shrink", "1"),
@@ -115,11 +136,17 @@ public final class ComputedStyleResolver {
             Map.entry("left", "auto"),
             Map.entry("right", "auto"),
             Map.entry("position", "static"),
+            Map.entry("float", "none"),
+            Map.entry("clear", "none"),
             Map.entry("cursor", "auto"),
             Map.entry("user-select", "auto"),
             Map.entry("pointer-events", "auto"),
             Map.entry("visibility", "visible"),
             Map.entry("transition", "none"),
+            Map.entry("transition-property", "all"),
+            Map.entry("transition-duration", "0s"),
+            Map.entry("transition-delay", "0s"),
+            Map.entry("transition-timing-function", "ease"),
             Map.entry("transform", "none"),
             Map.entry("transform-origin", "50% 50%"),
             Map.entry("rotate", "none"),
@@ -145,68 +172,162 @@ public final class ComputedStyleResolver {
             Map.entry("animation-play-state", "running")
     );
 
+    private ComputedStyleResolver() {
+    }
+
+    private record Property(Field field, String cssName, String initial, boolean inherited, int special) {
+    }
+
+    // Style.DEFAULT is constructed before Style's field tables. Do not read those
+    // tables while initializing this class; resolve them only on first finalization.
+    private static final class Metadata {
+        private static final Property[] PROPERTIES = createProperties();
+
+        private static Property[] createProperties() {
+            Property[] properties = new Property[Style.STYLE_FIELDS.length];
+            for (int i = 0; i < properties.length; i++) {
+                String name = Style.STYLE_FIELD_CSS_NAMES[i];
+                int special = switch (name) {
+                    case "display" -> 1;
+                    case "mix-blend-mode" -> 2;
+                    case "isolation" -> 3;
+                    case "image-rendering" -> 4;
+                    case "color" -> 5;
+                    default -> 0;
+                };
+                properties[i] = new Property(Style.STYLE_FIELDS[i], name, initialValue(name),
+                        Style.INHERITED_PROPERTIES.contains(name), special);
+            }
+            return properties;
+        }
+    }
+
     public static void finalize(Style style, Element context) {
         Style parentStyle = context == null || context.parentElement == null ? null : context.parentElement.getComputedStyle();
-        for (int i = 0; i < Style.STYLE_FIELDS.length; i++) {
-            Field field = Style.STYLE_FIELDS[i];
+        for (Property property : Metadata.PROPERTIES) {
+            Field field = property.field;
             try {
                 String current = (String) field.get(style);
-                String cssName = Style.STYLE_FIELD_CSS_NAMES[i];
-                String resolved = resolveCssWideKeyword(cssName, current, parentStyle);
-                if ("display".equals(cssName)) {
-                    resolved = blockifyDisplay(normalizeDisplay(resolved), parentStyle);
-                }
-                if ("mix-blend-mode".equals(cssName)) {
+                String resolved = resolveCssWideKeyword(property, current, parentStyle);
+                resolved = switch (property.special) {
+                    case 1 -> blockifyDisplay(normalizeDisplay(resolved), parentStyle);
                     // Unknown identifiers are invalid CSS values and compute to normal.
-                    resolved = CssBlendMode.normalize(resolved);
-                } else if ("isolation".equals(cssName)) {
-                    resolved = normalizeIsolation(resolved);
-                }
-                field.set(style, resolved);
+                    case 2 -> CssBlendMode.normalize(resolved);
+                    case 3 -> normalizeIsolation(resolved);
+                    case 4 -> normalizeImageRendering(resolved, parentStyle);
+                    case 5 -> Color.isCurrentColor(resolved)
+                            ? resolveCssWideKeyword(property, "inherit", parentStyle) : resolved;
+                    default -> resolved;
+                };
+                // Preserve the original reference for ordinary values without a reflective write.
+                if (resolved != current) field.set(style, resolved);
             } catch (IllegalAccessException ignored) {
             }
         }
+        var overflowX = style.overflowX();
+        var overflowY = style.overflowY();
+        if (ScrollbarStyle.scrollable(overflowY)) style.overflowX = normalizeOverflowAxis(overflowX);
+        if (ScrollbarStyle.scrollable(overflowX)) style.overflowY = normalizeOverflowAxis(overflowY);
+        style.position = cssKeyword(style.position, "static", "relative", "absolute", "fixed", "sticky");
+        style.clear = cssKeyword(style.clear, "none", "left", "right", "both");
+        style.cssFloat = cssKeyword(style.cssFloat, "none", "left", "right");
+        if ("absolute".equals(style.position) || "fixed".equals(style.position)) {
+            style.cssFloat = "none";
+        } else if (!"none".equals(style.cssFloat)) {
+            style.display = blockify(style.display);
+        }
         finalizeAnimationValues(style);
+        finalizeTransitionValues(style);
     }
 
-    private static String resolveCssWideKeyword(String cssName, String current, Style parentStyle) {
-        if (current == null || current.isBlank()) {
-            return initialValue(cssName);
+    private static void finalizeTransitionValues(Style style) {
+        if ("none".equals(style.transitionProperty)
+                || ("all".equals(style.transitionProperty) && "0s".equals(style.transitionDuration)
+                && "0s".equals(style.transitionDelay))) {
+            style.transition = "none";
+            return;
         }
-        String normalized = current.trim().toLowerCase(Locale.ROOT);
-        if (!ShorthandParser.isCssWideKeyword(normalized)) {
-            return current;
+        var properties = Background.splitTopLevelComma(style.transitionProperty);
+        var durations = Background.splitTopLevelComma(style.transitionDuration);
+        var delays = Background.splitTopLevelComma(style.transitionDelay);
+        var timings = Background.splitTopLevelComma(style.transitionTimingFunction);
+        if (properties.isEmpty() || durations.isEmpty() || delays.isEmpty() || timings.isEmpty()) {
+            style.transition = "none";
+            return;
         }
-        if ("inherit".equals(normalized)) {
-            return inheritOrInitial(cssName, parentStyle);
+        var parts = new java.util.ArrayList<String>();
+        for (int i = 0; i < properties.size(); i++) {
+            parts.add(properties.get(i) + " " + durations.get(i % durations.size()) + " "
+                    + timings.get(i % timings.size()) + " " + delays.get(i % delays.size()));
         }
-        if ("initial".equals(normalized)) {
-            return initialValue(cssName);
-        }
-        if ("revert".equals(normalized) || "revert-layer".equals(normalized)) {
-            // The engine currently has one author origin and no cascade layers,
-            // so both keywords use the defined inherited/initial fallback here.
-            return isInheritedProperty(cssName) ? inheritOrInitial(cssName, parentStyle) : initialValue(cssName);
-        }
-        return isInheritedProperty(cssName) ? inheritOrInitial(cssName, parentStyle) : initialValue(cssName);
+        style.transition = String.join(", ", parts);
     }
 
-    private static boolean isInheritedProperty(String cssName) {
-        return Style.INHERITED_PROPERTIES.contains(cssName);
-    }
-
-    private static String inheritOrInitial(String cssName, Style parentStyle) {
-        if (parentStyle != null) {
-            String inherited = parentStyle.get(cssName);
-            if (inherited != null && !inherited.isBlank() && !"inherit".equalsIgnoreCase(inherited)) {
-                return inherited;
+    private static String resolveCssWideKeyword(Property property, String current, Style parentStyle) {
+        if (current == null || current.isBlank()) return property.initial;
+        int keyword = cssWideKeyword(current);
+        if (keyword == 0) return current;
+        if (keyword == 2) return property.initial;
+        // One author origin and no cascade layers: unset/revert/revert-layer
+        // all use the inherited/initial fallback, while inherit always inherits.
+        if (keyword == 1 || property.inherited) {
+            if (parentStyle != null) {
+                String inherited = parentStyle.get(property.cssName);
+                if (inherited != null && !inherited.isBlank() && !"inherit".equalsIgnoreCase(inherited)) {
+                    return inherited;
+                }
             }
         }
-        return initialValue(cssName);
+        return property.initial;
+    }
+
+    private static int cssWideKeyword(String value) {
+        int start = 0;
+        int end = value.length();
+        // Match String.trim(), not strip(): Unicode blank handling above is separate.
+        while (start < end && value.charAt(start) <= ' ') start++;
+        while (end > start && value.charAt(end - 1) <= ' ') end--;
+        return switch (end - start) {
+            case 5 -> matchesKeyword(value, start, end, "unset") ? 3 : 0;
+            case 6 -> matchesKeyword(value, start, end, "revert") ? 3 : 0;
+            case 7 -> matchesKeyword(value, start, end, "inherit") ? 1
+                    : matchesKeyword(value, start, end, "initial") ? 2 : 0;
+            case 12 -> matchesKeyword(value, start, end, "revert-layer") ? 3 : 0;
+            default -> 0;
+        };
+    }
+
+    private static boolean matchesKeyword(String value, int start, int end, String keyword) {
+        for (int i = start; i < end; i++) {
+            char c = value.charAt(i);
+            // equalsIgnoreCase would also accept e.g. dotless i / long s, unlike
+            // the old Locale.ROOT lowercase comparison. Preserve that distinction.
+            if (c > 127) return value.substring(start, end).toLowerCase(Locale.ROOT).equals(keyword);
+            if (c >= 'A' && c <= 'Z') c += 'a' - 'A';
+            if (c != keyword.charAt(i - start)) return false;
+        }
+        return true;
     }
 
     private static String initialValue(String cssName) {
         return INITIAL_VALUES.getOrDefault(cssName, "unset");
+    }
+
+    private static String normalizeOverflowAxis(Interaction.Overflow overflow) {
+        return switch (overflow) {
+            case VISIBLE -> "auto";
+            case CLIP -> "hidden";
+            default -> overflow.cssValue();
+        };
+    }
+
+    private static String cssKeyword(String raw, String initial, String... alternatives) {
+        if (raw == null || initial.equals(raw)) return initial;
+        String value = raw.trim().toLowerCase(Locale.ROOT);
+        for (String alternative : alternatives) {
+            if (alternative.equals(value)) return alternative;
+        }
+        return initial;
     }
 
     private static String normalizeDisplay(String raw) {
@@ -214,7 +335,10 @@ public final class ComputedStyleResolver {
         String value = raw.trim().toLowerCase(Locale.ROOT);
         return switch (value) {
             case "block", "inline", "inline-block", "flex", "inline-flex", "grid", "inline-grid", "none" -> value;
-            case "table", "list-item", "flow-root" -> "block";
+            case "table", "table-header-group", "table-footer-group", "table-row-group", "table-row", "table-cell" ->
+                    value;
+            case "list-item" -> "block";
+            case "flow-root" -> value;
             case "inline-table" -> "inline-block";
             default -> "block";
         };
@@ -238,16 +362,35 @@ public final class ComputedStyleResolver {
                 && !"grid".equals(value) && !"inline-grid".equals(value)) {
             return display;
         }
+        return blockify(display);
+    }
+
+    private static String blockify(String display) {
         return switch (display) {
             case "inline", "inline-block" -> "block";
             case "inline-flex" -> "flex";
             case "inline-grid" -> "grid";
+            case "table-header-group", "table-footer-group", "table-row-group", "table-row", "table-cell" -> "block";
             default -> display;
         };
     }
 
     private static String normalizeIsolation(String raw) {
         return raw != null && "isolate".equalsIgnoreCase(raw.trim()) ? "isolate" : "auto";
+    }
+
+    /**
+     * {@code image-rendering} 是继承属性；浏览器在解析期丢弃非法声明，因此未知关键字
+     * 按"未声明"处理：回退到父元素的计算值，没有父元素时取初始值 {@code auto}。
+     */
+    private static String normalizeImageRendering(String raw, Style parentStyle) {
+        String keyword = ImageRendering.keyword(raw);
+        if (keyword != null) return keyword;
+        if (parentStyle != null) {
+            String inherited = parentStyle.imageRendering;
+            if (inherited != null && !inherited.isBlank() && !"unset".equals(inherited)) return inherited;
+        }
+        return initialValue("image-rendering");
     }
 
     private static void finalizeAnimationValues(Style style) {

@@ -59,7 +59,7 @@ AUI 本身不是浏览器——HTML 解析、CSS 布局、绘制都是自研引�
 
 - 内部页面的 **CSS 视口 = 元素的内容盒**（CSS px）：`innerWidth`、`vw/vh`、媒体查询都按内容盒算；
 - 栅格按内容盒的**设备像素**（内容盒 × 设备缩放）抓取，页面侧 `devicePixelRatio` 等于该缩放，所以默认是 1:1 实分辨率，非 100% 屏幕缩放下也不糊；
-- 栅格可能被三件事缩小：`capture-scale`、单边 4096 px 上限、按面积降采样（超过 120 万像素）。缩小时 WebView2 的 ZoomFactor（`zoom`，被限死在 0.25 ~ 5）会同步重算，**页面的 CSS 视口仍然精确**，只是画面变软；
+- 栅格默认按内容盒的设备像素出图（1:1 实分辨率）；只有两种情况会缩小：`capture-scale`（你显式要求），或者元素比整个窗口的物理像素还大（面积/单边上限都取自窗口帧缓冲，2K 屏就是 2560×1440，4K 屏就是 3840×2160；`status()` 里会标 `raster capped by area`）。缩小时 WebView2 的 ZoomFactor（`zoom`，被限死在 0.25 ~ 5）会同步重算，**页面的 CSS 视口仍然精确**，只是画面变软；
 - 纹理始终按内容盒绘制，所以栅格变小不会让内容错位，只牺牲清晰度。
 
 ## 渲染管线
@@ -68,8 +68,8 @@ AUI 本身不是浏览器——HTML 解析、CSS 布局、绘制都是自研引�
 
 1. **宿主线程**在一个屏幕外的隐藏窗口（`WS_POPUP`，默认停在 -32000,-32000）里用 WebView2 的 CompositionController 跑真实网页；同一进程内所有 iframe 共享一个浏览器进程和 profile；
 2. 宿主周期性调用 WebView2 的 `CapturePreview` 拿截图，得到 PNG 或 JPEG 编码的字节（抓帧和编码都发生在浏览器进程里）；
-3. **解码线程**（优先级低于普通线程）做 WIC 解码、通道字节交换，并把结果和"渲染器手上那张画布"按 32×32 瓦片比对，只把变化的矩形写进一块**共享内存段**；
-4. 渲染线程按包读共享内存，只把变化的矩形写进纹理并只上传这些区域。
+3. **解码线程**（优先级低于普通线程）做 WIC 解码，并把结果和"渲染器手上那张画布"按 32×32 瓦片比对；只把变化的矩形（再收缩到真正变化的像素包围盒）写进一块**共享内存段**，BGRA→RGBA 的换序只发生在这部分像素上，不再每帧扫一遍整幅画布；
+4. 渲染线程按包读共享内存，把每个矩形**直接从共享内存上传**到纹理——不经过 `NativeImage`，也没有逐像素的 Java 拷贝。
 
 传输成本因此跟**变化面积**成正比，跟画布大小无关。每个实例各有一条宿主线程、一条解码线程、一块共享内存段和一个隐藏窗口；浏览器进程与 profile 是共享的。
 
@@ -78,7 +78,7 @@ AUI 本身不是浏览器——HTML 解析、CSS 布局、绘制都是自研引�
 - **单次抓帧有约 20ms 的固定成本**。WebView2 只提供无损（PNG）和有损（JPEG）两种格式，`CapturePreview` 每次往返最少 ~21ms（400×300 和 1280×720 都测过：小图 21ms、1280×720 约 28ms；页面静止时也是这个数，说明这部分是浏览器进程里的回读 + 编码 + IPC，不是"等新合成帧"）。重页面更贵：900×700 的 PNG 往返约 110ms（≈9fps），JPEG 约 31ms；面积成本约 20ms + 28ms/百万像素；
 - `capture` 默认 **auto**：页面不动时用无损（配合下面的载荷去重，代价约 0），持续变化时自动切快速编码——250ms 窗口内发布 ≥2 帧就切，切完静默 1.5s 再回落。要钉死写 `capture="lossless"` 或 `capture="fast"`；
 - **抓帧是流水线的**：那 ~21ms 大部分是"等"，所以最多同时挂 4 次 `CapturePreview`，一次在途时就发下一次；回调乱序返回时只发布最新的那一帧（旧帧丢弃，记 `stale=`）。实测（800×600、页面 60fps 重绘）PNG 33→**61fps**、JPEG 39→**61fps**，1280×720 从 30→**60fps**，1600×900 约 **59fps**。在途深度自适应：单次延迟 <45ms 挂 4 个，>60ms 降到 2 个；
-- **两层去重**：①宿主把这一帧的压缩载荷和上一帧逐字节比对，完全相同且读取端没有欠账时**整帧跳过**（不解码、不传输、不上传）；②逐 32×32 瓦片比对，只发变化的矩形。实测 800×600 页面里只有一个 48×48 小方块在动时，每帧脏区约 **1.5%** 画布（同一页面用 JPEG 抓帧时平均上传约 **4%** 画布，JPEG 噪声会让更多瓦片变脏）；页面完全静止时**一个包都不发**。整帧传输只发生在首次、元素尺寸变化、以及读取端请求重刷时；
+- **两层去重**：①宿主把这一帧的压缩载荷和上一帧逐字节比对，完全相同且读取端没有欠账时**整帧跳过**（不解码、不传输、不上传）；②逐 32×32 瓦片比对找出变化区域，再把每个矩形收缩到真正变化的像素包围盒，只发这些矩形（瓦片只是检测网格，不是发送单位；一个 40×40 的方块移动时，收缩后每帧约 6.4K 像素，未收缩是 24.6K）。实测 800×600 页面里只有一个 48×48 小方块在动时，每帧脏区约 **1.5%** 画布（同一页面用 JPEG 抓帧时平均上传约 **4%** 画布，JPEG 噪声会让更多瓦片变脏）；页面完全静止时**一个包都不发**。整帧传输只发生在首次、元素尺寸变化、以及读取端请求重刷时；
 - **抓帧率跟随元素绘制率**：实测游戏 60fps 时抓 57 帧/s、30fps 时 27、20fps 时 20；请求间隔跟着实测帧时间走，夹在 16 ~ 50ms（50ms 是下限帧率，防止页面看起来冻住）；
 - 取帧和取更新发生在**渲染阶段**（每渲染帧一次），不受 20Hz 逻辑 tick 限制；元素连续 2 秒没被绘制时暂停抓帧；
 - `capture-scale` 是**省 CPU / 省带宽**的开关，不是帧率开关：800×600 → 400×300 单次抓帧省约 5ms，但流水线已经把这点延迟藏住了；
@@ -126,7 +126,52 @@ AuiServices.webView().unavailableReason();  // 不可用原因
 - 页面里的 `window.parent` / `postMessage` 指向浏览器内部，**没有**接到 AUI 上；`contentWindow` / `contentDocument` 也没有暴露；
 - 页面内容不透明合成，没有 alpha 通道；
 - ZoomFactor 被 WebView2 限死在 0.25 ~ 5，SDK 无法放宽；
-- **没有面向脚本的 webview API**：JS 侧只有通用 DOM 属性 / 事件（`getAttribute`/`setAttribute`）；Java 侧也没有 `reload()` / `navigate()` 这类方法，用改属性代替。
+- AUI 自研脚本侧仍通过 DOM 属性控制 iframe 导航；WebView2 页面内新增独立的 `window.aui` JSON 消息桥接，必须由 Java 显式授权，不能通过 HTML 属性启用。
+
+## Java ↔ WebView2 JS 桥接
+
+Java 在客户端线程配置具体 iframe，handler 也在其 tick 线程调用，不能阻塞：
+
+```java
+iframe.bridge()
+    .allowPage("https://example.com/panel")
+    .register("player.getInfo", (context, params) -> {
+        JsonObject result = new JsonObject();
+        result.addProperty("health", 20); // 示例：实际从客户端游戏状态读取
+        return CompletableFuture.completedFuture(result);
+    });
+// 握手完成后主动推送；未就绪或队列满返回 false。
+iframe.bridge().emit("player.healthChanged", healthJson);
+```
+
+WebView2 页面（不是 AUI 自研 JS 环境）使用：
+
+```javascript
+await aui.ready();
+const player = await aui.call('player.getInfo', {});
+const off = aui.on('player.healthChanged', data => console.log(data));
+off(); // 取消订阅
+```
+
+- 使用 WebView2 `WebMessageReceived` / `PostWebMessageAsJson` 和有界 JNI 队列，不开启网络端口，不暴露 Java 反射或任意对象。
+- `allowPage` 是**精确页面 URL** 白名单，忽略 fragment，但区分路径和 query。只允许绝对 http/https/file URL，拒绝远程 file 主机。不要授权不受信任或可被外部用户修改的页面。
+- 每个顶层文档独立会话；导航清空旧消息并丢弃迟到响应；子 frame 不提供 convenience API。
+- 默认请求超时 10 秒，可用第三个参数指定 1–60000ms；超时不撤销已执行的 Java 副作用。异步 handler 返回 `CompletionStage<JsonElement>`。
+- 单条 JSON 最大 64 KiB，JS 最多 64 个未完成请求，原生入站/出站队列各最多 256 条，tick 每次最多取 32 条。handler 自身仍须快速返回。
+- 未注册方法返回 `METHOD_NOT_FOUND`；handler 异常返回 `JAVA_ERROR`，不把 Java 栈或异常内部细节传给网页。
+- 测试页：`common/src/main/resources/assets/apricityui/apricity/tests/webview-bridge-test.html`。它是供真实 WebView2 加载的网页，不是 AUI 引擎页面。测试 harness 显式注册 `test.*` 方法，生产环境不自动安装这些方法。
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts/build-webview-native.ps1
+.\gradlew.bat -p common test --tests com.sighs.apricityui.webview.WebViewBridgeTest
+.\gradlew.bat -p common webviewBridgeTest
+```
+
+最后一项要求 Windows x64 + 已安装 WebView2 Runtime，直接使用实际 DLL 和 HTML 测试双向通信及导航，不需要启动 Minecraft。
+
+## 启动阶段
+
+启动阶段（游戏窗口出现前后、资源还在加载的那段时间）也能用这套抓帧管线画加载页，但它有自己的一套入口：`@StartupHook`、`StartupContext`、以及以文件夹为单位的页面工程（实例优先、jar 兜底解压）。用法、契约、工程解压规则和排查都在 **[启动阶段与启动加载屏](startup)**。
 
 ## 调试
 
@@ -163,7 +208,7 @@ AuiServices.webView().unavailableReason();  // 不可用原因
 
 **滚轮把游戏快捷栏也切了**：宿主文档没有声明 `aui-mouse-events: intercept`，原生滚轮漏到了游戏。补上这个 meta（见 [ApricityScreen 的 meta 章节](apricity-screen#页面-meta-配置)）。
 
-**大 iframe 画面发软**：触发了单边 4096 上限或按面积降采样（`status()` 里会有 `raster capped by area`）。这是有意为之——保帧率、只牺牲清晰度，页面的 CSS 视口仍然精确。
+**大 iframe 画面发软**：现在默认按元素的设备分辨率出图，上限取自窗口帧缓冲（2K 屏 2560×1440、4K 屏 3840×2160），只有比整个窗口还大的元素才会被降采样（`status()` 里会有 `raster capped by area`）；另外显式 `capture-scale` 也会降。被降采样是故意保帧率、只牺牲清晰度，页面的 CSS 视口仍然精确。全屏 iframe 想再省 CPU，用 `capture-scale="0.75"` 之类按比例退，比固定上限可控。
 
 **视频播起来很卡**：抓帧有固定成本，重页面 PNG 会掉到个位数帧率。保持默认 `capture="auto"`（会自动切 JPEG），必要时再降 `capture-scale`；想钉死 JPEG 用 `capture="fast"`。
 

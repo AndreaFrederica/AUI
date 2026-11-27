@@ -17,7 +17,7 @@ An HTML page (Document) has four kinds of hosts, covering every Minecraft UI sce
 
 The same page structure and styling can be used in all four hosts. Script execution depends on the target, while display position and input handling depend on the host.
 
-Page behavior is controlled by two metas — logical viewport (`aui-viewport`) and mouse interception (`aui-mouse-events`). The full explanation is consolidated in [the meta section of ApricityScreen](apricity-screen#page-meta-configuration).
+Page behavior is controlled by metas such as logical viewport (`aui-viewport`), mouse interception (`aui-mouse-events`), hyphen breaking (`aui-hyphen-break`), and startup preload (`aui-preload`). The full explanation is consolidated in [the meta section of ApricityScreen](apricity-screen#page-meta-configuration).
 
 ## Loader and script support
 
@@ -31,8 +31,9 @@ The repository currently contains these targets. This table reflects the source 
 | NeoForge | 1.21.1 | Supported | Provided | 21 |
 | Fabric | 26.1 | Not currently executed | Not provided | 25 |
 | NeoForge | 26.1 | Supported | Not provided | 25 |
+| NeoForge | 26.3 | Supported | Not provided | 25 |
 
-The Java common API and HTML/CSS rendering are shared across these targets. Fabric targets currently do not execute page scripts; where page-script support is unavailable, pages still render but `<script>` does not run. For Java-side interaction or a target with page-script support, see [Mod-specific API](apricity-api).
+The Java common API and HTML/CSS rendering are shared across these targets. Page scripts need a script runtime at runtime: KubeJS when installed (its context and bindings), otherwise AUI's standalone Rhino runtime when only Rhino is present, and scripts are skipped (pages still render) when neither is installed. Fabric targets currently do not execute page scripts. For Java-side interaction or a target with page-script support, see [Mod-specific API](apricity-api).
 
 ## What you can use in a page
 
@@ -45,8 +46,6 @@ The Java common API and HTML/CSS rendering are shared across these targets. Fabr
 **Browser-style assistive behaviors**: Ctrl+wheel zoom, text selection and copy, clipboard, default form keys, scrolling: [Browser features](browser-features).
 
 **Ore theme**: a built-in MC-style pure-CSS theme (pixel borders, dark surfaces, green/purple/gold accent colors). Include one line of CSS to get a full set of button, card, form, table, and badge styles, plus a companion **visual editor** that lets you drag pages, tune tokens, and export HTML in-game: [Ore theme](ore-theme).
-
-**McUI theme**: another pure-CSS theme with the same component classes and token contract. Switch the stylesheet and root scope class without changing markup: [McUI theme](mcui-theme).
 
 ## Containers: working with real items
 
@@ -84,7 +83,7 @@ Thread rules, refresh generations, registration details: [Secondary Development]
 
 ## Project structure
 
-The repository uses a `common + targets` multi-loader structure: `common/` is loader-agnostic shared code (compilable and testable standalone), and `targets/<loader>-<mc version>/` are standalone Gradle projects (Forge 1.18.2 / 1.19.2 / 1.20.1, Fabric 1.20.1 / 1.21.1 / 26.1, NeoForge 1.21.1 / 26.1), with loader bindings sunk behind SPI. For build commands, CI, and release workflow, see the root [README](../../../README).
+The repository uses a `common + targets` multi-loader structure: `common/` is loader-agnostic shared code (compilable and testable standalone), and `targets/<loader>-<mc version>/` are standalone Gradle projects (Forge 1.18.2 / 1.19.2 / 1.20.1, Fabric 1.20.1 / 1.21.1 / 26.1, NeoForge 1.21.1 / 26.1 / 26.3), with loader bindings sunk behind SPI. For build commands, CI, and release workflow, see the root [README](../../../README).
 
 ## Documentation map
 
@@ -99,11 +98,11 @@ The repository uses a `common + targets` multi-loader structure: `common/` is lo
 | HTML/CSS support | [html-css-coverage.md](html-css-coverage) |
 | Extension tags | [extension-elements.md](extension-elements) |
 | WebView / iframe | [webview.md](webview) |
+| Startup phase / loading screen | [startup.md](startup) |
 | Zoom, selection, clipboard, and other assistive behaviors | [browser-features.md](browser-features) |
 | Resource paths and the Resource Manager | [resource-manager.md](resource-manager) |
 | KJS / Java mod API | [apricity-api.md](apricity-api) |
 | Ore theme and visual editor | [ore-theme.md](ore-theme) |
-| McUI theme | [mcui-theme.md](mcui-theme) |
 | Java component library | [ui-library.md](ui-library) |
 | In-game DevTools | [devtools.md](devtools) |
 | Custom elements / KJS bindings / frame timing | [secondary-development.md](secondary-development) |

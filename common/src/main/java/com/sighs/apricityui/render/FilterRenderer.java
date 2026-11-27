@@ -25,14 +25,17 @@ import java.util.Stack;
 
 public class FilterRenderer {
     private static final Stack<FboHandle> fboStack = new Stack<>();
-    private static FboHandle mainRenderTarget;
     private static final List<FboHandle> fboPool = new ArrayList<>();
-    private static int poolPointer = 0;
     private static final List<FboHandle> backdropPool = new ArrayList<>();
-    private static int backdropPoolPointer = 0;
-    /** Optional external backdrop used by mix-blend-mode and backdrop-filter. */
-    private static FboHandle compositingReference;
     private static final float MAX_REASONABLE_BACKDROP_BLUR = 32.0f;
+    private static FboHandle mainRenderTarget;
+    private static FboHandle screenRenderTarget;
+    private static int poolPointer = 0;
+    private static int backdropPoolPointer = 0;
+    /**
+     * Optional external backdrop used by mix-blend-mode and backdrop-filter.
+     */
+    private static FboHandle compositingReference;
     private static boolean stencilCapabilityResolved;
     private static boolean stencilAvailable = true;
 
@@ -73,12 +76,12 @@ public class FilterRenderer {
         }
     }
 
+    private static final Stack<Mask.TargetState> targetMaskStack = new Stack<>();
+
     public static void beginFrame() {
+        BackgroundPainter.beginFrame();
         warnOffscreenLeak("beginFrame");
-        // 防御式清理：若上帧因异常或节点错配残留栈，避免 poolPointer 无界增长
-        if (!fboStack.isEmpty()) {
-            fboStack.clear();
-        }
+        discardOffscreenLayers();
         mainRenderTarget = AuiServices.render().getMainRenderTarget();
         poolPointer = 0;
         backdropPoolPointer = 0;
@@ -89,13 +92,20 @@ public class FilterRenderer {
 
     public static void endFrame() {
         warnOffscreenLeak("endFrame");
-        if (!fboStack.isEmpty()) {
-            fboStack.clear();
-            if (mainRenderTarget != null) {
-                AuiServices.render().bindWrite(mainRenderTarget, false);
-            }
-        }
+        discardOffscreenLayers();
         compositingReference = null;
+    }
+
+    private static void discardOffscreenLayers() {
+        while (!fboStack.isEmpty()) {
+            fboStack.pop();
+            restoreParentTarget(fboStack.isEmpty() ? mainRenderTarget : fboStack.peek(), targetMaskStack.pop());
+        }
+    }
+
+    private static void restoreParentTarget(FboHandle target, Mask.TargetState state) {
+        if (target != null) AuiServices.render().bindWrite(target, true);
+        Mask.restoreTargetState(state);
     }
 
     public static void pushFilter() {
@@ -106,7 +116,7 @@ public class FilterRenderer {
         Base.commitDraws();
 
         if (fboStack.isEmpty()) {
-            mainRenderTarget = AuiServices.render().getMainRenderTarget();
+            mainRenderTarget = getCurrentTarget();
             poolPointer = 0;
         }
 
@@ -127,10 +137,16 @@ public class FilterRenderer {
         }
         poolPointer++;
 
-        // 注意：这里的 clear 会清除当前绑定的 FBO 的缓冲区
-        AuiServices.render().clear(temp, 0f, 0f, 0f, 0f);
+        Mask.TargetState parentState = Mask.beginOffscreen();
+        try {
+            AuiServices.render().clear(temp, 0f, 0f, 0f, 0f);
+            AuiServices.render().bindWrite(temp, false);
+        } catch (RuntimeException | Error failure) {
+            restoreParentTarget(fboStack.isEmpty() ? mainRenderTarget : fboStack.peek(), parentState);
+            throw failure;
+        }
+        targetMaskStack.push(parentState);
         fboStack.push(temp);
-        AuiServices.render().bindWrite(temp, false);
     }
 
     /**
@@ -148,8 +164,21 @@ public class FilterRenderer {
         );
     }
 
+    private static final ThreadLocal<Stack<FboHandle>> SCREEN_TARGETS = ThreadLocal.withInitial(Stack::new);
+
+    public static AuiRenderService.RenderStateScope pushScreenTarget(FboHandle target) {
+        Stack<FboHandle> targets = SCREEN_TARGETS.get();
+        targets.push(target);
+        return () -> {
+            if (!targets.isEmpty()) targets.pop();
+            if (targets.isEmpty()) SCREEN_TARGETS.remove();
+        };
+    }
+
     public static FboHandle getCurrentTarget() {
-        return fboStack.isEmpty() ? AuiServices.render().getMainRenderTarget() : fboStack.peek();
+        if (!fboStack.isEmpty()) return fboStack.peek();
+        Stack<FboHandle> targets = SCREEN_TARGETS.get();
+        return targets.isEmpty() ? AuiServices.render().getMainRenderTarget() : targets.peek();
     }
 
     /**
@@ -159,43 +188,50 @@ public class FilterRenderer {
      * 最后以恒等 filter 把 C 合成回父目标。mask 值取 alpha 还是 luminance
      * 由 {@link MaskImage#effectiveLuminance} 决定（混合 mode 按 alpha）。
      *
-     * <p>加载失败/未就绪导致一层都画不上时跳过 dst-in，内容保持可见
-     * （fail-open，与浏览器"遮罩失败=全遮掉"的行为不同，见文档）。</p>
+     * <p>一层都画不上时分两种情形（{@link MaskImagePainter.LayerPaint}）：纹理仍在异步加载
+     * 说明结果未知，此时跳过 dst-in、内容保持可见，等加载完成触发的重绘；而图像无效/解码失败
+     * 是不可恢复的终态，按 CSS Masking 1 §6.1 视为 transparent black——内容整体被遮住，
+     * 与浏览器一致。</p>
      */
     public static void popMaskImage(Element target, PoseStack poseStack) {
         if (fboStack.isEmpty()) return;
-
-        // 与 popFilter 相同：先把子树剩余的批处理绘制落进内容 FBO（含共享顶点缓冲里的文本）
         Base.commitDraws();
 
-        List<MaskImage.ResolvedLayer> layers = MaskImage.layersOf(target);
-
-        // 注意顺序：必须在内容 FBO C 出栈之前取 mask 画布 M。
-        // 根级 mask 下栈一空 pushFilter 会把 poolPointer 归零，M 可能复用到 C 本身。
-        pushFilter();
-        FboHandle maskFbo = fboStack.peek();
-        boolean painted;
+        FboHandle contentFbo = fboStack.peek();
         try {
-            painted = paintMaskLayers(target, poseStack, layers, maskFbo);
-        } finally {
-            ImageDrawer.flushBatch();
-            Graph.endBatch();
-            // mask 画布用完即出栈（不做 filter 合成）；stencil/scissor 状态
-            // 已由 MaskImagePainter 内部的 Mask.push/pop 成对恢复
-            fboStack.pop();
-        }
-
-        FboHandle contentFbo = fboStack.pop();
-        FboHandle parentFbo = fboStack.isEmpty() ? mainRenderTarget : fboStack.peek();
-        try {
-            if (painted) {
-                AuiServices.render().bindWrite(contentFbo, true);
+            List<MaskImage.ResolvedLayer> layers = MaskImage.layersOf(target);
+            pushFilter();
+            FboHandle maskFbo = fboStack.peek();
+            MaskPaintResult paint;
+            try {
+                paint = paintMaskLayers(target, poseStack, layers, maskFbo);
+            } finally {
+                try {
+                    Base.commitDraws();
+                } finally {
+                    fboStack.pop();
+                    restoreParentTarget(contentFbo, targetMaskStack.pop());
+                }
+            }
+            if (!paint.painted() && !paint.pending()) return;
+            if (paint.painted()) {
                 drawMaskBlit(maskFbo, MaskImage.effectiveLuminance(layers));
             }
-            AuiServices.render().bindWrite(parentFbo, true);
-            drawWithShader(contentFbo, contentFbo, Filter.FilterState.EMPTY, 1.0f);
+            AuiServices.render().resolveTarget(contentFbo);
+            fboStack.pop();
+            Mask.TargetState parentState = targetMaskStack.pop();
+            FboHandle parentFbo = fboStack.isEmpty() ? mainRenderTarget : fboStack.peek();
+            try {
+                restoreParentTarget(parentFbo, parentState);
+                drawWithShader(contentFbo, contentFbo, Filter.FilterState.EMPTY, 1.0f);
+            } finally {
+                restoreParentTarget(parentFbo, parentState);
+            }
         } finally {
-            if (parentFbo != null) AuiServices.render().bindWrite(parentFbo, true);
+            if (!fboStack.isEmpty() && fboStack.peek() == contentFbo) {
+                fboStack.pop();
+                restoreParentTarget(fboStack.isEmpty() ? mainRenderTarget : fboStack.peek(), targetMaskStack.pop());
+            }
         }
     }
 
@@ -204,37 +240,52 @@ public class FilterRenderer {
      * intersect/subtract/exclude 层先画进 scratch FBO L（栈上有 M，pushFilter 不会
      * 重置 poolPointer，L 必然是新 FBO），再以对应 Porter-Duff 混合 merge 回 M。
      * 最底层的 composite 值没有意义（下方无可合成对象），按 add 处理。
+     *
+     * <p>返回值只汇总两种"没画上"：{@code pending} 有层仍在加载（结果未知），
+     * {@code painted} 有层真画上了内容。逐层跳过画不出来的 scratch 层是既有行为
+     * （保留已累积的 M），也就是与规范有偏差的地方只在"有效层 + 无效层混合且带
+     * intersect/subtract/exclude"这一种组合；{@link #popMaskImage} 只在所有层都没画上
+     * 且没有层仍在加载（即都已成终态）时按 transparent black 整体遮挡。</p>
      */
-    private static boolean paintMaskLayers(Element target, PoseStack poseStack,
-                                           List<MaskImage.ResolvedLayer> layers, FboHandle maskFbo) {
-        boolean any = false;
+    private static MaskPaintResult paintMaskLayers(Element target, PoseStack poseStack,
+                                                   List<MaskImage.ResolvedLayer> layers, FboHandle maskFbo) {
+        boolean painted = false;
+        boolean pending = false;
         for (int i = layers.size() - 1; i >= 0; i--) {
             MaskImage.ResolvedLayer layer = layers.get(i);
             AuiRenderService.MaskCompositeOp op = mergeOpOf(layer.composite());
             if (op == null || i == layers.size() - 1) {
-                any |= MaskImagePainter.paintLayer(target, poseStack, layer);
+                MaskImagePainter.LayerPaint result = MaskImagePainter.paintLayer(target, poseStack, layer);
+                painted |= result == MaskImagePainter.LayerPaint.PAINTED;
+                pending |= result == MaskImagePainter.LayerPaint.PENDING;
                 continue;
             }
             pushFilter();
             FboHandle scratchFbo = fboStack.peek();
-            boolean scratchPainted;
+            MaskImagePainter.LayerPaint result;
             try {
-                scratchPainted = MaskImagePainter.paintLayer(target, poseStack, layer);
+                result = MaskImagePainter.paintLayer(target, poseStack, layer);
             } finally {
-                ImageDrawer.flushBatch();
-                Graph.endBatch();
-                fboStack.pop();
+                try {
+                    Base.commitDraws();
+                } finally {
+                    fboStack.pop();
+                    restoreParentTarget(maskFbo, targetMaskStack.pop());
+                }
             }
-            if (scratchPainted) {
+            if (result == MaskImagePainter.LayerPaint.PENDING) pending = true;
+            if (result == MaskImagePainter.LayerPaint.PAINTED) {
                 AuiServices.render().bindWrite(maskFbo, true);
                 drawMaskMergeBlit(scratchFbo, op);
-                any = true;
+                painted = true;
             }
         }
-        return any;
+        return new MaskPaintResult(painted, pending);
     }
 
-    /** 非 add 的 composite 值映射到 Porter-Duff merge 算子；add/未知值返回 null。 */
+    /**
+     * 非 add 的 composite 值映射到 Porter-Duff merge 算子；add/未知值返回 null。
+     */
     private static AuiRenderService.MaskCompositeOp mergeOpOf(String composite) {
         return switch (composite) {
             case "intersect" -> AuiRenderService.MaskCompositeOp.INTERSECT;
@@ -246,16 +297,18 @@ public class FilterRenderer {
 
     /**
      * dst-in 全窗 blit：dest(C) *= src(M) 的 mask 值（alpha 或 luminance）。
-     * legacy 端由 filter_mask 着色器 JSON 自带 zero/srcalpha 混合
-     * （ShaderInstance.apply 会覆盖动态混合状态，不能靠 setBlendFuncSeparate），
-     * 26.1 端由 filter_mask pipeline 烘焙同款混合。
+     * Legacy 的 JSON 和 26.1 的 pipeline 均声明 zero/src-alpha；这里也显式
+     * 启用混合并设置 legacy GL 因子，避免 ShaderInstance 的混合态缓存跳过 apply
+     * 后沿用 source-over 因子（或关闭混合，直接把黑色 shader 输出覆盖到 C）。
      */
     private static void drawMaskBlit(FboHandle maskFbo, boolean luminance) {
         Object shader = AuiServices.render().getFilterMaskShader(luminance);
         if (shader == null) return; // 后端未提供 mask shader 时 fail-open
 
-        withBlendRenderState(false, () -> {
+        withBlendRenderState(true, () -> {
             Base.setShader(shader);
+            AuiServices.render().setBlendFuncSeparate(
+                    GL11.GL_ZERO, GL11.GL_SRC_ALPHA, GL11.GL_ZERO, GL11.GL_SRC_ALPHA);
             AuiServices.render().bindColorTexture(maskFbo, 0);
             Base.setShaderColor(1.0F, 1.0F, 1.0F, 1.0F);
             AuiServices.render().setShaderUniformFloat("MaskLuminance", luminance ? 1.0f : 0.0f);
@@ -276,15 +329,20 @@ public class FilterRenderer {
 
     /**
      * mask-composite merge 全窗 blit：L(src) 按 Porter-Duff 算子合成进 M(dst)。
-     * 算子完全由后端烘焙的混合状态表达（source-in / source-out / xor），
-     * 着色器只做 Sampler0 透传。
+     * legacy 的 shader JSON 与 pipeline 均声明 source-in / source-out / xor，
+     * 着色器只做 Sampler0 透传；legacy 还需显式恢复因子以防 shader 混合态缓存命中。
      */
     private static void drawMaskMergeBlit(FboHandle scratchFbo, AuiRenderService.MaskCompositeOp op) {
         Object shader = AuiServices.render().getFilterMaskMergeShader(op);
         if (shader == null) return; // 后端不支持 merge 时丢弃该层（fail-open）
 
-        withBlendRenderState(false, () -> {
+        withBlendRenderState(true, () -> {
             Base.setShader(shader);
+            int src = op == AuiRenderService.MaskCompositeOp.INTERSECT ? GL11.GL_DST_ALPHA
+                    : GL11.GL_ONE_MINUS_DST_ALPHA;
+            int dst = op == AuiRenderService.MaskCompositeOp.EXCLUDE
+                    ? GL11.GL_ONE_MINUS_SRC_ALPHA : GL11.GL_ZERO;
+            AuiServices.render().setBlendFuncSeparate(src, dst, src, dst);
             AuiServices.render().bindColorTexture(scratchFbo, 0);
             Base.setShaderColor(1.0F, 1.0F, 1.0F, 1.0F);
 
@@ -307,6 +365,20 @@ public class FilterRenderer {
     }
 
     /**
+     * Clears the external compositing reference and restores parent sampling.
+     */
+    public static void clearCompositingReference() {
+        compositingReference = null;
+    }
+
+    /**
+     * Returns the currently configured external compositing reference.
+     */
+    public static FboHandle getCompositingReference() {
+        return compositingReference;
+    }
+
+    /**
      * Supplies the framebuffer that CSS compositing effects should sample as
      * their backdrop. The reference is never written by AUI; it is copied to
      * an internal snapshot immediately before each pass, which makes it safe
@@ -314,16 +386,6 @@ public class FilterRenderer {
      */
     public static void setCompositingReference(FboHandle reference) {
         compositingReference = reference;
-    }
-
-    /** Clears the external compositing reference and restores parent sampling. */
-    public static void clearCompositingReference() {
-        compositingReference = null;
-    }
-
-    /** Returns the currently configured external compositing reference. */
-    public static FboHandle getCompositingReference() {
-        return compositingReference;
     }
 
     public static void popFilter(Filter.FilterState state, float dynamicRangeLimit) {
@@ -336,15 +398,22 @@ public class FilterRenderer {
         Base.commitDraws();
 
         FboHandle currentFbo = fboStack.pop();
+        Mask.TargetState parentState = targetMaskStack.pop();
         FboHandle parentFbo = fboStack.isEmpty() ? mainRenderTarget : fboStack.peek();
+        Mask.beginOffscreen();
         try {
             FboHandle filteredFbo = prepareFullFilterSource(currentFbo, state.blurRadius());
             FboHandle shadowFbo = state.hasDropShadow()
                     ? prepareFullFilterSource(currentFbo, state.dropShadowBlur()) : currentFbo;
-            AuiServices.render().bindWrite(parentFbo, true);
+            // The composite samples the layer that was just drawn into; resolve it
+            // first so the sampler sees this layer's content rather than the pixels
+            // the pooled group held before.
+            AuiServices.render().resolveTarget(filteredFbo);
+            if (shadowFbo != filteredFbo) AuiServices.render().resolveTarget(shadowFbo);
+            restoreParentTarget(parentFbo, parentState);
             drawWithShader(filteredFbo, shadowFbo, state, dynamicRangeLimit);
         } finally {
-            if (parentFbo != null) AuiServices.render().bindWrite(parentFbo, true);
+            restoreParentTarget(parentFbo, parentState);
         }
     }
 
@@ -359,13 +428,20 @@ public class FilterRenderer {
         // 合成前把本层待提交的绘制落进离屏目标；共享顶点缓冲（默认字体文本）也在其中。
         Base.commitDraws();
         FboHandle source = fboStack.pop();
+        Mask.TargetState parentState = targetMaskStack.pop();
         FboHandle parent = fboStack.isEmpty() ? mainRenderTarget : fboStack.peek();
-        if (parent == null) return;
-
-        FboHandle reference = compositingReference != null ? compositingReference : parent;
-        FboHandle backdrop = snapshotReference(reference);
-        AuiServices.render().bindWrite(parent, true);
-        drawBlend(source, backdrop, mode);
+        Mask.beginOffscreen();
+        try {
+            if (parent == null) return;
+            FboHandle reference = compositingReference != null ? compositingReference : parent;
+            FboHandle backdrop = snapshotReference(reference);
+            AuiServices.render().resolveTarget(source);
+            if (backdrop != null) AuiServices.render().resolveTarget(backdrop);
+            restoreParentTarget(parent, parentState);
+            drawBlend(source, backdrop, mode);
+        } finally {
+            restoreParentTarget(parent, parentState);
+        }
     }
 
     private static FboHandle snapshotReference(FboHandle reference) {
@@ -427,7 +503,9 @@ public class FilterRenderer {
         });
     }
 
-    /** Runs a shader pass with the standard filter blend/depth state. */
+    /**
+     * Runs a shader pass with the standard filter blend/depth state.
+     */
     private static void withBlendRenderState(boolean enableBlend, Runnable body) {
         Matrix4f oldProjection = new Matrix4f(Base.getProjectionMatrix());
         AuiRenderService.RenderStateScope scope = AuiServices.render().pushFilterRenderState();
@@ -497,24 +575,27 @@ public class FilterRenderer {
         // element. It also creates a natural batch boundary for the FBO copy.
         Base.commitDraws();
 
-        FboHandle destination = fboStack.isEmpty() ? AuiServices.render().getMainRenderTarget() : fboStack.peek();
+        FboHandle destination = getCurrentTarget();
         FboHandle sampleSource = compositingReference != null ? compositingReference : destination;
         Filter.FilterState state = Filter.getBackdropFilterOf(target);
         Rect rect = Rect.of(target);
+        float[] layout = layoutSize(target);
+        Mask.TargetState destinationState = Mask.beginOffscreen();
         try {
-            BackdropSource source = prepareBackdropSource(sampleSource, rect, state.blurRadius());
+            BackdropSource source = prepareBackdropSource(sampleSource, rect, state.blurRadius(), layout[0], layout[1]);
             if (source == null) return;
             FboHandle shadowTarget = prepareBackdropShadow(source, state);
 
-            AuiServices.render().bindWrite(destination, true);
-            drawBackdropWithShader(source, shadowTarget, state, rect);
+            restoreParentTarget(destination, destinationState);
+            drawBackdropWithShader(source, shadowTarget, state, rect, layout[0], layout[1]);
         } finally {
-            if (destination != null) AuiServices.render().bindWrite(destination, true);
+            restoreParentTarget(destination, destinationState);
         }
     }
 
     private static void drawBackdropWithShader(BackdropSource source, FboHandle shadowTarget,
-                                               Filter.FilterState state, Rect rect) {
+                                               Filter.FilterState state, Rect rect,
+                                               float layoutW, float layoutH) {
         Object shader = AuiServices.render().getFilterShader();
         if (shader == null) return;
 
@@ -522,17 +603,20 @@ public class FilterRenderer {
             Position p = rect.getBodyRectPosition();
             Size s = rect.getBodyRectSize();
 
-            float guiW = (float) AuiServices.client().getScaledWidth();
-            float guiH = (float) AuiServices.client().getScaledHeight();
-            Base.setProjectionMatrix(orthoProjection(guiW, guiH));
+            // The element rect lives in the document's layout space, so the ortho
+            // projection and the clip uniforms must use that same space. Using the
+            // GUI-scaled window size here would scale the quad (and the sampled UVs)
+            // by layoutSize/guiSize, which magnifies the backdrop instead of blurring
+            // it and paints its top-left corner over the element.
+            Base.setProjectionMatrix(orthoProjection(layoutW, layoutH));
 
             Base.setShader(shader);
             setupUniforms(shader, state, source.target(), true, true, 1.0f, source.uvPerGuiX(), source.uvPerGuiY());
-            setupBackdropClipUniforms(shader, rect, guiW, guiH);
+            setupBackdropClipUniforms(shader, rect, layoutW, layoutH);
             AuiServices.render().bindColorTexture(source.target(), 0);
             AuiServices.render().bindColorTexture(shadowTarget, 1);
             Base.setShaderColor(1.0F, 1.0F, 1.0F, 1.0F);
-            Base.setProjectionMatrix(orthoProjection(guiW, guiH));
+            Base.setProjectionMatrix(orthoProjection(layoutW, layoutH));
 
             MeshBuilder mesh = AuiServices.render().beginMesh(MeshMode.QUADS, MeshFormat.POSITION_TEX);
             Matrix4f identity = new Matrix4f();
@@ -549,16 +633,41 @@ public class FilterRenderer {
         });
     }
 
-    private static BackdropSource prepareBackdropSource(FboHandle source, Rect rect, float cssBlurRadius) {
+    /**
+     * Layout-space size of the document the element belongs to. Backdrop sampling mixes
+     * element rects (layout space) with source-texture pixels, so every factor in that
+     * path has to be derived from this size. Falls back to the GUI-scaled window size
+     * for elements without a document (e.g. detached render nodes).
+     */
+    private static float[] layoutSize(Element target) {
+        try {
+            if (target != null && target.document != null) {
+                com.sighs.apricityui.viewport.ApricityViewport viewport = target.document.getViewport();
+                if (viewport != null) {
+                    double width = viewport.layoutWidth();
+                    double height = viewport.layoutHeight();
+                    if (width > 0 && height > 0) return new float[]{(float) width, (float) height};
+                }
+            }
+        } catch (RuntimeException ignored) {
+            // fall through to the GUI size
+        }
+        return new float[]{(float) AuiServices.client().getScaledWidth(),
+                (float) AuiServices.client().getScaledHeight()};
+    }
+
+    private static BackdropSource prepareBackdropSource(FboHandle source, Rect rect, float cssBlurRadius,
+                                                        float layoutW, float layoutH) {
         if (source == null || source.width <= 0 || source.height <= 0) return null;
-        float guiW = (float) AuiServices.client().getScaledWidth();
-        float guiH = (float) AuiServices.client().getScaledHeight();
-        if (guiW <= 0 || guiH <= 0) return null;
+        if (layoutW <= 0 || layoutH <= 0) return null;
 
         Position position = rect.getBodyRectPosition();
         Size size = rect.getBodyRectSize();
-        float scaleX = source.width / guiW;
-        float scaleY = source.height / guiH;
+        // Rect coordinates are in the document's layout space, so the layout -> source
+        // pixel factor has to come from that same space (not from the GUI-scaled window
+        // size, which shrinks with guiScale and would sample the wrong region).
+        float scaleX = source.width / layoutW;
+        float scaleY = source.height / layoutH;
         float physicalRadius = Math.min(MAX_REASONABLE_BACKDROP_BLUR, Math.max(0, cssBlurRadius))
                 * Math.max(scaleX, scaleY);
         float padding = physicalRadius + 2.0f;
@@ -573,6 +682,14 @@ public class FilterRenderer {
         int targetWidth = Math.max(1, (int) Math.ceil((srcX1 - srcX0) / (double) downsample));
         int targetHeight = Math.max(1, (int) Math.ceil((srcY1 - srcY0) / (double) downsample));
         FboHandle ping = acquireBackdropTarget(targetWidth, targetHeight);
+        // The scratch target is pooled and still holds the previous element's/frame's
+        // contents. On 26.1 the snapshot copy below only becomes visible to the blur
+        // passes that sample this target in the same frame when the destination has
+        // already been written through the normal clear path: without the clear the
+        // blur passes read the stale (cleared) contents, so the backdrop ends up
+        // empty and the composite paints nothing — backdrop-filter silently degrades
+        // to "no filter at all" (or, with ForceAlpha, to opaque black).
+        AuiServices.render().clear(ping, 0, 0, 0, 0);
         blitRegion(source, ping, srcX0, srcY0, srcX1, srcY1);
 
         float reducedRadius = physicalRadius / downsample;
@@ -681,9 +798,6 @@ public class FilterRenderer {
         return Math.max(min, Math.min(max, value));
     }
 
-    private record BackdropSource(FboHandle target, float u0, float vBottom, float u1, float vTop,
-                                  float uvPerGuiX, float uvPerGuiY) {}
-
     private static void setupUniforms(Object shader, Filter.FilterState state, FboHandle fbo,
                                       boolean forceAlpha, boolean preBlurred, float dynamicRangeLimit,
                                       float uvPerGuiX, float uvPerGuiY) {
@@ -722,13 +836,22 @@ public class FilterRenderer {
         AuiServices.render().setShaderUniformFloat("ClipEnabled", 1.0f);
         AuiServices.render().setShaderUniform4f("ClipRect",
                 (float) p.x, (float) p.y, (float) s.width(), (float) s.height());
-        if (radii != null && radii.length >= 4) {
-            AuiServices.render().setShaderUniform4f("ClipRadii", radii[0], radii[1], radii[2], radii[3]);
-        }
+        AuiServices.render().setShaderUniform4f("ClipRadii", radii[0], radii[2], radii[4], radii[6]);
+        AuiServices.render().setShaderUniform4f("ClipRadiiY", radii[1], radii[3], radii[5], radii[7]);
         AuiServices.render().setShaderUniform2f("GuiSize", guiW, guiH);
     }
 
     private static Matrix4f orthoProjection(float width, float height) {
         return new Matrix4f().setOrtho(0, width, height, 0, -1000, 1000);
+    }
+
+    /**
+     * 一层 mask 的绘制汇总：{@code painted} 有层画上了内容，{@code pending} 仍有层在异步加载。
+     */
+    private record MaskPaintResult(boolean painted, boolean pending) {
+    }
+
+    private record BackdropSource(FboHandle target, float u0, float vBottom, float u1, float vTop,
+                                  float uvPerGuiX, float uvPerGuiY) {
     }
 }

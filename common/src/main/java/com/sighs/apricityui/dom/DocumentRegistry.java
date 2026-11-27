@@ -2,6 +2,7 @@ package com.sighs.apricityui.dom;
 
 import com.sighs.apricityui.ApricityUI;
 import com.sighs.apricityui.parser.HTML;
+import com.sighs.apricityui.dev.perf.PageOpenTiming;
 
 import java.util.ArrayList;
 import java.util.HashSet;
@@ -9,6 +10,7 @@ import java.util.List;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.CopyOnWriteArrayList;
+
 import com.sighs.apricityui.init.Document;
 
 /**
@@ -50,20 +52,39 @@ public final class DocumentRegistry {
 
     // 这俩是创建UI用的，如果refresh放在构造函数里，那创建时就不会执行内嵌js，所以挪到了这里。
     public static Document create(String path) {
+        return createInternal(path, PageOpenTiming.start(path, "document.create"), false);
+    }
+
+    /**
+     * UI 开屏入口：首次全量几何提交交给渲染帧分片，避免 tick 单帧同步冻结。
+     */
+    public static Document create(String path, PageOpenTiming opening) {
+        if (opening != null && opening.isBound()) opening = PageOpenTiming.start(path, "document.create");
+        return createInternal(path, opening, true);
+    }
+
+    private static Document createInternal(String path, PageOpenTiming opening, boolean deferInitialCommit) {
         if (HTML.getTemple(path) == null) {
+            if (opening != null) opening.finish("missing-template");
             ApricityUI.LOGGER.error("[AUI Document] cannot create document: template is missing path={}", path);
             return null;
         }
         CreateTiming timing = beginCreateTiming(path);
-        Document document = new Document(path, false);
-        documents.add(document);
+        Document document = null;
         try {
+            document = new Document(path, false);
+            document.setPageOpenTiming(opening);
+            document.deferInitialCommit(deferInitialCommit);
+            documents.add(document);
             document.applyViewport(false);
             document.refresh();
             document.applyViewport(false);
+            PageOpenTiming current = document.activePageOpenTiming();
+            if (current != null) current.mark(PageOpenTiming.Stage.DOCUMENT_CREATED);
             return document;
         } catch (RuntimeException | LinkageError failure) {
-            document.remove();
+            if (opening != null) opening.finish("create-failed");
+            if (document != null) document.remove();
             throw failure;
         } finally {
             logCreateTiming(path, timing);
@@ -71,19 +92,27 @@ public final class DocumentRegistry {
     }
 
     public static Document createInWorld(String path) {
+        PageOpenTiming opening = PageOpenTiming.start(path, "document.createInWorld");
         if (HTML.getTemple(path) == null) {
+            if (opening != null) opening.finish("missing-template");
             ApricityUI.LOGGER.error("[AUI Document] cannot create world document: template is missing path={}", path);
             return null;
         }
         CreateTiming timing = beginCreateTiming(path);
         try {
             Document document = new Document(path, true);
+            document.setPageOpenTiming(opening);
             documents.add(document);
             // World documents use the same viewport contract as screen documents.
             // Their world transform is applied by WorldWindow, not by layout.
             document.applyViewport(false);
             document.refresh();
+            PageOpenTiming current = document.activePageOpenTiming();
+            if (current != null) current.mark(PageOpenTiming.Stage.DOCUMENT_CREATED);
             return document;
+        } catch (RuntimeException | LinkageError failure) {
+            if (opening != null) opening.finish("create-failed");
+            throw failure;
         } finally {
             logCreateTiming(path, timing);
         }
@@ -109,9 +138,6 @@ public final class DocumentRegistry {
                 timing.firstGlobal,
                 timing.firstPath
         );
-    }
-
-    private record CreateTiming(long startedNs, boolean firstGlobal, boolean firstPath) {
     }
 
     public static ArrayList<Document> get(String path) {
@@ -154,5 +180,8 @@ public final class DocumentRegistry {
             if (document == null || document.inWorld || document.isDisposed() || !document.is(path)) continue;
             document.applyViewport(relayout);
         }
+    }
+
+    private record CreateTiming(long startedNs, boolean firstGlobal, boolean firstPath) {
     }
 }

@@ -11,9 +11,12 @@ import java.util.Deque;
 import java.util.List;
 import java.util.Locale;
 import java.util.Set;
+
 import com.sighs.apricityui.parser.HTML;
 
-/** Reads and updates only the meta elements owned by an HTML document's head. */
+/**
+ * Reads and updates only the meta elements owned by an HTML document's head.
+ */
 public final class HtmlMetaEditor {
     private static final Set<String> VOID_ELEMENTS = Set.of(
             "area", "base", "br", "col", "embed", "hr", "img", "input", "link", "meta",
@@ -70,6 +73,8 @@ public final class HtmlMetaEditor {
         String charset = "";
         String viewport = "";
         String mouseEvents = "";
+        String hyphenBreak = "";
+        String preload = "";
         List<String> preserved = new ArrayList<>();
         for (Tag tag : scanTags(source, 0, source.length())) {
             if (tag.closing() || !"meta".equals(tag.name())) continue;
@@ -92,10 +97,20 @@ public final class HtmlMetaEditor {
                 case "aui-mouse-events" -> {
                     if (mouseEvents.isEmpty()) mouseEvents = safe(content);
                 }
+                case "aui-hyphen-break" -> {
+                    if (hyphenBreak.isEmpty()) hyphenBreak = safe(content);
+                }
+                case "aui-preload" -> {
+                    if (preload.isEmpty()) {
+                        String value = safe(content).trim();
+                        // 预加载是“标签存在即开启”，没有 content 时用 true 保住这个 meta。
+                        preload = value.isEmpty() ? "true" : value;
+                    }
+                }
                 default -> preserved.add(raw);
             }
         }
-        return new MetaSettings(charset, viewport, mouseEvents, preserved);
+        return new MetaSettings(charset, viewport, mouseEvents, hyphenBreak, preload, preserved);
     }
 
     public static String toMetaMarkup(MetaSettings settings) {
@@ -104,6 +119,8 @@ public final class HtmlMetaEditor {
         appendAttributeMeta(tags, "charset", settings.charset());
         appendNamedMeta(tags, "aui-viewport", settings.viewport());
         appendNamedMeta(tags, "aui-mouse-events", settings.mouseEvents());
+        appendNamedMeta(tags, "aui-hyphen-break", settings.hyphenBreak());
+        appendNamedMeta(tags, "aui-preload", settings.preload());
         for (String preserved : settings.preservedMeta()) {
             if (preserved != null && !preserved.isBlank()) tags.add(preserved.trim());
         }
@@ -418,12 +435,22 @@ public final class HtmlMetaEditor {
     }
 
     public record MetaSettings(String charset, String viewport, String mouseEvents,
-                               List<String> preservedMeta) {
+                               String hyphenBreak, String preload, List<String> preservedMeta) {
         public MetaSettings {
             charset = safe(charset);
             viewport = safe(viewport);
             mouseEvents = safe(mouseEvents);
+            hyphenBreak = safe(hyphenBreak);
+            preload = safe(preload);
             preservedMeta = preservedMeta == null ? List.of() : List.copyOf(preservedMeta);
+        }
+
+        /**
+         * Settings for callers that only configure the original viewport/input metas.
+         */
+        public MetaSettings(String charset, String viewport, String mouseEvents,
+                            List<String> preservedMeta) {
+            this(charset, viewport, mouseEvents, "", "", preservedMeta);
         }
     }
 

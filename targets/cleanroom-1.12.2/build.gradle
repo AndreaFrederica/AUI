@@ -159,7 +159,18 @@ dependencies {
 
 apply from: 'gradle/scripts/dependencies.gradle'
 
+def markdownParser = file('../../common/libs/txtmark-0.13.jar')
+dependencies {
+    implementation files(markdownParser)
+}
+
 processResources {
+    from('../../common/src/main/resources') {
+        exclude 'apricityui.mixins.json', 'pack.mcmeta'
+    }
+    from('../../docs/en') {
+        into 'docs/en'
+    }
     rename '(.+_at.cfg)', 'META-INF/$1'
 }
 
@@ -173,6 +184,10 @@ tasks.register('prepareAuiSources', Sync) {
         exclude 'com/sighs/apricityui/network/serialization/**'
         exclude 'com/sighs/apricityui/network/util/**'
         exclude 'com/sighs/apricityui/media/openal/**'
+        exclude 'com/sighs/apricityui/render/ImageRegionCopy.java'
+        exclude 'com/sighs/apricityui/spi/MinecraftClientService.java'
+        exclude 'com/sighs/apricityui/spi/ClientScreenAccess.java'
+        exclude 'com/sighs/apricityui/spi/PhysicalKeyState.java'
     }
     // The Forge 1.20.1 target is deliberately not copied here. Its event,
     // screen and registry classes are platform implementations, not common
@@ -218,6 +233,9 @@ compileJava {
 
 jar {
     archiveClassifier = 'dev'
+    from({ zipTree(markdownParser) }) {
+        exclude 'META-INF/**'
+    }
     duplicatesStrategy = DuplicatesStrategy.EXCLUDE
     if (configurations.contain.size() > 0) {
         into('/') {

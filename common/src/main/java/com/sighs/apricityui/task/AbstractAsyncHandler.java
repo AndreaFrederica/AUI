@@ -37,6 +37,38 @@ public abstract class AbstractAsyncHandler<TApplyTask> {
         register(this);
     }
 
+    public static void register(AbstractAsyncHandler<?> handler) {
+        if (handler == null) return;
+        HANDLERS.put(handler.id(), handler);
+    }
+
+    public static void unregister(String id) {
+        if (id == null || id.isBlank()) return;
+        HANDLERS.remove(id);
+    }
+
+    public static void tickAll() {
+        for (AbstractAsyncHandler<?> handler : HANDLERS.values()) {
+            handler.tickApplyQueue();
+        }
+    }
+
+    public static void clearAllAndBumpGeneration() {
+        for (AbstractAsyncHandler<?> handler : HANDLERS.values()) {
+            handler.clearAndBumpGeneration();
+        }
+    }
+
+    private static ThreadFactory createThreadFactory(String workerThreadName) {
+        AtomicInteger index = new AtomicInteger(0);
+        return runnable -> {
+            Thread thread = Executors.defaultThreadFactory().newThread(runnable);
+            thread.setName(workerThreadName + "-" + index.incrementAndGet());
+            thread.setDaemon(true);
+            return thread;
+        };
+    }
+
     public final String id() {
         return id;
     }
@@ -79,6 +111,15 @@ public abstract class AbstractAsyncHandler<TApplyTask> {
                 throw exception;
             }
         }
+        if (processed > 0) onApplyQueueDrained();
+    }
+
+    /**
+     * Called once per non-empty drain, after the batch. Handlers that must publish a change
+     * caused by several tasks (e.g. one global invalidation for several loaded resources)
+     * coalesce it here instead of doing that work per task.
+     */
+    protected void onApplyQueueDrained() {
     }
 
     public final void clearAndBumpGeneration() {
@@ -103,38 +144,6 @@ public abstract class AbstractAsyncHandler<TApplyTask> {
     }
 
     protected void onDiscardApplyTask(TApplyTask task) {
-    }
-
-    public static void register(AbstractAsyncHandler<?> handler) {
-        if (handler == null) return;
-        HANDLERS.put(handler.id(), handler);
-    }
-
-    public static void unregister(String id) {
-        if (id == null || id.isBlank()) return;
-        HANDLERS.remove(id);
-    }
-
-    public static void tickAll() {
-        for (AbstractAsyncHandler<?> handler : HANDLERS.values()) {
-            handler.tickApplyQueue();
-        }
-    }
-
-    public static void clearAllAndBumpGeneration() {
-        for (AbstractAsyncHandler<?> handler : HANDLERS.values()) {
-            handler.clearAndBumpGeneration();
-        }
-    }
-
-    private static ThreadFactory createThreadFactory(String workerThreadName) {
-        AtomicInteger index = new AtomicInteger(0);
-        return runnable -> {
-            Thread thread = Executors.defaultThreadFactory().newThread(runnable);
-            thread.setName(workerThreadName + "-" + index.incrementAndGet());
-            thread.setDaemon(true);
-            return thread;
-        };
     }
 
     public enum AsyncState {

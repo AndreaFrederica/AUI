@@ -12,6 +12,21 @@ import com.sighs.apricityui.init.Node;
  */
 public final class ForgeDocumentExpander implements DocumentExpander {
     @Override
+    public boolean applyAndReportChanges(Document document) {
+        for (var element : document.getElements()) {
+            if (element instanceof com.sighs.apricityui.element.Container
+                    || element instanceof com.sighs.apricityui.element.Recipe
+                    || element instanceof com.sighs.apricityui.element.Slot
+                    || element instanceof com.sighs.apricityui.element.Item
+                    || element instanceof com.sighs.apricityui.element.Ingredient) {
+                apply(document);
+                return true;
+            }
+        }
+        return false;
+    }
+
+    @Override
     public void apply(Document document) {
         if (document == null) return;
         String templatePath = document.getPath();
@@ -30,6 +45,16 @@ public final class ForgeDocumentExpander implements DocumentExpander {
         } catch (Exception e) {
             ApricityUI.LOGGER.warn("RecipeExpander failed, template={}", templatePath, e);
         }
+    }
+
+    @Override
+    public boolean supportsInnerHtmlBatch(Document document, Node parent) {
+        // Slot/Ingredient replace siblings; Item validation can fail after a valid root.
+        // Ordinary parents have no loader-specific runtime child constraints.
+        return parent instanceof com.sighs.apricityui.init.Element
+                && !(parent instanceof com.sighs.apricityui.element.Slot)
+                && !(parent instanceof com.sighs.apricityui.element.Ingredient)
+                && !(parent instanceof com.sighs.apricityui.element.Item);
     }
 
     @Override

@@ -23,9 +23,6 @@ public class Animation {
     private static final Pattern STEPS_PATTERN = Pattern.compile(
             "^steps\\(\\s*([1-9][0-9]*)\\s*(?:,\\s*(start|end|jump-start|jump-end|jump-none|jump-both)\\s*)?\\)\\s*$"
     );
-    private static final Pattern TIME_PATTERN = Pattern.compile(
-            "^[+-]?(?:(?:[0-9]+(?:\\.[0-9]*)?)|(?:\\.[0-9]+))(?:ms|s)$"
-    );
     private static final Pattern CUBIC_BEZIER_PATTERN = Pattern.compile(
             "^cubic-bezier\\(\\s*([-+]?(?:\\d*\\.\\d+|\\d+))\\s*,\\s*([-+]?(?:\\d*\\.\\d+|\\d+))\\s*,\\s*([-+]?(?:\\d*\\.\\d+|\\d+))\\s*,\\s*([-+]?(?:\\d*\\.\\d+|\\d+))\\s*\\)\\s*$"
     );
@@ -35,11 +32,6 @@ public class Animation {
             "linear", "ease", "ease-in", "ease-out", "ease-in-out", "step-start", "step-end"
     );
     private static final Set<String> PLAY_STATE_SET = Set.of("running", "paused");
-
-    private interface TimingFunction {
-        double apply(double progress);
-    }
-
     private static final TimingFunction IDENTITY_TIMING = progress -> progress;
     private static final TimingFunction STEP_START_TIMING = progress -> 1.0;
     private static final TimingFunction STEP_END_TIMING = progress -> progress >= 1.0 ? 1.0 : 0.0;
@@ -47,31 +39,6 @@ public class Animation {
     private static final TimingFunction EASE_IN_TIMING = new CubicBezierTiming(0.42, 0.0, 1.0, 1.0);
     private static final TimingFunction EASE_OUT_TIMING = new CubicBezierTiming(0.0, 0.0, 0.58, 1.0);
     private static final TimingFunction EASE_IN_OUT_TIMING = new CubicBezierTiming(0.42, 0.0, 0.58, 1.0);
-
-    private static class AnimationConfig {
-        String name = "none", duration = "0s", delay = "0s", count = "1", direction = "normal", fill = "none", timing = "ease", playState = "running";
-        double durationMs;
-        double delayMs;
-        double iterationCount = 1.0;
-        TimingFunction timingFunction = EASE_TIMING;
-    }
-
-    private static class AnimationState {
-        final Map<String, Long> starts = new HashMap<>();
-        final Map<String, Long> pausedAt = new HashMap<>();
-        String lastSpec = null;
-        List<AnimationConfig> cachedConfigs = List.of();
-        // 每帧 clear+重加的 HashSet 每次 add 都 new Node（JFR 归因约 26MB）；
-        // 动画名数量极小，ArrayList + contains 足够且零分配。
-        final List<String> live = new ArrayList<>();
-        final Transition.ChangeBuffer changes = new Transition.ChangeBuffer();
-
-        void forgetExcept(List<String> names) {
-            starts.keySet().retainAll(names);
-            pausedAt.keySet().retainAll(names);
-        }
-    }
-
     private static final Map<String, PropIndex> PROP_INDEX = new HashMap<>();
 
     public static void registerKeyframe(String name, double percent, Map<String, String> props) {
@@ -176,14 +143,14 @@ public class Animation {
         double activeTime = elapsed - delay;
         if (activeTime < 0) {
             if (config.fill.equals("backwards") || config.fill.equals("both"))
-                renderFrame(element, style, config.name, 0.0, state.changes);
+                renderFrame(element, style, config.name, 0.0, config.timingFunction, state.changes);
             return;
         }
 
         double count = config.iterationCount;
         if (activeTime >= dur * count) {
             if (config.fill.equals("forwards") || config.fill.equals("both"))
-                renderFrame(element, style, config.name, 100.0, state.changes);
+                renderFrame(element, style, config.name, 100.0, config.timingFunction, state.changes);
             return;
         }
 
@@ -192,25 +159,21 @@ public class Animation {
         if (config.direction.startsWith("alternate") && iter % 2 != 0) progress = 1.0 - progress;
         else if (config.direction.equals("reverse")) progress = 1.0 - progress;
 
-        renderFrame(element, style, config.name, config.timingFunction.apply(progress) * 100.0, state.changes);
+        renderFrame(element, style, config.name, progress * 100.0, config.timingFunction, state.changes);
     }
 
     private static void renderFrame(Element element, Style style, String name, double percent,
-                                    List<Transition.Change> changes) {
+                                    TimingFunction timing, List<Transition.Change> changes) {
         changes.clear();
         TreeMap<Double, Map<String, String>> timeline = KEYFRAMES.get(name);
         if (timeline == null) return;
 
-        // 找到当前百分比的前后关键帧
         Map.Entry<Double, Map<String, String>> lowEntry = timeline.floorEntry(percent);
         Map.Entry<Double, Map<String, String>> highEntry = timeline.ceilingEntry(percent);
 
-        if (lowEntry == null) lowEntry = timeline.firstEntry();
-        if (highEntry == null) highEntry = timeline.lastEntry();
-
-        double lowP = lowEntry.getKey();
-        double highP = highEntry.getKey();
-        double fraction = (lowP == highP) ? 0 : (percent - lowP) / (highP - lowP);
+        double lowP = lowEntry == null ? 0 : lowEntry.getKey();
+        double highP = highEntry == null ? 100 : highEntry.getKey();
+        double fraction = lowP == highP ? 0 : timing.apply((percent - lowP) / (highP - lowP));
 
         Set<String> allProps = KEYFRAME_PROPS.get(name);
         if (allProps == null || allProps.isEmpty()) return;
@@ -218,15 +181,14 @@ public class Animation {
         Size transformBasis = allProps.contains("transform") ? Size.of(element) : null;
         for (String p : allProps) {
             String vS = findProperty(name, timeline, percent, p, true, style.get(p));
-            String vE = findProperty(name, timeline, percent, p, false, vS);
+            String vE = findProperty(name, timeline, percent, p, false, style.get(p));
 
             if (p.equals("transform")) {
                 Transform.interpolateTransform(
                         changes, vS, vE, fraction,
                         transformBasis.width(), transformBasis.height()
                 );
-            }
-            else if (p.equals("filter")) Filter.interpolateFilter(changes, vS, vE, fraction);
+            } else if (p.equals("filter")) Filter.interpolateFilter(changes, vS, vE, fraction);
             else if (p.equals("box-shadow")) Box.interpolateShadow(changes, vS, vE, fraction);
             else {
                 double val = Transition.getOffset(p, parseAnimationStyle(element, p, vS), parseAnimationStyle(element, p, vE), fraction);
@@ -234,7 +196,7 @@ public class Animation {
             }
         }
         try {
-            Transition.applyChanges(style, changes);
+            Transition.applyChanges(element, style, changes);
         } finally {
             changes.clear();
         }
@@ -279,14 +241,6 @@ public class Animation {
                 || name.equals("border-bottom-width");
     }
 
-    // 每个动画属性在 timeline 上的稀疏索引：只有声明了该属性的关键帧的 (percent, value)。
-    // 原实现每次查找都 headMap/tailMap + descendingMap 创建子视图和迭代器，
-    // 逐帧 × 逐属性 × 前后两次，JFR 归因约 44MB。时间轴注册后不变，二分即可零分配。
-    private static class PropIndex {
-        double[] percents = new double[0];
-        String[] values = new String[0];
-    }
-
     private static String findProperty(String name, TreeMap<Double, Map<String, String>> timeline,
                                        double percent, String prop, boolean backward, String fallback) {
         PropIndex index = PROP_INDEX.get(name + "" + prop);
@@ -316,15 +270,19 @@ public class Animation {
             // 最后一个 percent <= 目标 的关键帧（与原 headMap(percent, true) 倒序取首个等价）
             while (lo <= hi) {
                 int mid = (lo + hi) >>> 1;
-                if (percents[mid] <= percent) { found = mid; lo = mid + 1; }
-                else hi = mid - 1;
+                if (percents[mid] <= percent) {
+                    found = mid;
+                    lo = mid + 1;
+                } else hi = mid - 1;
             }
         } else {
             // 第一个 percent >= 目标 的关键帧（与原 tailMap(percent, true) 正序取首个等价）
             while (lo <= hi) {
                 int mid = (lo + hi) >>> 1;
-                if (percents[mid] >= percent) { found = mid; hi = mid - 1; }
-                else lo = mid + 1;
+                if (percents[mid] >= percent) {
+                    found = mid;
+                    hi = mid - 1;
+                } else lo = mid + 1;
             }
         }
         return found >= 0 ? index.values[found] : fallback;
@@ -434,6 +392,7 @@ public class Animation {
         if (token == null || token.isBlank()) return false;
         if (TIMING_SET.contains(token)) return true;
         if (token.startsWith("steps")) return STEPS_PATTERN.matcher(token).matches();
+        if (!token.startsWith("cubic-bezier(")) return false;
         var bezier = CUBIC_BEZIER_PATTERN.matcher(token);
         if (!bezier.matches()) return false;
         double x1 = Double.parseDouble(bezier.group(1));
@@ -484,7 +443,22 @@ public class Animation {
     }
 
     static boolean isTimeToken(String t) {
-        return t != null && TIME_PATTERN.matcher(t.trim().toLowerCase(Locale.ROOT)).matches();
+        if (t == null) return false;
+        int start = 0, end = t.length();
+        while (start < end && t.charAt(start) <= ' ') start++;
+        while (end > start && t.charAt(end - 1) <= ' ') end--;
+        if (end <= start || (t.charAt(end - 1) != 's' && t.charAt(end - 1) != 'S')) return false;
+        end--;
+        if (end > start && (t.charAt(end - 1) == 'm' || t.charAt(end - 1) == 'M')) end--;
+        if (start < end && (t.charAt(start) == '+' || t.charAt(start) == '-')) start++;
+        boolean digit = false, dot = false;
+        for (int i = start; i < end; i++) {
+            char ch = t.charAt(i);
+            if (ch >= '0' && ch <= '9') digit = true;
+            else if (ch == '.' && !dot) dot = true;
+            else return false;
+        }
+        return digit;
     }
 
     private static double applySteps(double progress, int steps, String mode) {
@@ -496,6 +470,51 @@ public class Animation {
             case "end", "jump-end" -> Math.floor(progress * steps) / steps;
             default -> progress;
         };
+    }
+
+    private static boolean isNumberToken(String t) {
+        if (t.isEmpty()) return false;
+        for (int i = 0; i < t.length(); i++) {
+            char ch = t.charAt(i);
+            if ((ch < '0' || ch > '9') && ch != '.') return false;
+        }
+        return true;
+    }
+
+    private interface TimingFunction {
+        double apply(double progress);
+    }
+
+    private static class AnimationConfig {
+        String name = "none", duration = "0s", delay = "0s", count = "1", direction = "normal", fill = "none", timing = "ease", playState = "running";
+        double durationMs;
+        double delayMs;
+        double iterationCount = 1.0;
+        TimingFunction timingFunction = EASE_TIMING;
+    }
+
+    private static class AnimationState {
+        final Map<String, Long> starts = new HashMap<>();
+        final Map<String, Long> pausedAt = new HashMap<>();
+        // 每帧 clear+重加的 HashSet 每次 add 都 new Node（JFR 归因约 26MB）；
+        // 动画名数量极小，ArrayList + contains 足够且零分配。
+        final List<String> live = new ArrayList<>();
+        final Transition.ChangeBuffer changes = new Transition.ChangeBuffer();
+        String lastSpec = null;
+        List<AnimationConfig> cachedConfigs = List.of();
+
+        void forgetExcept(List<String> names) {
+            starts.keySet().retainAll(names);
+            pausedAt.keySet().retainAll(names);
+        }
+    }
+
+    // 每个动画属性在 timeline 上的稀疏索引：只有声明了该属性的关键帧的 (percent, value)。
+    // 原实现每次查找都 headMap/tailMap + descendingMap 创建子视图和迭代器，
+    // 逐帧 × 逐属性 × 前后两次，JFR 归因约 44MB。时间轴注册后不变，二分即可零分配。
+    private static class PropIndex {
+        double[] percents = new double[0];
+        String[] values = new String[0];
     }
 
     private static final class StepsTiming implements TimingFunction {
@@ -530,14 +549,5 @@ public class Animation {
         public double apply(double progress) {
             return cubicBezierAtTime(progress, x1, y1, x2, y2);
         }
-    }
-
-    private static boolean isNumberToken(String t) {
-        if (t.isEmpty()) return false;
-        for (int i = 0; i < t.length(); i++) {
-            char ch = t.charAt(i);
-            if ((ch < '0' || ch > '9') && ch != '.') return false;
-        }
-        return true;
     }
 }

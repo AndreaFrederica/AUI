@@ -1,6 +1,7 @@
 package com.sighs.apricityui.dev.resource;
 
 import com.mojang.blaze3d.vertex.PoseStack;
+import com.sighs.apricityui.dev.perf.PageOpenTiming;
 import com.sighs.apricityui.ui.ToastManager;
 import com.sighs.apricityui.init.Document;
 import com.sighs.apricityui.render.Drawer;
@@ -17,7 +18,9 @@ import com.sighs.apricityui.render.PoseMatrices;
 import com.sighs.apricityui.render.Rect;
 import com.sighs.apricityui.resource.Font;
 
-/** Owns the resource-browser preview window and renders its document into its content viewport. */
+/**
+ * Owns the resource-browser preview window and renders its document into its content viewport.
+ */
 public final class ResourcePreviewDialog {
     private static final double MIN_WIDTH = 360;
     private static final double MIN_HEIGHT = 240;
@@ -36,11 +39,66 @@ public final class ResourcePreviewDialog {
     private boolean fontPreview;
     private boolean audioPreview;
 
+    public static void draw(PoseStack poseStack) {
+        sweepClosed();
+        if (active != null && active.owner != null && !active.owner.inWorld) {
+            active.drawPreview(poseStack);
+        }
+    }
+
+    /**
+     * Draws the preview immediately after its owning document is drawn, so the
+     * previewed HTML stays below the DevTools tool document (and the toast layer)
+     * instead of floating above every overlay document.
+     */
+    public static void draw(PoseStack poseStack, Document ownerDocument) {
+        sweepClosed();
+        if (active != null && active.owner == ownerDocument && ownerDocument != null && !ownerDocument.inWorld) {
+            active.drawPreview(poseStack);
+        }
+    }
+
+    /**
+     * Draws the preview in the owning world document's local surface.
+     */
+    public static void drawInWorld(PoseStack poseStack, Document owner) {
+        sweepClosed();
+        if (active != null && active.owner == owner && owner != null && owner.inWorld) {
+            active.drawPreview(poseStack);
+        }
+    }
+
+    /**
+     * Releases the preview document when the dialog DOM vanished without going
+     * through {@link DialogWindow#close()} (e.g. the owning document reloaded),
+     * so it does not linger in the document registry.
+     */
+    private static void sweepClosed() {
+        if (active != null && !active.isOpen()) active.close();
+    }
+
+    private static boolean isImage(Loader.StaticResourceEntry entry) {
+        String ext = safe(entry.extension()).toLowerCase(java.util.Locale.ROOT);
+        return ext.equals("png") || ext.equals("jpg") || ext.equals("jpeg") || ext.equals("bmp") || ext.equals("gif") || ext.equals("webp");
+    }
+
+    private static boolean isAudio(Loader.StaticResourceEntry entry) {
+        String ext = safe(entry.extension()).toLowerCase(java.util.Locale.ROOT);
+        return ext.equals("ogg") || ext.equals("wav");
+    }
+
+    private static String safe(String value) {
+        return value == null ? "" : value;
+    }
+
+    private PageOpenTiming openTiming;
+
     public void open(Document owner, Loader.StaticResourceEntry entry) {
         if (owner == null || owner.body == null || entry == null) return;
         String path = safe(entry.path());
         if (path.isBlank()) return;
         close();
+        openTiming = PageOpenTiming.start(path, "resource-preview");
         this.owner = owner;
         this.sourcePath = path;
         this.imagePreview = isImage(entry);
@@ -49,13 +107,17 @@ public final class ResourcePreviewDialog {
         if (fontPreview) {
             fontFamily = ResourceFontAsset.familyName(entry);
             if (!ResourceFontAsset.ensureLoaded(entry)) {
+                if (openTiming != null) openTiming.finish("font-preview-unavailable");
+                openTiming = null;
                 ToastManager.show("Font preview unavailable");
                 close();
                 return;
             }
         }
-        this.preview = imagePreview || fontPreview || audioPreview ? null : Document.create(path);
+        this.preview = imagePreview || fontPreview || audioPreview ? null : Document.create(path, openTiming);
         if (!imagePreview && !fontPreview && !audioPreview && preview == null) {
+            if (openTiming != null) openTiming.finish("preview-unavailable");
+            openTiming = null;
             ToastManager.show("Preview unavailable");
             return;
         }
@@ -64,11 +126,16 @@ public final class ResourcePreviewDialog {
             preview.setManuallyRendered(true);
         }
         createWindow();
+        if (openTiming != null) openTiming.mark(PageOpenTiming.Stage.WINDOW_CREATED);
         active = this;
     }
 
     public void close() {
         if (active == this) active = null;
+        if (openTiming != null) {
+            openTiming.finish("closed");
+            openTiming = null;
+        }
         DialogWindow current = dialog;
         // Clear before closing: DialogWindow.close() re-invokes this via onClose.
         dialog = null;
@@ -97,42 +164,6 @@ public final class ResourcePreviewDialog {
     public boolean isOpen() {
         return dialog != null && dialog.isOpen()
                 && (imagePreview || fontPreview || audioPreview || (preview != null && !preview.isDisposed()));
-    }
-
-    public static void draw(PoseStack poseStack) {
-        sweepClosed();
-        if (active != null && active.owner != null && !active.owner.inWorld) {
-            active.drawPreview(poseStack);
-        }
-    }
-
-    /**
-     * Draws the preview immediately after its owning document is drawn, so the
-     * previewed HTML stays below the DevTools tool document (and the toast layer)
-     * instead of floating above every overlay document.
-     */
-    public static void draw(PoseStack poseStack, Document ownerDocument) {
-        sweepClosed();
-        if (active != null && active.owner == ownerDocument && ownerDocument != null && !ownerDocument.inWorld) {
-            active.drawPreview(poseStack);
-        }
-    }
-
-    /** Draws the preview in the owning world document's local surface. */
-    public static void drawInWorld(PoseStack poseStack, Document owner) {
-        sweepClosed();
-        if (active != null && active.owner == owner && owner != null && owner.inWorld) {
-            active.drawPreview(poseStack);
-        }
-    }
-
-    /**
-     * Releases the preview document when the dialog DOM vanished without going
-     * through {@link DialogWindow#close()} (e.g. the owning document reloaded),
-     * so it does not linger in the document registry.
-     */
-    private static void sweepClosed() {
-        if (active != null && !active.isOpen()) active.close();
     }
 
     private void createWindow() {
@@ -218,10 +249,15 @@ public final class ResourcePreviewDialog {
 
     private void drawPreview(PoseStack poseStack) {
         if (!isOpen() || viewport == null) return;
+        if (openTiming != null) openTiming.mark(PageOpenTiming.Stage.SHELL_PAINT);
         if (imagePreview || fontPreview || audioPreview) {
             // The preview image is appended after the manager's normal frame tick.
             // Keep its async texture handle alive for the full dialog lifetime.
             if (imageView != null) imageView.tick();
+            if (openTiming != null) {
+                openTiming.finish("ready-static-preview");
+                openTiming = null;
+            }
             return;
         }
         applyImageSource();
@@ -275,7 +311,12 @@ public final class ResourcePreviewDialog {
         element.setAttribute("class", className);
         return element;
     }
-    private void markDirty() { if (owner != null && owner.body != null) owner.markDirty(owner.body, Drawer.RELAYOUT | Drawer.REPAINT | Drawer.REORDER); }
+
+    private void markDirty() {
+        if (owner != null && owner.body != null)
+            owner.markDirty(owner.body, Drawer.RELAYOUT | Drawer.REPAINT | Drawer.REORDER);
+    }
+
     private void applyImageSource() {
         if (!imagePreview || preview == null || preview.isDisposed()) return;
         Element image = preview.querySelector("#previewImage");
@@ -283,7 +324,4 @@ public final class ResourcePreviewDialog {
         image.setAttribute("src", "/" + sourcePath);
         preview.markDirty(Drawer.RELAYOUT | Drawer.REPAINT | Drawer.REORDER);
     }
-    private static boolean isImage(Loader.StaticResourceEntry entry) { String ext = safe(entry.extension()).toLowerCase(java.util.Locale.ROOT); return ext.equals("png") || ext.equals("jpg") || ext.equals("jpeg") || ext.equals("bmp") || ext.equals("gif") || ext.equals("webp"); }
-    private static boolean isAudio(Loader.StaticResourceEntry entry) { String ext = safe(entry.extension()).toLowerCase(java.util.Locale.ROOT); return ext.equals("ogg") || ext.equals("wav"); }
-    private static String safe(String value) { return value == null ? "" : value; }
 }

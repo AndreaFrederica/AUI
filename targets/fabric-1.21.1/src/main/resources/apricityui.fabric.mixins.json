@@ -6,9 +6,11 @@
   "refmap": "apricityui.refmap.json",
   "client": [
     "AbstractContainerScreenMixin",
+    "ClientRecipeSyncMixin",
     "KeyboardHandlerMixin",
     "CommonKeyboardHandlerMixin",
     "MouseHandlerMixin",
+    "LoadingOverlayMixin",
     "RenderTargetStencilMixin",
     "RenderTargetDepthMixin",
     "accessor.RenderTargetAccessor",

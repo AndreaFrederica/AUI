@@ -11,9 +11,6 @@ import com.sighs.apricityui.render.WorldWindowRenderContext;
 import com.sighs.apricityui.render.WorldPaintDepth;
 import com.sighs.apricityui.layout.Position;
 import net.minecraft.util.Mth;
-import net.minecraft.world.level.ClipContext;
-import net.minecraft.world.phys.BlockHitResult;
-import net.minecraft.world.phys.HitResult;
 import net.minecraft.world.phys.Vec3;
 import org.joml.Matrix4f;
 import org.joml.Quaternionf;
@@ -23,6 +20,7 @@ import org.lwjgl.opengl.GL11;
 
 import java.util.ArrayList;
 import java.util.List;
+
 import com.sighs.apricityui.parser.CSS;
 import com.sighs.apricityui.spi.AuiServices;
 
@@ -35,7 +33,6 @@ public class WorldWindow {
     private static final float POLYGON_OFFSET = -1.0f;
     private static final float DEFAULT_VIEWPORT_FILL = 0.8f;
     private static final float FALLBACK_WORLD_SCALE = 0.02f;
-    private static final double OCCLUSION_DISTANCE_EPSILON = 1.0e-4d;
     private static final float DEFAULT_FOLLOW_FACTOR = 0.3f;
     private static final float ITEM_MODEL_DEPTH_FRACTION = 0.25f;
     private static final float ITEM_DECORATION_DEPTH_FRACTION = 0.5f;
@@ -52,32 +49,49 @@ public class WorldWindow {
      * document/stencil 路径每帧进出。
      */
     private static final double DISPLAY_DISTANCE_HYSTERESIS = 2.0d;
-
+    private final Quaternionf rotation;
     public Document document;
     private Vec3 position;
-    private final Quaternionf rotation;
-    /** Legacy explicit world units represented by one logical CSS pixel. */
+    /**
+     * Legacy explicit world units represented by one logical CSS pixel.
+     */
     private Float scaleOverride;
-    /** Scale used by rendering and interaction hit testing. */
+    /**
+     * Scale used by rendering and interaction hit testing.
+     */
     private float resolvedScale = FALLBACK_WORLD_SCALE;
     private long resolvedViewportVersion = Long.MIN_VALUE;
     private boolean depthTest = true;
-    /** Whether this window follows the camera's view plane from its base position. */
+    /**
+     * Whether this window follows the camera's view plane from its base position.
+     */
     private boolean followEnabled;
-    /** Whether this window rotates to face the active camera each frame. */
+    /**
+     * Whether this window rotates to face the active camera each frame.
+     */
     private boolean facingEnabled;
-    /** Interpolation amount for follow, where 0 keeps the base position and 1 fully follows. */
+    /**
+     * Interpolation amount for follow, where 0 keeps the base position and 1 fully follows.
+     */
     private float followFactor = DEFAULT_FOLLOW_FACTOR;
     private Float widthOverride;
     private Float heightOverride;
     private int maxDistance;
-    /** Optional per-instance camera-distance limit; null means use the client config default. */
+    /**
+     * Optional per-instance camera-distance limit; null means use the client config default.
+     */
     private Integer maxDisplayDistanceOverride;
-    /** Display mode; AUTO follows the global LOD setting unless explicitly configured. */
+    /**
+     * Display mode; AUTO follows the global LOD setting unless explicitly configured.
+     */
     private WorldWindowDisplayPrecision displayPrecision = WorldWindowDisplayPrecision.AUTO;
-    /** Whether this instance explicitly opted into a display precision policy. */
+    /**
+     * Whether this instance explicitly opted into a display precision policy.
+     */
     private boolean displayPrecisionOverride;
-    /** Optional per-instance LOD thresholds; null means use the client config values. */
+    /**
+     * Optional per-instance LOD thresholds; null means use the client config values.
+     */
     private Integer fullDetailDistanceOverride;
     private Integer reducedDetailDistanceOverride;
     private float nearDepthStep = DEFAULT_NEAR_DEPTH_STEP;
@@ -93,7 +107,9 @@ public class WorldWindow {
     private Matrix4f interactionClipMatrix;
     private Matrix4f interactionWorldMatrix;
     private Vec3 interactionPosition;
-    /** Previous-frame display visibility, used to apply boundary hysteresis. */
+    /**
+     * Previous-frame display visibility, used to apply boundary hysteresis.
+     */
     private boolean lastDisplayVisible;
     /**
      * mousemove 逐帧分发的位置门控：投影坐标 realPos 与上次分发一致时跳过。
@@ -104,7 +120,9 @@ public class WorldWindow {
     private double lastMouseMoveRealX = Double.NaN;
     private double lastMouseMoveRealY = Double.NaN;
 
-    /** Creates a world window whose logical size comes from the document viewport. */
+    /**
+     * Creates a world window whose logical size comes from the document viewport.
+     */
     public WorldWindow(String documentPath, Vec3 position, int maxDistance) {
         this.document = Document.createInWorld(documentPath);
         this.position = position;
@@ -120,7 +138,9 @@ public class WorldWindow {
         this(documentPath, new Vec3(x, y, z), maxDistance);
     }
 
-    /** Creates a world window with an explicit fixed orientation. */
+    /**
+     * Creates a world window with an explicit fixed orientation.
+     */
     public WorldWindow(String documentPath, Vec3 position, int maxDistance, float yaw, float pitch) {
         this(documentPath, position, maxDistance);
         setRotation(yaw, pitch);
@@ -132,13 +152,17 @@ public class WorldWindow {
         setRotation(yaw, pitch, roll);
     }
 
-    /** Creates a world window from Euler angles in degrees: {@code (pitch, yaw, roll)}. */
+    /**
+     * Creates a world window from Euler angles in degrees: {@code (pitch, yaw, roll)}.
+     */
     public WorldWindow(String documentPath, Vec3 position, int maxDistance, Vec3 eulerDegrees) {
         this(documentPath, position, maxDistance);
         setRotation(eulerDegrees);
     }
 
-    /** Creates a world window from a JOML orientation quaternion. */
+    /**
+     * Creates a world window from a JOML orientation quaternion.
+     */
     public WorldWindow(String documentPath, Vec3 position, int maxDistance, Quaternionf orientation) {
         this(documentPath, position, maxDistance);
         setOrientation(orientation);
@@ -146,8 +170,8 @@ public class WorldWindow {
 
     /**
      * @deprecated The document viewport is the single source of logical width and height.
-     *             Use {@link #WorldWindow(String, Vec3, int)} and configure the viewport in
-     *             {@code <meta name="aui-viewport">}.
+     * Use {@link #WorldWindow(String, Vec3, int)} and configure the viewport in
+     * {@code <meta name="aui-viewport">}.
      */
     @Deprecated
     public WorldWindow(String documentPath, Vec3 position, float width, float height, int maxDistance) {
@@ -157,20 +181,192 @@ public class WorldWindow {
         this.scaleOverride = FALLBACK_WORLD_SCALE;
     }
 
-    public void setPosition(Vec3 position) {
-        this.position = position;
-        if (scaleOverride == null) resolvedViewportVersion = Long.MIN_VALUE;
+    /**
+     * Resolves a base point toward the camera view ray using the requested factor.
+     */
+    static Vec3 resolveFollowPosition(Vec3 basePosition, Vec3 cameraPosition,
+                                      Vec3 lookVector, float followFactor) {
+        if (basePosition == null || cameraPosition == null || lookVector == null) return basePosition;
+        double lookLength = Math.sqrt(
+                lookVector.x * lookVector.x
+                        + lookVector.y * lookVector.y
+                        + lookVector.z * lookVector.z
+        );
+        if (!(lookLength > 1.0e-8) || !Double.isFinite(lookLength)) return basePosition;
+
+        Vec3 normalizedLook = lookVector.scale(1.0 / lookLength);
+        Vec3 toBase = basePosition.subtract(cameraPosition);
+        double depth = toBase.dot(normalizedLook);
+        if (!(depth > 0.0) || !Double.isFinite(depth)) return basePosition;
+
+        Vec3 targetPosition = cameraPosition.add(normalizedLook.scale(depth));
+        float factor = sanitizeFollowFactor(followFactor);
+        return basePosition.add(targetPosition.subtract(basePosition).scale(factor));
+    }
+
+    /**
+     * Composes the camera view factor with a pose matrix. The pose only carries this
+     * window's model transform, so culling and interaction need the view matrix the
+     * loader applies on the GPU to agree with the drawn pixels.
+     */
+    static Matrix4f modelView(Matrix4f viewMatrix, Matrix4f modelMatrix) {
+        return new Matrix4f(viewMatrix).mul(modelMatrix);
+    }
+
+    public static void addWindow(WorldWindow window) {
+        windows.add(window);
+    }
+
+    public static void removeWindow(WorldWindow window) {
+        window.document.remove();
+        windows.remove(window);
+    }
+
+    public static void clear() {
+        for (WorldWindow window : new ArrayList<>(windows)) {
+            removeWindow(window);
+        }
+    }
+
+    /**
+     * Drops world windows once the client no longer has a level (disconnect,
+     * title screen). World windows belong to the current save; keeping them
+     * would leave stale documents bound to a level that no longer exists.
+     */
+    public static void tick() {
+        if (windows.isEmpty() || AuiServices.client().hasClientWorld()) return;
+        clear();
+    }
+
+    /**
+     * Returns the window associated with a world document, if it is currently registered.
+     */
+    public static WorldWindow findByDocument(Document document) {
+        if (document == null) return null;
+        for (WorldWindow window : windows) {
+            if (window != null && window.document == document) return window;
+        }
+        return null;
+    }
+
+    private static boolean perspectiveDivide(Vector4f point) {
+        if (point == null || !Float.isFinite(point.w) || Math.abs(point.w) < 1.0e-6f) return false;
+        point.x /= point.w;
+        point.y /= point.w;
+        point.z /= point.w;
+        point.w = 1.0f;
+        return Float.isFinite(point.x) && Float.isFinite(point.y) && Float.isFinite(point.z);
+    }
+
+    static float computeViewportScale(float viewportWidth, float viewportHeight,
+                                      double viewDepth, float projectionX, float projectionY,
+                                      float fallbackScale) {
+        if (!(viewportWidth > 0.0f) || !(viewportHeight > 0.0f)
+                || !(viewDepth > 0.0d) || !Double.isFinite(viewDepth)
+                || !Float.isFinite(projectionX) || !Float.isFinite(projectionY)
+                || Math.abs(projectionX) < 1.0e-6f || Math.abs(projectionY) < 1.0e-6f) {
+            return sanitizeScale(fallbackScale);
+        }
+
+        double visibleWorldWidth = 2.0d * viewDepth / Math.abs(projectionX);
+        double visibleWorldHeight = 2.0d * viewDepth / Math.abs(projectionY);
+        double fittedScale = Math.min(
+                visibleWorldWidth * DEFAULT_VIEWPORT_FILL / viewportWidth,
+                visibleWorldHeight * DEFAULT_VIEWPORT_FILL / viewportHeight
+        );
+        if (!(fittedScale > 0.0d) || !Double.isFinite(fittedScale)) {
+            return sanitizeScale(fallbackScale);
+        }
+        return (float) fittedScale;
+    }
+
+    static boolean isQuadVisible(Matrix4f modelViewMatrix, Matrix4f projectionMatrix,
+                                 float width, float height) {
+        if (modelViewMatrix == null || projectionMatrix == null
+                || !Float.isFinite(width) || !Float.isFinite(height)
+                || width <= 0.0f || height <= 0.0f) {
+            return true;
+        }
+
+        Matrix4f clip = new Matrix4f(projectionMatrix).mul(modelViewMatrix);
+        float halfWidth = width * 0.5f;
+        float halfHeight = height * 0.5f;
+
+        float centerX = clip.m30();
+        float centerY = clip.m31();
+        float centerZ = clip.m32();
+        float centerW = clip.m33();
+        float xAxisX = clip.m00() * halfWidth;
+        float xAxisY = clip.m01() * halfWidth;
+        float xAxisZ = clip.m02() * halfWidth;
+        float xAxisW = clip.m03() * halfWidth;
+        float yAxisX = clip.m10() * halfHeight;
+        float yAxisY = clip.m11() * halfHeight;
+        float yAxisZ = clip.m12() * halfHeight;
+        float yAxisW = clip.m13() * halfHeight;
+
+        // A panel entirely behind the camera cannot contribute any fragments.
+        if (centerW + Math.abs(xAxisW) + Math.abs(yAxisW) <= 0.0f) return false;
+
+        // Each expression below checks whether all four corners are outside one
+        // homogeneous clip plane. If no plane excludes the whole quad, keep it.
+        if (outsideLeft(centerX, centerW, xAxisX, xAxisW, yAxisX, yAxisW)) return false;
+        if (outsideRight(centerX, centerW, xAxisX, xAxisW, yAxisX, yAxisW)) return false;
+        if (outsideLeft(centerY, centerW, xAxisY, xAxisW, yAxisY, yAxisW)) return false;
+        if (outsideRight(centerY, centerW, xAxisY, xAxisW, yAxisY, yAxisW)) return false;
+        if (outsideLeft(centerZ, centerW, xAxisZ, xAxisW, yAxisZ, yAxisW)) return false;
+        if (outsideRight(centerZ, centerW, xAxisZ, xAxisW, yAxisZ, yAxisW)) return false;
+        return true;
+    }
+
+    private static boolean outsideLeft(float valueCenter, float wCenter,
+                                       float xAxis, float wAxis,
+                                       float yAxis, float yWAxis) {
+        float center = valueCenter + wCenter;
+        float radius = Math.abs(xAxis + wAxis) + Math.abs(yAxis + yWAxis);
+        return center + radius < 0.0f;
+    }
+
+    private static boolean outsideRight(float valueCenter, float wCenter,
+                                        float xAxis, float wAxis,
+                                        float yAxis, float yWAxis) {
+        float center = valueCenter - wCenter;
+        float radius = Math.abs(xAxis - wAxis) + Math.abs(yAxis - yWAxis);
+        return center - radius > 0.0f;
+    }
+
+    private static float sanitizeScale(float value) {
+        return Float.isFinite(value) && value > 0.0f ? value : FALLBACK_WORLD_SCALE;
+    }
+
+    private static float sanitizeFollowFactor(float value) {
+        return Float.isFinite(value) ? Mth.clamp(value, 0.0f, 1.0f) : DEFAULT_FOLLOW_FACTOR;
+    }
+
+    private static float sanitizeDimension(float value) {
+        return Float.isFinite(value) && value > 0.0f ? value : 1.0f;
+    }
+
+    private static int sanitizeDistance(int value) {
+        return Math.max(0, value);
     }
 
     protected Vec3 getPosition() {
         return position;
     }
 
+    public void setPosition(Vec3 position) {
+        this.position = position;
+        if (scaleOverride == null) resolvedViewportVersion = Long.MIN_VALUE;
+    }
+
     public void setRotation(float yRot, float xRot) {
         setRotation(yRot, xRot, 0.0f);
     }
 
-    /** Sets Euler angles in degrees: yaw, pitch, roll. */
+    /**
+     * Sets Euler angles in degrees: yaw, pitch, roll.
+     */
     public void setRotation(float yaw, float pitch, float roll) {
         float safeYaw = Float.isFinite(yaw) ? yaw : 0.0f;
         float safePitch = Float.isFinite(pitch) ? pitch : 0.0f;
@@ -181,7 +377,9 @@ public class WorldWindow {
                 .rotateZ((float) Math.toRadians(safeRoll));
     }
 
-    /** Sets Euler angles in degrees as {@code (pitch, yaw, roll)}. */
+    /**
+     * Sets Euler angles in degrees as {@code (pitch, yaw, roll)}.
+     */
     public void setRotation(Vec3 eulerDegrees) {
         if (eulerDegrees == null) {
             setRotation(0.0f, 0.0f, 0.0f);
@@ -190,7 +388,13 @@ public class WorldWindow {
         setRotation((float) eulerDegrees.y, (float) eulerDegrees.x, (float) eulerDegrees.z);
     }
 
-    /** Replaces the world orientation with a copy of the supplied quaternion. */
+    public Quaternionf getOrientation() {
+        return new Quaternionf(rotation);
+    }
+
+    /**
+     * Replaces the world orientation with a copy of the supplied quaternion.
+     */
     public void setOrientation(Quaternionf orientation) {
         if (orientation == null) {
             setRotation(0.0f, 0.0f, 0.0f);
@@ -199,23 +403,13 @@ public class WorldWindow {
         rotation.set(orientation);
     }
 
-    public Quaternionf getOrientation() {
-        return new Quaternionf(rotation);
-    }
-
-    /** Enables or disables camera-plane following while preserving the base position. */
-    public void setFollow(boolean follow) {
-        if (this.followEnabled != follow) {
-            resolvedViewportVersion = Long.MIN_VALUE;
-        }
-        this.followEnabled = follow;
-    }
-
     public boolean isFollowEnabled() {
         return followEnabled;
     }
 
-    /** Alias for callers that prefer an explicit enabled suffix. */
+    /**
+     * Alias for callers that prefer an explicit enabled suffix.
+     */
     public void setFollowEnabled(boolean follow) {
         setFollow(follow);
     }
@@ -224,16 +418,23 @@ public class WorldWindow {
         return isFollowEnabled();
     }
 
-    /** Enables or disables camera-facing rotation independently from following. */
-    public void setFacing(boolean facing) {
-        this.facingEnabled = facing;
+    /**
+     * Enables or disables camera-plane following while preserving the base position.
+     */
+    public void setFollow(boolean follow) {
+        if (this.followEnabled != follow) {
+            resolvedViewportVersion = Long.MIN_VALUE;
+        }
+        this.followEnabled = follow;
     }
 
     public boolean isFacingEnabled() {
         return facingEnabled;
     }
 
-    /** Alias for callers that prefer an explicit enabled suffix. */
+    /**
+     * Alias for callers that prefer an explicit enabled suffix.
+     */
     public void setFacingEnabled(boolean facing) {
         setFacing(facing);
     }
@@ -242,13 +443,22 @@ public class WorldWindow {
         return isFacingEnabled();
     }
 
-    /** Sets the follow interpolation factor in the inclusive range {@code [0, 1]}. */
-    public void setFollowFactor(float followFactor) {
-        this.followFactor = sanitizeFollowFactor(followFactor);
+    /**
+     * Enables or disables camera-facing rotation independently from following.
+     */
+    public void setFacing(boolean facing) {
+        this.facingEnabled = facing;
     }
 
     public float getFollowFactor() {
         return followFactor;
+    }
+
+    /**
+     * Sets the follow interpolation factor in the inclusive range {@code [0, 1]}.
+     */
+    public void setFollowFactor(float followFactor) {
+        this.followFactor = sanitizeFollowFactor(followFactor);
     }
 
     private Vec3 resolveRenderPosition(Vec3 cameraPosition, Vector3f lookVector) {
@@ -276,25 +486,18 @@ public class WorldWindow {
                 .rotateX((float) Math.toRadians(-pitch));
     }
 
-    /** Resolves a base point toward the camera view ray using the requested factor. */
-    static Vec3 resolveFollowPosition(Vec3 basePosition, Vec3 cameraPosition,
-                                      Vec3 lookVector, float followFactor) {
-        if (basePosition == null || cameraPosition == null || lookVector == null) return basePosition;
-        double lookLength = Math.sqrt(
-                lookVector.x * lookVector.x
-                        + lookVector.y * lookVector.y
-                        + lookVector.z * lookVector.z
-        );
-        if (!(lookLength > 1.0e-8) || !Double.isFinite(lookLength)) return basePosition;
+    /**
+     * Returns whether this instance uses an explicit world scale instead of camera fitting.
+     */
+    public boolean hasScaleOverride() {
+        return scaleOverride != null;
+    }
 
-        Vec3 normalizedLook = lookVector.scale(1.0 / lookLength);
-        Vec3 toBase = basePosition.subtract(cameraPosition);
-        double depth = toBase.dot(normalizedLook);
-        if (!(depth > 0.0) || !Double.isFinite(depth)) return basePosition;
-
-        Vec3 targetPosition = cameraPosition.add(normalizedLook.scale(depth));
-        float factor = sanitizeFollowFactor(followFactor);
-        return basePosition.add(targetPosition.subtract(basePosition).scale(factor));
+    /**
+     * Returns the explicit scale, or the last camera-fitted scale when no override is set.
+     */
+    public float getScale() {
+        return resolvedScale;
     }
 
     /**
@@ -308,23 +511,17 @@ public class WorldWindow {
         }
     }
 
-    /** Returns whether this instance uses an explicit world scale instead of camera fitting. */
-    public boolean hasScaleOverride() {
-        return scaleOverride != null;
-    }
-
-    /** Returns the explicit scale, or the last camera-fitted scale when no override is set. */
-    public float getScale() {
-        return resolvedScale;
-    }
-
-    /** Clears an explicit world scale and lets the next frame fit the viewport to the camera. */
+    /**
+     * Clears an explicit world scale and lets the next frame fit the viewport to the camera.
+     */
     public void clearScaleOverride() {
         scaleOverride = null;
         resolvedViewportVersion = Long.MIN_VALUE;
     }
 
-    /** Enables or disables occlusion by world geometry for this window. */
+    /**
+     * Enables or disables occlusion by world geometry for this window.
+     */
     public void setDepthTest(boolean depthTest) {
         this.depthTest = depthTest;
     }
@@ -337,7 +534,9 @@ public class WorldWindow {
         return maxDistance;
     }
 
-    /** Updates the maximum ray distance used by world-window interaction. */
+    /**
+     * Updates the maximum ray distance used by world-window interaction.
+     */
     public void setMaxDistance(int maxDistance) {
         this.maxDistance = sanitizeDistance(maxDistance);
         this.depthFarDistance = Math.max(this.depthNearDistance + 0.001f, this.maxDistance);
@@ -353,28 +552,29 @@ public class WorldWindow {
                 maxDisplayDistanceOverride);
     }
 
-    /** Sets the per-instance maximum camera distance at which this window is rendered and interactive. */
+    /**
+     * Sets the per-instance maximum camera distance at which this window is rendered and interactive.
+     */
     public void setMaxDisplayDistance(int maxDisplayDistance) {
         this.maxDisplayDistanceOverride = sanitizeDistance(maxDisplayDistance);
     }
 
-    /** Returns whether this window overrides the configured global display-distance default. */
+    /**
+     * Returns whether this window overrides the configured global display-distance default.
+     */
     public boolean hasMaxDisplayDistanceOverride() {
         return maxDisplayDistanceOverride != null;
     }
 
-    /** Clears the per-instance limit so this window follows the client config default again. */
+    /**
+     * Clears the per-instance limit so this window follows the client config default again.
+     */
     public void clearMaxDisplayDistanceOverride() {
         maxDisplayDistanceOverride = null;
     }
 
     public WorldWindowDisplayPrecision getDisplayPrecision() {
         return displayPrecision;
-    }
-
-    /** Returns whether this instance overrides the global LOD policy or thresholds. */
-    public boolean hasDisplayPrecisionOverride() {
-        return displayPrecisionOverride;
     }
 
     /**
@@ -392,12 +592,23 @@ public class WorldWindow {
         }
     }
 
-    /** Rhino/KubeJS-friendly overload accepting {@code auto}, {@code full}, {@code reduced} or {@code minimal}. */
+    /**
+     * Rhino/KubeJS-friendly overload accepting {@code auto}, {@code full}, {@code reduced} or {@code minimal}.
+     */
     public void setDisplayPrecision(String displayPrecision) {
         setDisplayPrecision(WorldWindowDisplayPrecision.parse(displayPrecision));
     }
 
-    /** Returns the currently effective level for the main render camera. */
+    /**
+     * Returns whether this instance overrides the global LOD policy or thresholds.
+     */
+    public boolean hasDisplayPrecisionOverride() {
+        return displayPrecisionOverride;
+    }
+
+    /**
+     * Returns the currently effective level for the main render camera.
+     */
     public WorldWindowDisplayPrecision getEffectiveDisplayPrecision() {
         Vec3 cameraPosition = AuiServices.client().getCameraPosition();
         if (cameraPosition == null) return WorldWindowDisplayPrecision.MINIMAL;
@@ -611,35 +822,13 @@ public class WorldWindow {
     }
 
     /**
-     * Composes the camera view factor with a pose matrix. The pose only carries this
-     * window's model transform, so culling and interaction need the view matrix the
-     * loader applies on the GPU to agree with the drawn pixels.
+     * Returns the total world-space depth budget for this document.
      */
-    static Matrix4f modelView(Matrix4f viewMatrix, Matrix4f modelMatrix) {
-        return new Matrix4f(viewMatrix).mul(modelMatrix);
-    }
-
-    /** Returns the total world-space depth budget for this document. */
     private float computeDepthStep(Vec3 cameraPos, Vec3 renderPosition) {
         double distance = cameraPos.distanceTo(renderPosition);
         double t = Mth.inverseLerp(distance, depthNearDistance, depthFarDistance);
         float depth = (float) Mth.clampedLerp(nearDepthStep, farDepthStep, t);
         return depth * AuiServices.config().worldWindowDepthOffsetScale() / DEFAULT_DEPTH_OFFSET_SCALE;
-    }
-
-    public static void addWindow(WorldWindow window) {
-        windows.add(window);
-    }
-
-    public static void removeWindow(WorldWindow window) {
-        window.document.remove();
-        windows.remove(window);
-    }
-
-    public static void clear() {
-        for (WorldWindow window : new ArrayList<>(windows)) {
-            removeWindow(window);
-        }
     }
 
     /**
@@ -671,7 +860,9 @@ public class WorldWindow {
         return localHit;
     }
 
-    /** Returns the GUI-space projection of a document-local point, or null if it is not visible. */
+    /**
+     * Returns the GUI-space projection of a document-local point, or null if it is not visible.
+     */
     public Position projectDocumentPosition(Position documentPosition) {
         if (documentPosition == null || !Double.isFinite(documentPosition.x) || !Double.isFinite(documentPosition.y)
                 || interactionClipMatrix == null) return null;
@@ -690,7 +881,9 @@ public class WorldWindow {
                 (1.0 - ndcY) * 0.5 * guiHeight);
     }
 
-    /** Projects a document-local rectangle into a conservative GUI-space bounding box. */
+    /**
+     * Projects a document-local rectangle into a conservative GUI-space bounding box.
+     */
     public ScreenRect projectDocumentRect(double x, double y, double width, double height) {
         if (!Double.isFinite(x) || !Double.isFinite(y)
                 || !Double.isFinite(width) || !Double.isFinite(height)
@@ -715,22 +908,17 @@ public class WorldWindow {
         return new ScreenRect(left, top, Math.max(0.0, right - left), Math.max(0.0, bottom - top));
     }
 
-    /** Returns the window associated with a world document, if it is currently registered. */
-    public static WorldWindow findByDocument(Document document) {
-        if (document == null) return null;
-        for (WorldWindow window : windows) {
-            if (window != null && window.document == document) return window;
-        }
-        return null;
-    }
-
-    /** Returns the current mouse position mapped to document coordinates for world events. */
+    /**
+     * Returns the current mouse position mapped to document coordinates for world events.
+     */
     public Position getRealPos() {
         // A grabbed cursor reports virtual look coordinates; world picking uses the crosshair.
         return getRealPos(com.sighs.apricityui.spi.AuiServices.client().getMousePositionForWorldInteraction());
     }
 
-    /** Returns a screen position mapped to this window's event coordinate space. */
+    /**
+     * Returns a screen position mapped to this window's event coordinate space.
+     */
     public Position getRealPos(Position screenPosition) {
         Position documentPosition = getDocumentPositionAtScreen(screenPosition);
         return documentPosition == null || document == null
@@ -785,18 +973,9 @@ public class WorldWindow {
         );
     }
 
-    private static boolean perspectiveDivide(Vector4f point) {
-        if (point == null || !Float.isFinite(point.w) || Math.abs(point.w) < 1.0e-6f) return false;
-        point.x /= point.w;
-        point.y /= point.w;
-        point.z /= point.w;
-        point.w = 1.0f;
-        return Float.isFinite(point.x) && Float.isFinite(point.y) && Float.isFinite(point.z);
-    }
-
     private void captureInteractionTransform(Matrix4f projectionMatrix, Matrix4f modelViewMatrix,
-                                              float renderScale, float documentZOffset,
-                                              Vec3 renderPosition, Quaternionf renderRotation) {
+                                             float renderScale, float documentZOffset,
+                                             Vec3 renderPosition, Quaternionf renderRotation) {
         if (projectionMatrix == null || modelViewMatrix == null
                 || renderPosition == null || renderRotation == null) return;
         Matrix4f documentModelView = new Matrix4f(modelViewMatrix).translate(0.0f, 0.0f, documentZOffset);
@@ -814,13 +993,6 @@ public class WorldWindow {
         interactionClipMatrix = null;
         interactionWorldMatrix = null;
         interactionPosition = null;
-    }
-
-    public record ScreenRect(double x, double y, double width, double height) {
-    }
-
-    private boolean isOccluded(Vec3 rayOrigin, Vec3 intersection, double windowDistance) {
-        return AuiServices.client().isWorldOccluded(rayOrigin, intersection, windowDistance);
     }
 
     private boolean isWithinDisplayDistance(Vec3 cameraPosition) {
@@ -922,96 +1094,6 @@ public class WorldWindow {
         return (float) Math.max(0.0001d, documentRenderScale() * guiScale);
     }
 
-    static float computeViewportScale(float viewportWidth, float viewportHeight,
-                                      double viewDepth, float projectionX, float projectionY,
-                                      float fallbackScale) {
-        if (!(viewportWidth > 0.0f) || !(viewportHeight > 0.0f)
-                || !(viewDepth > 0.0d) || !Double.isFinite(viewDepth)
-                || !Float.isFinite(projectionX) || !Float.isFinite(projectionY)
-                || Math.abs(projectionX) < 1.0e-6f || Math.abs(projectionY) < 1.0e-6f) {
-            return sanitizeScale(fallbackScale);
-        }
-
-        double visibleWorldWidth = 2.0d * viewDepth / Math.abs(projectionX);
-        double visibleWorldHeight = 2.0d * viewDepth / Math.abs(projectionY);
-        double fittedScale = Math.min(
-                visibleWorldWidth * DEFAULT_VIEWPORT_FILL / viewportWidth,
-                visibleWorldHeight * DEFAULT_VIEWPORT_FILL / viewportHeight
-        );
-        if (!(fittedScale > 0.0d) || !Double.isFinite(fittedScale)) {
-            return sanitizeScale(fallbackScale);
-        }
-        return (float) fittedScale;
-    }
-
-    static boolean isQuadVisible(Matrix4f modelViewMatrix, Matrix4f projectionMatrix,
-                                  float width, float height) {
-        if (modelViewMatrix == null || projectionMatrix == null
-                || !Float.isFinite(width) || !Float.isFinite(height)
-                || width <= 0.0f || height <= 0.0f) {
-            return true;
-        }
-
-        Matrix4f clip = new Matrix4f(projectionMatrix).mul(modelViewMatrix);
-        float halfWidth = width * 0.5f;
-        float halfHeight = height * 0.5f;
-
-        float centerX = clip.m30();
-        float centerY = clip.m31();
-        float centerZ = clip.m32();
-        float centerW = clip.m33();
-        float xAxisX = clip.m00() * halfWidth;
-        float xAxisY = clip.m01() * halfWidth;
-        float xAxisZ = clip.m02() * halfWidth;
-        float xAxisW = clip.m03() * halfWidth;
-        float yAxisX = clip.m10() * halfHeight;
-        float yAxisY = clip.m11() * halfHeight;
-        float yAxisZ = clip.m12() * halfHeight;
-        float yAxisW = clip.m13() * halfHeight;
-
-        // A panel entirely behind the camera cannot contribute any fragments.
-        if (centerW + Math.abs(xAxisW) + Math.abs(yAxisW) <= 0.0f) return false;
-
-        // Each expression below checks whether all four corners are outside one
-        // homogeneous clip plane. If no plane excludes the whole quad, keep it.
-        if (outsideLeft(centerX, centerW, xAxisX, xAxisW, yAxisX, yAxisW)) return false;
-        if (outsideRight(centerX, centerW, xAxisX, xAxisW, yAxisX, yAxisW)) return false;
-        if (outsideLeft(centerY, centerW, xAxisY, xAxisW, yAxisY, yAxisW)) return false;
-        if (outsideRight(centerY, centerW, xAxisY, xAxisW, yAxisY, yAxisW)) return false;
-        if (outsideLeft(centerZ, centerW, xAxisZ, xAxisW, yAxisZ, yAxisW)) return false;
-        if (outsideRight(centerZ, centerW, xAxisZ, xAxisW, yAxisZ, yAxisW)) return false;
-        return true;
-    }
-
-    private static boolean outsideLeft(float valueCenter, float wCenter,
-                                       float xAxis, float wAxis,
-                                       float yAxis, float yWAxis) {
-        float center = valueCenter + wCenter;
-        float radius = Math.abs(xAxis + wAxis) + Math.abs(yAxis + yWAxis);
-        return center + radius < 0.0f;
-    }
-
-    private static boolean outsideRight(float valueCenter, float wCenter,
-                                        float xAxis, float wAxis,
-                                        float yAxis, float yWAxis) {
-        float center = valueCenter - wCenter;
-        float radius = Math.abs(xAxis - wAxis) + Math.abs(yAxis - yWAxis);
-        return center - radius > 0.0f;
-    }
-
-    private static float sanitizeScale(float value) {
-        return Float.isFinite(value) && value > 0.0f ? value : FALLBACK_WORLD_SCALE;
-    }
-
-    private static float sanitizeFollowFactor(float value) {
-        return Float.isFinite(value) ? Mth.clamp(value, 0.0f, 1.0f) : DEFAULT_FOLLOW_FACTOR;
-    }
-
-    private static float sanitizeDimension(float value) {
-        return Float.isFinite(value) && value > 0.0f ? value : 1.0f;
-    }
-
-    private static int sanitizeDistance(int value) {
-        return Math.max(0, value);
+    public record ScreenRect(double x, double y, double width, double height) {
     }
 }

@@ -11,6 +11,7 @@ import com.sighs.apricityui.spi.RenderHandle;
 import com.sighs.apricityui.spi.TextureKey;
 import com.sighs.apricityui.resource.async.image.ImageHandle;
 import com.sighs.apricityui.style.Background;
+import com.sighs.apricityui.style.ImageRendering;
 import com.sighs.apricityui.layout.Box;
 import com.sighs.apricityui.layout.Position;
 import com.sighs.apricityui.layout.Size;
@@ -22,10 +23,10 @@ import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 
 public class ImageDrawer {
-    private static final Map<RenderKey, RenderHandle> RENDER_TYPE_CACHE = new ConcurrentHashMap<>();
-    private static final int PLACEHOLDER_COLOR = 0x33404040;
     // Empty radii array for rectangular mask clipping.
     public static final float[] NO_RADIUS = new float[]{0, 0, 0, 0};
+    private static final Map<RenderKey, RenderHandle> RENDER_TYPE_CACHE = new ConcurrentHashMap<>();
+    private static final int PLACEHOLDER_COLOR = 0x33404040;
     private static final TextureRenderQueue TEXTURE_QUEUE = new TextureRenderQueue();
 
     private static RenderHandle getRenderHandle(TextureKey texture, boolean blur) {
@@ -45,7 +46,9 @@ public class ImageDrawer {
         innerBlit(poseStack, texture, x, y, width, height, 0, 0, 1, 1, 1, 1, blur, true);
     }
 
-    /** 带顶点染色的绘制：tintArgb 为 ARGB，白色等于不染色（FontDrawer 白色光栅路径用）。 */
+    /**
+     * 带顶点染色的绘制：tintArgb 为 ARGB，白色等于不染色（FontDrawer 白色光栅路径用）。
+     */
     public static void draw(PoseStack poseStack, TextureKey texture, float x, float y, float width, float height, boolean blur, int tintArgb) {
         if (texture == null) return;
         innerBlit(poseStack, texture, x, y, width, height, 0.0f, 0.0f, 1.0f, 1.0f, 1, 1, blur, true, tintArgb);
@@ -92,7 +95,31 @@ public class ImageDrawer {
         float width = (float) size.width();
         float height = (float) size.height();
         boolean needRelayout = width == 0 || height == 0;
-        draw(poseStack, resolvedPath, x, y, width, height, "true".equals(element.getAttribute("blur")), element, needRelayout);
+        draw(poseStack, resolvedPath, x, y, width, height, false, element, needRelayout);
+    }
+
+    /**
+     * 按 {@code image-rendering} 与缩放系数解析是否使用线性过滤（见 {@link ImageRendering}）。
+     *
+     * @param style           元素的 computed style，可为 {@code null}
+     * @param drawnWidth      实际绘制宽度（{@code object-fit}/{@code background-size} 解析后的尺寸）
+     * @param drawnHeight     实际绘制高度
+     * @param intrinsicWidth  位图固有宽度
+     * @param intrinsicHeight 位图固有高度
+     */
+    public static boolean usesLinearFiltering(Style style,
+                                              double drawnWidth, double drawnHeight,
+                                              double intrinsicWidth, double intrinsicHeight) {
+        return usesLinearFiltering(style, ImageRendering.scale(drawnWidth, drawnHeight, intrinsicWidth, intrinsicHeight));
+    }
+
+    /**
+     * 同 {@link #usesLinearFiltering(Style, double, double, double, double)}，直接给出缩放系数。
+     *
+     * @param scale 绘制尺寸 / 固有尺寸；{@code <= 0} 表示固有尺寸不可用（{@code pixelated} 按放大处理）
+     */
+    public static boolean usesLinearFiltering(Style style, double scale) {
+        return ImageRendering.linearFiltering(style == null ? null : style.imageRendering, scale);
     }
 
     public static void draw(PoseStack poseStack, String path, int x, int y, int width, int height, boolean blur) {
@@ -123,112 +150,24 @@ public class ImageDrawer {
             height = (float) (1d * width / textureWidth * textureHeight);
         }
 
+        Style imageStyle = requester == null ? null : requester.getComputedStyle();
         ObjectFitRect drawRect = requester == null
                 ? new ObjectFitRect(x, y, width, height)
-                : resolveObjectFitRect(requester.getComputedStyle(), x, y, width, height, textureWidth, textureHeight);
-        innerBlit(poseStack, currentLocation, drawRect.x(), drawRect.y(), drawRect.width(), drawRect.height(), 0, 0, textureWidth, textureHeight, textureWidth, textureHeight, blur, true);
+                : resolveObjectFitRect(imageStyle, x, y, width, height, textureWidth, textureHeight);
+        // 元素图像按 image-rendering 决定采样；无 requester 的通用绘制沿用调用方给的过滤开关。
+        boolean smooth = requester == null
+                ? blur
+                : usesLinearFiltering(imageStyle,
+                drawRect.width(), drawRect.height(), textureWidth, textureHeight);
+        innerBlit(poseStack, currentLocation, drawRect.x(), drawRect.y(), drawRect.width(), drawRect.height(), 0, 0, textureWidth, textureHeight, textureWidth, textureHeight, smooth, true);
     }
 
     public static ObjectFitRect resolveObjectFitRect(Style style, float boxX, float boxY, float boxW, float boxH, int intrinsicW, int intrinsicH) {
-        if (boxW <= 0 || boxH <= 0 || intrinsicW <= 0 || intrinsicH <= 0) {
-            return new ObjectFitRect(boxX, boxY, Math.max(0, boxW), Math.max(0, boxH));
-        }
-
-        String fit = style == null || style.objectFit == null ? "fill" : style.objectFit.trim().toLowerCase(Locale.ROOT);
-        float drawW = boxW;
-        float drawH = boxH;
-        float intrinsicWidth = intrinsicW;
-        float intrinsicHeight = intrinsicH;
-
-        switch (fit) {
-            case "contain" -> {
-                float scale = Math.min(boxW / intrinsicWidth, boxH / intrinsicHeight);
-                drawW = intrinsicWidth * scale;
-                drawH = intrinsicHeight * scale;
-            }
-            case "cover" -> {
-                float scale = Math.max(boxW / intrinsicWidth, boxH / intrinsicHeight);
-                drawW = intrinsicWidth * scale;
-                drawH = intrinsicHeight * scale;
-            }
-            case "none" -> {
-                drawW = intrinsicWidth;
-                drawH = intrinsicHeight;
-            }
-            case "scale-down" -> {
-                float scale = Math.min(boxW / intrinsicWidth, boxH / intrinsicHeight);
-                if (scale < 1f) {
-                    drawW = intrinsicWidth * scale;
-                    drawH = intrinsicHeight * scale;
-                } else {
-                    drawW = intrinsicWidth;
-                    drawH = intrinsicHeight;
-                }
-            }
-            case "fill" -> {
-                drawW = boxW;
-                drawH = boxH;
-            }
-            default -> {
-                drawW = boxW;
-                drawH = boxH;
-            }
-        }
-
-        float[] offset = parseObjectPosition(style == null ? null : style.objectPosition, boxW, boxH, drawW, drawH);
-        return new ObjectFitRect(boxX + offset[0], boxY + offset[1], drawW, drawH);
-    }
-
-    private static float[] parseObjectPosition(String value, float boxW, float boxH, float objectW, float objectH) {
-        String normalized = value == null || value.isBlank() || "unset".equalsIgnoreCase(value.trim())
-                ? "50% 50%"
-                : value.trim().toLowerCase(Locale.ROOT);
-        String[] parts = com.sighs.apricityui.layout.Layout.splitTopLevelWhitespace(normalized).toArray(String[]::new);
-        String xToken = parts.length > 0 ? parts[0] : "50%";
-        String yToken = parts.length > 1 ? parts[1] : "50%";
-
-        if (parts.length == 1 && isVerticalPositionKeyword(xToken)) {
-            yToken = xToken;
-            xToken = "50%";
-        } else if (parts.length == 1 && isHorizontalPositionKeyword(xToken)) {
-            yToken = "50%";
-        }
-
-        float freeX = boxW - objectW;
-        float freeY = boxH - objectH;
-        return new float[]{
-                resolveObjectPositionToken(xToken, freeX, true),
-                resolveObjectPositionToken(yToken, freeY, false)
-        };
-    }
-
-    private static float resolveObjectPositionToken(String token, float freeSpace, boolean horizontal) {
-        if (token == null || token.isBlank()) return freeSpace * 0.5f;
-        String value = token.trim().toLowerCase(Locale.ROOT);
-        if ((horizontal && "left".equals(value)) || (!horizontal && "top".equals(value))) return 0;
-        if ("center".equals(value)) return freeSpace * 0.5f;
-        if ((horizontal && "right".equals(value)) || (!horizontal && "bottom".equals(value))) return freeSpace;
-        if (value.endsWith("%")) {
-            try {
-                return freeSpace * Float.parseFloat(value.substring(0, value.length() - 1).trim()) / 100f;
-            } catch (NumberFormatException ignored) {
-                return freeSpace * 0.5f;
-            }
-        }
-        String raw = value.endsWith("px") ? value.substring(0, value.length() - 2).trim() : value;
-        try {
-            return Float.parseFloat(raw);
-        } catch (NumberFormatException ignored) {
-            return freeSpace * 0.5f;
-        }
-    }
-
-    private static boolean isHorizontalPositionKeyword(String token) {
-        return "left".equals(token) || "right".equals(token) || "center".equals(token);
-    }
-
-    private static boolean isVerticalPositionKeyword(String token) {
-        return "top".equals(token) || "bottom".equals(token) || "center".equals(token);
+        ImageGeometry.Rect rect = ImageGeometry.resolveObjectFitRect(
+                style == null ? null : style.objectFit,
+                style == null ? null : style.objectPosition,
+                boxX, boxY, boxW, boxH, intrinsicW, intrinsicH);
+        return new ObjectFitRect(rect.x(), rect.y(), rect.width(), rect.height());
     }
 
     public static void clearCache() {
@@ -280,6 +219,8 @@ public class ImageDrawer {
         float offsetX = offset[0];
         float offsetY = offset[1];
         RepeatMode repeatMode = parseRepeatMode(layer.repeat);
+        boolean smooth = usesLinearFiltering(requester == null ? null : requester.getComputedStyle(),
+                renderW, renderH, tw, th);
 
         float startX = repeatMode.repeatX ? normalizeRepeatStart(offsetX, renderW) : offsetX;
         float startY = repeatMode.repeatY ? normalizeRepeatStart(offsetY, renderH) : offsetY;
@@ -287,20 +228,20 @@ public class ImageDrawer {
         if (!requiresBackgroundClip(width, height, startX, startY, renderW, renderH,
                 repeatMode.repeatX, repeatMode.repeatY)) {
             innerBlit(poseStack, loc, x + startX, y + startY, renderW, renderH,
-                    0, 0, tw, th, tw, th, false, true);
+                    0, 0, tw, th, tw, th, smooth, true);
             return;
         }
 
         flushBatch();
         Mask.pushMask(poseStack, x, y, width, height, NO_RADIUS);
         if (!repeatMode.repeatX && !repeatMode.repeatY) {
-            innerBlit(poseStack, loc, x + startX, y + startY, renderW, renderH, 0, 0, tw, th, tw, th, false, true);
+            innerBlit(poseStack, loc, x + startX, y + startY, renderW, renderH, 0, 0, tw, th, tw, th, smooth, true);
         } else {
             float xEnd = repeatMode.repeatX ? width : startX + 1;
             float yEnd = repeatMode.repeatY ? height : startY + 1;
             for (float ix = startX; ix < xEnd; ix += renderW) {
                 for (float iy = startY; iy < yEnd; iy += renderH) {
-                    innerBlit(poseStack, loc, x + ix, y + iy, renderW, renderH, 0, 0, tw, th, tw, th, false, true);
+                    innerBlit(poseStack, loc, x + ix, y + iy, renderW, renderH, 0, 0, tw, th, tw, th, smooth, true);
                 }
             }
         }
@@ -491,6 +432,10 @@ public class ImageDrawer {
     }
 
     public static void drawNineSlice(PoseStack poseStack, String path, int x, int y, int w, int h, Box.BorderImage bi) {
+        drawNineSlice(poseStack, path, x, y, w, h, bi, null);
+    }
+
+    public static void drawNineSlice(PoseStack poseStack, String path, int x, int y, int w, int h, Box.BorderImage bi, Element requester) {
         ReadyTexture readyTexture = requestReadyTexture(path, poseStack, x, y, w, h);
         if (readyTexture == null) return;
         int texW = readyTexture.width();
@@ -504,6 +449,8 @@ public class ImageDrawer {
         int finalY = y - bi.outset[0];
         int finalW = w + bi.outset[3] + bi.outset[1];
         int finalH = h + bi.outset[0] + bi.outset[2];
+        boolean smooth = usesLinearFiltering(requester == null ? null : requester.getComputedStyle(),
+                finalW, finalH, texW, texH);
 
         int srcCW = texW - sL - sR;
         int srcCH = texH - sT - sB;
@@ -513,30 +460,31 @@ public class ImageDrawer {
         String repeatV = bi.repeat;
 
         // 4 corners
-        if (bL > 0 && bT > 0) innerBlit(poseStack, loc, finalX, finalY, bL, bT, 0, 0, sL, sT, texW, texH, false, true);
+        if (bL > 0 && bT > 0) innerBlit(poseStack, loc, finalX, finalY, bL, bT, 0, 0, sL, sT, texW, texH, smooth, true);
         if (bR > 0 && bT > 0)
-            innerBlit(poseStack, loc, finalX + finalW - bR, finalY, bR, bT, texW - sR, 0, sR, sT, texW, texH, false, true);
+            innerBlit(poseStack, loc, finalX + finalW - bR, finalY, bR, bT, texW - sR, 0, sR, sT, texW, texH, smooth, true);
         if (bL > 0 && bB > 0)
-            innerBlit(poseStack, loc, finalX, finalY + finalH - bB, bL, bB, 0, texH - sB, sL, sB, texW, texH, false, true);
+            innerBlit(poseStack, loc, finalX, finalY + finalH - bB, bL, bB, 0, texH - sB, sL, sB, texW, texH, smooth, true);
         if (bR > 0 && bB > 0)
-            innerBlit(poseStack, loc, finalX + finalW - bR, finalY + finalH - bB, bR, bB, texW - sR, texH - sB, sR, sB, texW, texH, false, true);
+            innerBlit(poseStack, loc, finalX + finalW - bR, finalY + finalH - bB, bR, bB, texW - sR, texH - sB, sR, sB, texW, texH, smooth, true);
 
         // 4 edges
-        drawTiledPart(poseStack, loc, finalX + bL, finalY, destCW, bT, sL, 0, srcCW, sT, texW, texH, repeatH, "stretch");
-        drawTiledPart(poseStack, loc, finalX + bL, finalY + finalH - bB, destCW, bB, sL, texH - sB, srcCW, sB, texW, texH, repeatH, "stretch");
-        drawTiledPart(poseStack, loc, finalX, finalY + bT, bL, destCH, 0, sT, sL, srcCH, texW, texH, "stretch", repeatV);
-        drawTiledPart(poseStack, loc, finalX + finalW - bR, finalY + bT, bR, destCH, texW - sR, sT, sR, srcCH, texW, texH, "stretch", repeatV);
+        drawTiledPart(poseStack, loc, finalX + bL, finalY, destCW, bT, sL, 0, srcCW, sT, texW, texH, repeatH, "stretch", smooth);
+        drawTiledPart(poseStack, loc, finalX + bL, finalY + finalH - bB, destCW, bB, sL, texH - sB, srcCW, sB, texW, texH, repeatH, "stretch", smooth);
+        drawTiledPart(poseStack, loc, finalX, finalY + bT, bL, destCH, 0, sT, sL, srcCH, texW, texH, "stretch", repeatV, smooth);
+        drawTiledPart(poseStack, loc, finalX + finalW - bR, finalY + bT, bR, destCH, texW - sR, sT, sR, srcCH, texW, texH, "stretch", repeatV, smooth);
 
         // center
         if (bi.fill && destCW > 0 && destCH > 0) {
-            drawTiledPart(poseStack, loc, finalX + bL, finalY + bT, destCW, destCH, sL, sT, srcCW, srcCH, texW, texH, repeatH, repeatV);
+            drawTiledPart(poseStack, loc, finalX + bL, finalY + bT, destCW, destCH, sL, sT, srcCW, srcCH, texW, texH, repeatH, repeatV, smooth);
         }
     }
 
     private static void drawTiledPart(PoseStack poseStack, TextureKey loc,
                                       int dx, int dy, int dw, int dh,
                                       float sx, float sy, int sw, int sh,
-                                      int texW, int texH, String repeatX, String repeatY) {
+                                      int texW, int texH, String repeatX, String repeatY,
+                                      boolean smooth) {
         if (dw <= 0 || dh <= 0 || sw <= 0 || sh <= 0) return;
 
         float tileW = dw, tileV = dh;
@@ -549,7 +497,7 @@ public class ImageDrawer {
         }
 
         if (tileW == dw && tileV == dh) {
-            innerBlit(poseStack, loc, dx, dy, dw, dh, sx, sy, sw, sh, texW, texH, false, true);
+            innerBlit(poseStack, loc, dx, dy, dw, dh, sx, sy, sw, sh, texW, texH, smooth, true);
             return;
         }
 
@@ -560,7 +508,7 @@ public class ImageDrawer {
             for (float curY = 0; curY < dh; curY += tileV) {
                 int drawW = (int) Math.min(tileW, dw - curX + 1);
                 int drawH = (int) Math.min(tileV, dh - curY + 1);
-                innerBlit(poseStack, loc, (int) (dx + curX), (int) (dy + curY), drawW, drawH, sx, sy, sw, sh, texW, texH, false, true);
+                innerBlit(poseStack, loc, (int) (dx + curX), (int) (dy + curY), drawW, drawH, sx, sy, sw, sh, texW, texH, smooth, true);
             }
         }
 

@@ -1,6 +1,7 @@
 package cc.sirrus.apricityui.compat.cleanroom;
 
 import com.mojang.blaze3d.vertex.PoseStack;
+import com.sighs.apricityui.render.LegacyBackgroundTarget;
 import com.sighs.apricityui.spi.*;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.renderer.BufferBuilder;
@@ -41,6 +42,8 @@ public final class CleanroomRenderService implements AuiRenderService {
     public static final CleanroomRenderService INSTANCE = new CleanroomRenderService();
     private Matrix4f projection = new Matrix4f();
     private boolean depth = true, depthMask = true, cull;
+    private ShaderHandle backgroundShader;
+    private boolean backgroundShaderAttempted;
     private volatile ShaderHandle filterShader;
     private volatile ShaderHandle blurShader;
     private volatile ShaderHandle blendShader;
@@ -105,6 +108,40 @@ public final class CleanroomRenderService implements AuiRenderService {
         uploadProjection();
     }
     @Override public Matrix4f getProjectionMatrix() { return new Matrix4f(projection); }
+
+    @Override
+    public Matrix4f getModelViewMatrix() {
+        matrixBuffer.clear();
+        GL11.glGetFloat(GL11.GL_MODELVIEW_MATRIX, matrixBuffer);
+        return new Matrix4f(matrixBuffer);
+    }
+
+    @Override
+    public void setModelViewMatrix(Matrix4f matrix) {
+        int mode = GL11.glGetInteger(GL11.GL_MATRIX_MODE);
+        matrixBuffer.clear();
+        matrix.get(matrixBuffer);
+        GL11.glMatrixMode(GL11.GL_MODELVIEW);
+        GL11.glLoadMatrix(matrixBuffer);
+        GL11.glMatrixMode(mode);
+    }
+
+    @Override public void clearDepthBuffer() {
+        boolean write = GL11.glGetBoolean(GL11.GL_DEPTH_WRITEMASK);
+        boolean scissor = GL11.glIsEnabled(GL11.GL_SCISSOR_TEST);
+        double clearDepth = GL11.glGetDouble(GL11.GL_DEPTH_CLEAR_VALUE);
+        try {
+            GL11.glDepthMask(true);
+            GL11.glDisable(GL11.GL_SCISSOR_TEST);
+            GL11.glClearDepth(1.0d);
+            GL11.glClear(GL11.GL_DEPTH_BUFFER_BIT);
+        } finally {
+            GL11.glClearDepth(clearDepth);
+            GL11.glDepthMask(write);
+            if (scissor) GL11.glEnable(GL11.GL_SCISSOR_TEST);
+        }
+    }
+
     @Override public void enableDepthTest() { depth = true; GL11.glEnable(GL11.GL_DEPTH_TEST); }
     @Override public void disableDepthTest() { depth = false; GL11.glDisable(GL11.GL_DEPTH_TEST); }
     @Override public void enableBlend() { GL11.glEnable(GL11.GL_BLEND); }
@@ -542,6 +579,12 @@ public final class CleanroomRenderService implements AuiRenderService {
         GL20.glUseProgram(activeShader == null ? 0 : activeShader.program);
         if (activeShader != null) {
             uploadProjection();
+            uniform("ModelViewMat", location -> {
+                Matrix4f modelView = getModelViewMatrix();
+                matrixBuffer.clear();
+                modelView.get(matrixBuffer);
+                GL20.glUniformMatrix4(location, false, matrixBuffer);
+            });
             applyShaderBlend(activeShader);
         }
     }
@@ -562,6 +605,25 @@ public final class CleanroomRenderService implements AuiRenderService {
         if (shader != null) uploadProjection();
     }
     @Override public void setShaderColor(float a, float r, float g, float b) { GL11.glColor4f(r, g, b, a); }
+    @Override
+    public Object getBackgroundShader() {
+        if (!backgroundShaderAttempted) {
+            backgroundShaderAttempted = true;
+            backgroundShader = compileShader("background", "background");
+        }
+        return backgroundShader;
+    }
+
+    @Override
+    public RenderStateScope pushBackgroundTarget(FboHandle target) {
+        return LegacyBackgroundTarget.open(this, target);
+    }
+
+    @Override
+    public void destroyBackgroundTarget(FboHandle target) {
+        LegacyBackgroundTarget.destroy(this, target);
+    }
+
     @Override public Object getFilterShader() {
         ShaderHandle current = filterShader;
         if (current != null) return current;
@@ -849,7 +911,7 @@ public final class CleanroomRenderService implements AuiRenderService {
         final int srcRgb, dstRgb, srcAlpha, dstAlpha;
         final int activeTexture;
         final int texture0, texture1;
-        final int framebuffer;
+        final int drawFramebuffer, readFramebuffer;
         final int viewportX, viewportY, viewportWidth, viewportHeight;
         final int program;
         final Matrix4f projection;
@@ -857,7 +919,7 @@ public final class CleanroomRenderService implements AuiRenderService {
         private RenderStateSnapshot(boolean blend, boolean depthTest, boolean cull, boolean scissor,
                                     boolean stencil, boolean texture2d, boolean depthMask, int depthFunc,
                                     int srcRgb, int dstRgb, int srcAlpha, int dstAlpha,
-                                    int activeTexture, int texture0, int texture1, int framebuffer,
+                                    int activeTexture, int texture0, int texture1, int drawFramebuffer, int readFramebuffer,
                                     int viewportX, int viewportY, int viewportWidth, int viewportHeight,
                                     int program, Matrix4f projection) {
             this.blend = blend; this.depthTest = depthTest; this.cull = cull;
@@ -865,7 +927,8 @@ public final class CleanroomRenderService implements AuiRenderService {
             this.depthMask = depthMask;
             this.depthFunc = depthFunc; this.srcRgb = srcRgb; this.dstRgb = dstRgb;
             this.srcAlpha = srcAlpha; this.dstAlpha = dstAlpha; this.activeTexture = activeTexture;
-            this.texture0 = texture0; this.texture1 = texture1; this.framebuffer = framebuffer;
+            this.texture0 = texture0; this.texture1 = texture1;
+            this.drawFramebuffer = drawFramebuffer; this.readFramebuffer = readFramebuffer;
             this.viewportX = viewportX; this.viewportY = viewportY;
             this.viewportWidth = viewportWidth; this.viewportHeight = viewportHeight;
             this.program = program; this.projection = projection;
@@ -878,7 +941,8 @@ public final class CleanroomRenderService implements AuiRenderService {
             GL13.glActiveTexture(GL13.GL_TEXTURE1);
             int texture1 = GL11.glGetInteger(GL11.GL_TEXTURE_BINDING_2D);
             GL13.glActiveTexture(active);
-            int framebuffer = GL11.glGetInteger(GL30.GL_FRAMEBUFFER_BINDING);
+            int drawFramebuffer = GL11.glGetInteger(GL30.GL_DRAW_FRAMEBUFFER_BINDING);
+            int readFramebuffer = GL11.glGetInteger(GL30.GL_READ_FRAMEBUFFER_BINDING);
             IntBuffer viewport = service.viewportScratch;
             viewport.clear();
             GL11.glGetInteger(GL11.GL_VIEWPORT, viewport);
@@ -890,14 +954,15 @@ public final class CleanroomRenderService implements AuiRenderService {
                     GL11.glGetInteger(GL11.GL_DEPTH_FUNC),
                     GL11.glGetInteger(GL14.GL_BLEND_SRC_RGB), GL11.glGetInteger(GL14.GL_BLEND_DST_RGB),
                     GL11.glGetInteger(GL14.GL_BLEND_SRC_ALPHA), GL11.glGetInteger(GL14.GL_BLEND_DST_ALPHA),
-                    active, texture0, texture1, framebuffer,
+                    active, texture0, texture1, drawFramebuffer, readFramebuffer,
                     viewport.get(0), viewport.get(1), viewport.get(2), viewport.get(3),
                     GL11.glGetInteger(GL20.GL_CURRENT_PROGRAM), new Matrix4f(service.projection)
             );
         }
 
         void restore(CleanroomRenderService service) {
-            GL30.glBindFramebuffer(GL30.GL_FRAMEBUFFER, framebuffer);
+            GL30.glBindFramebuffer(GL30.GL_DRAW_FRAMEBUFFER, drawFramebuffer);
+            GL30.glBindFramebuffer(GL30.GL_READ_FRAMEBUFFER, readFramebuffer);
             setEnabled(GL11.GL_BLEND, blend);
             setEnabled(GL11.GL_DEPTH_TEST, depthTest);
             setEnabled(GL11.GL_CULL_FACE, cull);
@@ -916,6 +981,7 @@ public final class CleanroomRenderService implements AuiRenderService {
             service.projection = new Matrix4f(projection);
             GL20.glUseProgram(program);
             service.activeShader = null;
+            service.syncCachedStateFromGl();
         }
 
         private static void setEnabled(int capability, boolean enabled) {

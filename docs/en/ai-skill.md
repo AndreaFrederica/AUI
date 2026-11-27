@@ -8,7 +8,7 @@ Setting the tone first: AUI pages are plain HTML/CSS/JS. Most commonly used brow
 
 AUI lets you build Minecraft UIs with HTML/CSS/JS. It is not an embedded browser: HTML parsing, CSS layout, and rendering are a self-built engine. Targets that support page scripts use Rhino (`var` + plain `function` is the safest style). One HTML file is parsed into one Document, which is placed into one of four hosts for display.
 
-**First confirm the loader and Minecraft version**: page scripts and KubeJS bindings are not available on every target. Forge 1.20.1 and NeoForge 1.21.1 support page scripts and the `ApricityUI` KubeJS bindings; NeoForge 26.1 supports page scripts but has no KubeJS bindings; Fabric 1.20.1, 1.21.1, and 26.1 currently execute no page scripts and provide no KubeJS bindings. HTML/CSS still render without page scripts, but JS-dependent interactions will not run. See the [overview](guide/overview#loader-and-script-support) for the full matrix.
+**First confirm the loader and Minecraft version**: page scripts and KubeJS bindings are not available on every target. Forge 1.20.1 and NeoForge 1.21.1 support page scripts and the `ApricityUI` KubeJS bindings; NeoForge 26.1 supports page scripts but has no KubeJS bindings; Fabric 1.20.1, 1.21.1, and 26.1 currently execute no page scripts and provide no KubeJS bindings. Page scripts run on KubeJS when it is installed, otherwise on the standalone Rhino runtime, and are skipped (pages still render) when neither is present. HTML/CSS still render without page scripts, but JS-dependent interactions will not run. See the [overview](guide/overview#loader-and-script-support) for the full matrix.
 
 The resource manager, DevTools, and resource reload each have an MC key action, and **all are unbound by default**. Bind them in Minecraft's Controls settings before use; Left Alt is bound by default to release the mouse while held. This guide refers to the actions by name rather than assuming specific keys.
 
@@ -47,7 +47,9 @@ Placed in `<head>`, read only at page creation and refresh:
 ```
 
 - **aui-viewport**: `mode` defaults to `browser` (follows the window; first choice for Screen); `mode=fixed,width=N,height=N` fixed logical size (**WorldWindow must use this**, otherwise the default 1920 width makes the panel enormous in the world); `mode=gui` follows MC GUI scale (for compatibility with old pages). Zoom parameters `zoom/min-zoom/max-zoom/zoom-step/user-scalable` are optional; `user-scalable=false` disables Ctrl+wheel / Ctrl+`+`/`-` / Ctrl+`0` zoom;
-- **aui-mouse-events**: the page only intercepts the mouse if you write `intercept`. **Any page with interactive elements must set it**, otherwise clicks fall through to the game instead of the page; purely presentational Overlays should not set it (let clicks pass through).
+- **aui-mouse-events**: the page only intercepts the mouse if you write `intercept`. **Any page with interactive elements must set it**, otherwise clicks fall through to the game instead of the page; purely presentational Overlays should not set it (let clicks pass through);
+- **aui-hyphen-break** (optional): `content=none` disables automatic wrapping after `-`, useful for numbering or version strings that should stay intact; enabled by default;
+- **aui-preload** (optional): with `<meta name="aui-preload">`, the page is parsed and its styles precompiled during startup/resource-rescan scans, making the first open faster; without it, the page is built lazily on first open.
 
 ## Step 4: Choose a Host
 
@@ -90,17 +92,20 @@ function init() {
 document.addEventListener("DOMContentLoaded", init);
 ```
 
-**A few differences in the JS environment**: the keyboard modifier is `controlKey`, not `ctrlKey`; event coordinates are already page logical coordinates — **do not multiply** them by any scale factor; `fetch(url)` only supports single-argument GET, and `response.json()` is called synchronously inside `then`; there is no WebGL/XHR/WebSocket/full Promise. DOM query and mutation, event capture and bubbling, localStorage, Canvas 2D, timers, ResizeObserver/MutationObserver are all available.
+**A few differences in the JS environment**: the keyboard modifier is `controlKey`, not `ctrlKey`; event coordinates are already page logical coordinates — **do not multiply** them by any scale factor; `fetch(url)` only supports single-argument GET, and `response.json()` is called synchronously inside `then`; there is no WebGL/XHR/WebSocket/full Promise. DOM query and mutation, event capture and bubbling, localStorage, Canvas 2D, timers, ResizeObserver/IntersectionObserver/MutationObserver are all available. IntersectionObserver is delivered asynchronously after document-frame commits and supports root/rootMargin/scrollMargin/threshold, trackVisibility, and delay. Cross-Document/cross-origin observation is unavailable, and complex compositor occlusion is not guaranteed to be pixel-perfect.
 
 **Extended elements** (MC-oriented tags beyond the standard ones; all are ordinary DOM elements, and all must be given CSS width and height):
 
 | Need | Syntax | Key points |
 | --- | --- | --- |
-| Game textures | `<texture src="minecraft:textures/item/diamond.png">` | src is a ResourceLocation; `blur="true"` blurs |
+| Game textures | `<texture src="minecraft:textures/item/diamond.png">` | src is a ResourceLocation; sampling follows `image-rendering` (smooth by default, `pixelated` for pixel art) |
 | Atlas frame animation | `<sprite src="images/coin.png" steps="8" direction="right" duration="640ms" loop="infinite">` | src is a logical path; direction is the atlas layout direction |
 | Localized text | `<translation>item.minecraft.diamond</translation>` | Follows the game language; no parameter interpolation |
 | Vector icons | `<svg viewBox="0 0 24 24"><path d="..." fill="currentColor"></path></svg>` | Supports basic shapes and path; no gradients/defs/transform |
 | Scripted drawing | `<canvas>` | 2D context, API close to the browser's |
+| Theme switching | `<theme-switcher></theme-switcher>` | Floating draggable button in the bottom-right corner; opens a picker listing the built-in themes (`/apricityui/theme/<name>/<name>.css`). Picking one reskins the page and dispatches a bubbling `aui-theme-change` (`detail` is the theme id). It carries its own styles and needs no CSS from the page. Write the paired tag — an HTML parser ignores the self-closing slash on custom tags and would swallow the rest of the page |
+
+**Markdown**: to display Markdown in a page, render it with `ApricityUI.renderMarkdown(md)` and assign the HTML to `innerHTML` (on the Java side, `com.sighs.apricityui.util.Markdown.render`); don't wire up another parser. For untrusted content use `renderMarkdownSafe`, but it only escapes a few container tags and is not a sanitizer. AUI has no default heading/list styles, so add CSS for the result.
 
 **Ore theme**: a built-in MC-style CSS theme (pixel borders, dark surfaces, green/purple/gold accents). One include line gives you a full set of component styles — **don't write styles from scratch**:
 
@@ -152,7 +157,7 @@ Rules:
 - Slots opened UI-only (`screen(path)`) are all display-type — **a real container must be opened server-side with `menu(player, path).bind(b -> b.blockEntity(pos).player())`**;
 - The shift-click direction is determined by the server-side bind order (the first non-player bind is primary); the HTML `primary="true"` cannot change that;
 - After a non-player binding, chain `.slot("slot.fuel").filter(FilterUtil)` to restrict insertion into slots matched by an existing CSS selector; `#fuel` and `slot[slot-index="0"]` are also valid, and an HTML id is not required. `player()` exposes neither `slot(...)` nor a filter API. `FilterUtil` provides `ANY`, `NONE`, `EMPTY`, `item`, `tag`, `custom`, `allOf`, `anyOf`, `not`, plus `and` / `or` / `negate` composition. Filtering affects only the current menu's insertion path and still obeys underlying inventory restrictions;
-- `<recipe type="crafting_shaped">recipeID</recipe>` generates a recipe preview — purely presentational, occupies no slot; see [Minecraft Item and Recipe Elements](guide/mc-elements) for item expressions and supported recipe types.
+- `<recipe type="crafting_shaped">minecraft:iron_ingot</recipe>` matches an output item ID and type, cycling through matching recipes every second and pausing on hover. It is presentational and occupies no menu slot; see [Minecraft Item and Recipe Elements](guide/mc-elements) for item expressions and supported recipe types.
 
 ## Step 7: Debugging (Focus: Features the Mod Provides for AI Debugging)
 

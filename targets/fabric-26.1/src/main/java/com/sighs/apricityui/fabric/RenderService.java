@@ -4,6 +4,7 @@ import com.mojang.blaze3d.ProjectionType;
 import com.mojang.blaze3d.buffers.GpuBuffer;
 import com.mojang.blaze3d.buffers.GpuBufferSlice;
 import com.mojang.blaze3d.buffers.Std140Builder;
+import com.mojang.blaze3d.opengl.GlStateManager;
 import com.mojang.blaze3d.pipeline.RenderPipeline;
 import com.mojang.blaze3d.pipeline.RenderTarget;
 import com.mojang.blaze3d.pipeline.TextureTarget;
@@ -14,8 +15,10 @@ import com.mojang.blaze3d.systems.RenderSystem;
 import com.mojang.blaze3d.systems.RenderSystem.AutoStorageIndexBuffer;
 import com.mojang.blaze3d.systems.ScissorState;
 import com.mojang.blaze3d.textures.FilterMode;
+import com.mojang.blaze3d.textures.GpuSampler;
 import com.mojang.blaze3d.textures.GpuTexture;
 import com.mojang.blaze3d.textures.GpuTextureView;
+import net.minecraft.client.gui.GuiGraphicsExtractor;
 import com.mojang.blaze3d.vertex.BufferBuilder;
 import com.mojang.blaze3d.vertex.ByteBufferBuilder;
 import com.mojang.blaze3d.vertex.DefaultVertexFormat;
@@ -31,8 +34,11 @@ import com.sighs.apricityui.spi.MeshBuilder;
 import com.sighs.apricityui.spi.MeshFormat;
 import com.sighs.apricityui.spi.MeshMode;
 import com.sighs.apricityui.spi.RenderHandle;
+
+import java.nio.ByteBuffer;
 import java.util.OptionalDouble;
 import java.util.OptionalInt;
+
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.renderer.MultiBufferSource;
 import net.minecraft.client.renderer.ProjectionMatrixBuffer;
@@ -43,7 +49,9 @@ import net.minecraft.resources.Identifier;
 import org.joml.Matrix4f;
 import org.joml.Vector3f;
 import org.joml.Vector4f;
+import org.lwjgl.BufferUtils;
 import org.lwjgl.opengl.GL11;
+import org.lwjgl.opengl.GL30;
 
 /**
  * Fabric 26.1 render bridge.
@@ -73,8 +81,13 @@ public final class RenderService implements AuiRenderService {
     public static final RenderService INSTANCE = new RenderService();
 
     private final Matrix4f projection = new Matrix4f();
+    private final GpuTextureView[] samplers = new GpuTextureView[8];
+    private final ByteBufferBuilder meshByteBuffer = new ByteBufferBuilder(786432);
+    /**
+     * One-pixel staging buffer for {@link #resolveBlitDestination(int, int, int)}.
+     */
+    private final ByteBuffer blitResolveScratch = BufferUtils.createByteBuffer(4);
     private ProjectionMatrixBuffer projectionBuffer;
-
     private boolean depthTest;
     private int depthFunc = GL11.GL_LEQUAL;
     private boolean depthMask = true;
@@ -88,19 +101,15 @@ public final class RenderService implements AuiRenderService {
     private float biasScale;
     private float biasUnits;
     private int colorWriteMask = 0xF;
-
     private RenderPipeline currentShader;
-    private final GpuTextureView[] samplers = new GpuTextureView[8];
     private GpuBuffer filterVertexBuffer;
     private long filterVertexCapacity;
     private GpuBuffer filterUniformBuffer;
-    private final ByteBufferBuilder meshByteBuffer = new ByteBufferBuilder(786432);
     private int blitReadFbo;
     private int blitDrawFbo;
-
     // 26.1 stores custom shader values in std140 blocks instead of the old
     // per-uniform ShaderInstance setters. These fields mirror the FilterParams
-    // block (9 vec4s) consumed by the filter/filter_blur fragment shaders.
+    // block (10 vec4s) consumed by the filter/filter_blur fragment shaders.
     private float brightness = 1.0f;
     private float contrast = 1.0f;
     private float saturate = 1.0f;
@@ -133,11 +142,25 @@ public final class RenderService implements AuiRenderService {
     private float clipRadiusTopRight;
     private float clipRadiusBottomRight;
     private float clipRadiusBottomLeft;
+    private float clipRadiusTopLeftY;
+    private float clipRadiusTopRightY;
+    private float clipRadiusBottomRightY;
+    private float clipRadiusBottomLeftY;
     private float directionX;
     private float directionY;
     private float blendMode;
 
     private RenderService() {
+    }
+
+    @Override
+    public Matrix4f getModelViewMatrix() {
+        return RenderSystem.getModelViewMatrix();
+    }
+
+    @Override
+    public Matrix4f getProjectionMatrix() {
+        return new Matrix4f(projection);
     }
 
     @Override
@@ -148,17 +171,39 @@ public final class RenderService implements AuiRenderService {
     }
 
     @Override
-    public Matrix4f getProjectionMatrix() {
-        return new Matrix4f(projection);
+    public void enableDepthTest() {
+        depthTest = true;
     }
 
-    @Override public void enableDepthTest() { depthTest = true; }
-    @Override public void disableDepthTest() { depthTest = false; }
-    @Override public void setDepthFunc(int func) { depthFunc = func; }
-    @Override public void setDepthMask(boolean write) { depthMask = write; }
-    @Override public boolean isDepthTestEnabled() { return depthTest; }
-    @Override public boolean isDepthMaskEnabled() { return depthMask; }
-    @Override public void enableBlend() { blend = true; }
+    @Override
+    public void disableDepthTest() {
+        depthTest = false;
+    }
+
+    @Override
+    public void setDepthFunc(int func) {
+        depthFunc = func;
+    }
+
+    @Override
+    public void setDepthMask(boolean write) {
+        depthMask = write;
+    }
+
+    @Override
+    public boolean isDepthTestEnabled() {
+        return depthTest;
+    }
+
+    @Override
+    public boolean isDepthMaskEnabled() {
+        return depthMask;
+    }
+
+    @Override
+    public void enableBlend() {
+        blend = true;
+    }
 
     @Override
     public void setBlendFunc(int srcFactor, int dstFactor) {
@@ -178,30 +223,71 @@ public final class RenderService implements AuiRenderService {
         this.dstAlpha = dstAlpha;
     }
 
-    @Override public void disableBlend() { blend = false; }
-    @Override public void enableCull() { cull = true; }
-    @Override public void disableCull() { cull = false; }
-    @Override public boolean isCullEnabled() { return cull; }
-    @Override public void enablePolygonOffset() { polygonOffset = true; }
-    @Override public void disablePolygonOffset() { polygonOffset = false; }
-    @Override public void polygonOffset(float factor, float units) { biasScale = factor; biasUnits = units; }
+    @Override
+    public void disableBlend() {
+        blend = false;
+    }
 
-    @Override public void enableScissorTest() { }
+    @Override
+    public void enableCull() {
+        cull = true;
+    }
+
+    @Override
+    public void disableCull() {
+        cull = false;
+    }
+
+    @Override
+    public boolean isCullEnabled() {
+        return cull;
+    }
+
+    @Override
+    public void enablePolygonOffset() {
+        polygonOffset = true;
+    }
+
+    @Override
+    public void disablePolygonOffset() {
+        polygonOffset = false;
+    }
+
+    @Override
+    public void polygonOffset(float factor, float units) {
+        biasScale = factor;
+        biasUnits = units;
+    }
+
+    @Override
+    public void enableScissorTest() {
+    }
 
     @Override
     public void scissorBox(int x, int y, int width, int height) {
         RenderSystem.enableScissorForRenderTypeDraws(x, y, width, height);
     }
 
-    @Override public void disableScissorTest() { RenderSystem.disableScissorForRenderTypeDraws(); }
+    @Override
+    public void disableScissorTest() {
+        RenderSystem.disableScissorForRenderTypeDraws();
+    }
 
     // ------------------------------------------------------------------
     // Stencil — unsupported on this loader; see clearStencilBuffer below
     // ------------------------------------------------------------------
 
-    @Override public void enableStencilTest() { }
-    @Override public void disableStencilTest() { }
-    @Override public void setStencilMask(int mask) { }
+    @Override
+    public void enableStencilTest() {
+    }
+
+    @Override
+    public void disableStencilTest() {
+    }
+
+    @Override
+    public void setStencilMask(int mask) {
+    }
 
     @Override
     public void setStencilFunc(int func, int ref, int mask) {
@@ -221,6 +307,17 @@ public final class RenderService implements AuiRenderService {
      */
     @Override
     public void clearStencilBuffer() {
+    }
+
+    @Override
+    public void clearDepthBuffer() {
+        RenderTarget target = OutputTargets.currentTarget();
+        GpuTexture depthTexture = RenderSystem.outputDepthTextureOverride != null
+                ? RenderSystem.outputDepthTextureOverride.texture()
+                : (target == null ? Minecraft.getInstance().getMainRenderTarget() : target).getDepthTexture();
+        if (depthTexture != null) {
+            RenderSystem.getDevice().createCommandEncoder().clearDepthTexture(depthTexture, 1.0);
+        }
     }
 
     @Override
@@ -268,7 +365,9 @@ public final class RenderService implements AuiRenderService {
 
     @Override
     public void flushSharedBuffers() {
-        Minecraft.getInstance().renderBuffers().bufferSource().endBatch();
+        try (var ignored = OutputTargets.pushBufferTarget(Minecraft.getInstance().getMainRenderTarget())) {
+            Minecraft.getInstance().renderBuffers().bufferSource().endBatch();
+        }
         // 计入帧统计：逐物品绘制会成倍放大这里的调用次数（issue #95 的观测指标）
         RenderBatchStats.recordSharedFlush();
     }
@@ -282,15 +381,37 @@ public final class RenderService implements AuiRenderService {
         currentShader = (RenderPipeline) shader;
     }
 
-    @Override public void setPositionColorShader() { currentShader = null; }
-    @Override public void setShaderColor(float a, float r, float g, float b) { }
-    @Override public Object getFilterShader() { return PipelineRegistry.getFilter(); }
-    @Override public Object getFilterBlurShader() { return PipelineRegistry.getFilterBlur(); }
-    @Override public Object getFilterBlendShader() { return PipelineRegistry.getFilterBlend(); }
-    @Override public Object getFilterMaskShader(boolean luminance) {
+    @Override
+    public void setPositionColorShader() {
+        currentShader = null;
+    }
+
+    @Override
+    public void setShaderColor(float a, float r, float g, float b) {
+    }
+
+    @Override
+    public Object getFilterShader() {
+        return PipelineRegistry.getFilter();
+    }
+
+    @Override
+    public Object getFilterBlurShader() {
+        return PipelineRegistry.getFilterBlur();
+    }
+
+    @Override
+    public Object getFilterBlendShader() {
+        return PipelineRegistry.getFilterBlend();
+    }
+
+    @Override
+    public Object getFilterMaskShader(boolean luminance) {
         return luminance ? PipelineRegistry.getFilterMaskLum() : PipelineRegistry.getFilterMask();
     }
-    @Override public Object getFilterMaskMergeShader(MaskCompositeOp op) {
+
+    @Override
+    public Object getFilterMaskMergeShader(MaskCompositeOp op) {
         return switch (op) {
             case INTERSECT -> PipelineRegistry.getFilterMaskIntersect();
             case SUBTRACT -> PipelineRegistry.getFilterMaskSubtract();
@@ -314,42 +435,121 @@ public final class RenderService implements AuiRenderService {
             case "DynamicRangeLimit" -> dynamicRangeLimit = value;
             case "Radius" -> radius = value;
             case "BlendMode" -> blendMode = value;
-            default -> { }
+            default -> {
+            }
         }
     }
 
     @Override
     public void setShaderUniform2f(String name, float a, float b) {
         switch (name) {
-            case "ShadowOffset" -> { shadowOffsetX = a; shadowOffsetY = b; }
-            case "UvPerGuiPixel" -> { uvPerGuiX = a; uvPerGuiY = b; }
-            case "GuiSize" -> { guiWidth = a; guiHeight = b; }
-            case "InSize" -> { inputWidth = a; inputHeight = b; }
-            case "Direction" -> { directionX = a; directionY = b; }
-            default -> { }
+            case "ShadowOffset" -> {
+                shadowOffsetX = a;
+                shadowOffsetY = b;
+            }
+            case "UvPerGuiPixel" -> {
+                uvPerGuiX = a;
+                uvPerGuiY = b;
+            }
+            case "GuiSize" -> {
+                guiWidth = a;
+                guiHeight = b;
+            }
+            case "InSize" -> {
+                inputWidth = a;
+                inputHeight = b;
+            }
+            case "Direction" -> {
+                directionX = a;
+                directionY = b;
+            }
+            default -> {
+            }
         }
     }
 
-    @Override public void setShaderUniform3f(String name, float a, float b, float c) { }
+    @Override
+    public void setShaderUniform3f(String name, float a, float b, float c) {
+    }
+
+    private final com.sighs.apricityui.render.BackgroundUniforms backgroundUniforms = new com.sighs.apricityui.render.BackgroundUniforms();
+    private GpuBuffer backgroundUniformBuffer;
+
+    @Override
+    public Object getBackgroundShader() {
+        return BackgroundPipelines.shader();
+    }
+
+    @Override
+    public RenderStateScope pushBackgroundTarget(FboHandle target) {
+        RenderTarget previousTarget = OutputTargets.currentTarget();
+        RenderStateScope state = pushFilterRenderState();
+        ScissorState scissor = RenderSystem.getScissorStateForRenderTypeDraws();
+        boolean clipped = scissor.enabled();
+        int x = scissor.x(), y = scissor.y(), w = scissor.width(), h = scissor.height();
+        var modelView = RenderSystem.getModelViewStack();
+        modelView.pushMatrix();
+        modelView.identity();
+        if (target != null) bindWrite(target, true);
+        disableScissorTest();
+        return () -> {
+            OutputTargets.setCurrent(previousTarget);
+            modelView.popMatrix();
+            if (clipped) RenderSystem.enableScissorForRenderTypeDraws(x, y, w, h);
+            else RenderSystem.disableScissorForRenderTypeDraws();
+            state.close();
+        };
+    }
+
+    private GpuBuffer updateBackgroundUniforms() {
+        int size = com.sighs.apricityui.render.BackgroundUniforms.VECTOR_COUNT * 16;
+        GpuDevice device = RenderSystem.getDevice();
+        if (backgroundUniformBuffer == null) {
+            backgroundUniformBuffer = device.createBuffer(() -> "apricityui_background_uniforms",
+                    GpuBuffer.USAGE_UNIFORM | GpuBuffer.USAGE_MAP_WRITE, size);
+        }
+        try (GpuBuffer.MappedView mapped = device.createCommandEncoder().mapBuffer(backgroundUniformBuffer, false, true)) {
+            backgroundUniforms.write(mapped.data());
+        }
+        return backgroundUniformBuffer;
+    }
 
     @Override
     public void setShaderUniform4f(String name, float a, float b, float c, float d) {
+        if (backgroundUniforms.set(name, a, b, c, d)) return;
         switch (name) {
             case "ShadowColor" -> {
-                shadowColorR = a; shadowColorG = b; shadowColorB = c; shadowColorA = d;
+                shadowColorR = a;
+                shadowColorG = b;
+                shadowColorB = c;
+                shadowColorA = d;
             }
             case "ClipRect" -> {
-                clipX = a; clipY = b; clipWidth = c; clipHeight = d;
+                clipX = a;
+                clipY = b;
+                clipWidth = c;
+                clipHeight = d;
             }
             case "ClipRadii" -> {
-                clipRadiusTopLeft = a; clipRadiusTopRight = b;
-                clipRadiusBottomRight = c; clipRadiusBottomLeft = d;
+                clipRadiusTopLeft = a;
+                clipRadiusTopRight = b;
+                clipRadiusBottomRight = c;
+                clipRadiusBottomLeft = d;
             }
-            default -> { }
+            case "ClipRadiiY" -> {
+                clipRadiusTopLeftY = a;
+                clipRadiusTopRightY = b;
+                clipRadiusBottomRightY = c;
+                clipRadiusBottomLeftY = d;
+            }
+            default -> {
+            }
         }
     }
 
-    @Override public void setShaderUniformI(String name, int value) { }
+    @Override
+    public void setShaderUniformI(String name, int value) {
+    }
 
     // ------------------------------------------------------------------
     // Immediate meshes
@@ -360,8 +560,8 @@ public final class RenderService implements AuiRenderService {
         VertexFormat vertexFormat = format == MeshFormat.POSITION
                 ? DefaultVertexFormat.POSITION
                 : format == MeshFormat.POSITION_TEX
-                ? DefaultVertexFormat.POSITION_TEX
-                : DefaultVertexFormat.POSITION_COLOR;
+                  ? DefaultVertexFormat.POSITION_TEX
+                  : DefaultVertexFormat.POSITION_COLOR;
         VertexFormat.Mode vertexMode = mode == MeshMode.QUADS
                 ? VertexFormat.Mode.QUADS
                 : VertexFormat.Mode.TRIANGLES;
@@ -398,11 +598,15 @@ public final class RenderService implements AuiRenderService {
                 drawWithPass(currentShader, meshData);
             } else {
                 MeshData.DrawState state = meshData.drawState();
-                RenderType type = PipelineCache.renderType(
+                // Draw through an explicit pass so the mesh follows AUI's logical
+                // target; a RenderType draw would be redirected to the picture-in-
+                // picture output while the overlay renders, leaving every offscreen
+                // compositing group (filter/opacity/mask/blend) empty.
+                RenderPipeline pipeline = PipelineCache.pipeline(
                         state.format(), state.mode(), depthTest, depthFunc, depthMask, blend,
                         srcRgb, dstRgb, srcAlpha, dstAlpha, cull, polygonOffset, biasScale, biasUnits,
                         colorWriteMask);
-                type.draw(meshData);
+                drawWithPass(pipeline, meshData);
             }
         } finally {
             meshData.close();
@@ -415,6 +619,14 @@ public final class RenderService implements AuiRenderService {
      * the std140 {@code FilterParams} block and the Sampler0/Sampler1 views.
      */
     private void drawWithPass(RenderPipeline pipeline, MeshData meshData) {
+        boolean backgroundPipeline = currentShader == BackgroundPipelines.shader();
+        if (backgroundPipeline) {
+            MeshData.DrawState draw = meshData.drawState();
+            pipeline = BackgroundPipelines.adapt(PipelineCache.pipeline(
+                    draw.format(), draw.mode(), depthTest, depthFunc, depthMask, blend,
+                    srcRgb, dstRgb, srcAlpha, dstAlpha, cull, polygonOffset, biasScale, biasUnits,
+                    colorWriteMask));
+        }
         boolean filterPipeline = pipeline == PipelineRegistry.getFilter()
                 || pipeline == PipelineRegistry.getFilterBlur()
                 || pipeline == PipelineRegistry.getFilterBlend();
@@ -449,7 +661,8 @@ public final class RenderService implements AuiRenderService {
 
         // 26.1 keeps the command encoder occupied while a render pass is open;
         // upload the std140 block before creating the pass.
-        GpuBuffer uniforms = filterPipeline ? updateFilterUniforms(device) : null;
+        GpuBuffer uniforms = backgroundPipeline ? updateBackgroundUniforms()
+                : filterPipeline ? updateFilterUniforms(device) : null;
         GpuBufferSlice transforms = RenderSystem.getDynamicUniforms().writeTransform(
                 RenderSystem.getModelViewMatrix(),
                 new Vector4f(1, 1, 1, 1), new Vector3f(), new Matrix4f());
@@ -459,13 +672,17 @@ public final class RenderService implements AuiRenderService {
                 depthView, OptionalDouble.empty());
         try {
             pass.setPipeline(pipeline);
-            if (uniforms != null) pass.setUniform("FilterParams", uniforms);
+            if (uniforms != null) pass.setUniform(backgroundPipeline ? "BackgroundParams" : "FilterParams", uniforms);
             if (scissor.enabled()) {
                 pass.enableScissor(scissor.x(), scissor.y(), scissor.width(), scissor.height());
             }
             RenderSystem.bindDefaultUniforms(pass);
             pass.setUniform("DynamicTransforms", transforms);
-            if (samplers[0] != null) {
+            MeshData.DrawState state = meshData.drawState();
+            // Only textured meshes may sample Sampler0; a leftover view from an
+            // earlier image/filter pass would otherwise tint plain colour meshes.
+            boolean textured = state.format() == DefaultVertexFormat.POSITION_TEX;
+            if (textured && samplers[0] != null) {
                 pass.bindTexture("Sampler0", samplers[0],
                         RenderSystem.getSamplerCache().getClampToEdge(FilterMode.LINEAR));
             }
@@ -474,7 +691,6 @@ public final class RenderService implements AuiRenderService {
                         RenderSystem.getSamplerCache().getClampToEdge(FilterMode.LINEAR));
             }
             pass.setVertexBuffer(0, filterVertexBuffer);
-            MeshData.DrawState state = meshData.drawState();
             AutoStorageIndexBuffer indices = RenderSystem.getSequentialBuffer(state.mode());
             pass.setIndexBuffer(indices.getBuffer(state.indexCount()), indices.type());
             pass.drawIndexed(0, 0, state.indexCount(), 1);
@@ -484,7 +700,7 @@ public final class RenderService implements AuiRenderService {
     }
 
     private GpuBuffer updateFilterUniforms(GpuDevice device) {
-        final int size = 9 * 16;
+        final int size = 10 * 16;
         if (filterUniformBuffer == null || filterUniformBuffer.size() < size) {
             if (filterUniformBuffer != null) filterUniformBuffer.close();
             filterUniformBuffer = device.createBuffer(
@@ -504,6 +720,8 @@ public final class RenderService implements AuiRenderService {
                     .putVec4(clipX, clipY, clipWidth, clipHeight)
                     .putVec4(clipRadiusTopLeft, clipRadiusTopRight,
                             clipRadiusBottomRight, clipRadiusBottomLeft)
+                    .putVec4(clipRadiusTopLeftY, clipRadiusTopRightY,
+                            clipRadiusBottomRightY, clipRadiusBottomLeftY)
                     .putVec4(directionX, directionY, 0.0f, 0.0f)
                     .putVec4(contrast, saturate, sepia, dynamicRangeLimit)
                     .get();
@@ -532,7 +750,11 @@ public final class RenderService implements AuiRenderService {
     public void emitTextureQuad(Object batch, Matrix4f mat, float x, float y, float width, float height,
                                 float u0, float v0, float u1, float v1, int colorArgb) {
         TextureBatchHandle handle = (TextureBatchHandle) batch;
-        VertexConsumer consumer = handle.source().getBuffer(handle.renderType());
+        VertexConsumer consumer;
+        // Switching shared RenderTypes may submit the previous batch here.
+        try (var ignored = OutputTargets.pushBufferTarget(Minecraft.getInstance().getMainRenderTarget())) {
+            consumer = handle.source().getBuffer(handle.renderType());
+        }
         int a = (colorArgb >>> 24) & 0xFF;
         int r = (colorArgb >>> 16) & 0xFF;
         int g = (colorArgb >>> 8) & 0xFF;
@@ -550,7 +772,9 @@ public final class RenderService implements AuiRenderService {
     @Override
     public void flushTextureBatch(Object batch, RenderHandle render) {
         TextureBatchHandle handle = (TextureBatchHandle) batch;
-        handle.source().endBatch(handle.renderType());
+        try (var ignored = OutputTargets.pushBufferTarget(Minecraft.getInstance().getMainRenderTarget())) {
+            handle.source().endBatch(handle.renderType());
+        }
     }
 
     // ------------------------------------------------------------------
@@ -623,44 +847,28 @@ public final class RenderService implements AuiRenderService {
     }
 
     @Override
-    public RenderStateScope pushFilterRenderState() {
-        return new PipelineFilterState();
+    public void drawOffscreenTexture(Matrix4f matrix, FboHandle target, float width, float height) {
+        RenderStateScope state = pushFilterRenderState();
+        try {
+            bindColorTexture(target, 0);
+            setPositionColorShader();
+            enableBlend();
+            setBlendFuncSeparate(GL11.GL_ONE, GL11.GL_ONE_MINUS_SRC_ALPHA,
+                    GL11.GL_ONE, GL11.GL_ONE_MINUS_SRC_ALPHA);
+            MeshBuilder mesh = beginMesh(MeshMode.QUADS, MeshFormat.POSITION_TEX);
+            mesh.vertexUV(matrix, 0, height, 0, 0, 1);
+            mesh.vertexUV(matrix, width, height, 0, 1, 1);
+            mesh.vertexUV(matrix, width, 0, 0, 1, 0);
+            mesh.vertexUV(matrix, 0, 0, 0, 0, 0);
+            mesh.submit();
+        } finally {
+            if (state != null) state.close();
+        }
     }
 
-    private final class PipelineFilterState implements RenderStateScope {
-        private final boolean previousDepthTest = depthTest;
-        private final int previousDepthFunc = depthFunc;
-        private final boolean previousDepthMask = depthMask;
-        private final boolean previousBlend = blend;
-        private final int previousSrcRgb = srcRgb;
-        private final int previousDstRgb = dstRgb;
-        private final int previousSrcAlpha = srcAlpha;
-        private final int previousDstAlpha = dstAlpha;
-        private final boolean previousCull = cull;
-        private final RenderPipeline previousShader = currentShader;
-        private final GpuTextureView previousSampler0 = samplers[0];
-        private final GpuTextureView previousSampler1 = samplers[1];
-        private final float previousBlendMode = blendMode;
-        private boolean closed;
-
-        @Override
-        public void close() {
-            if (closed) return;
-            closed = true;
-            depthTest = previousDepthTest;
-            depthFunc = previousDepthFunc;
-            depthMask = previousDepthMask;
-            blend = previousBlend;
-            srcRgb = previousSrcRgb;
-            dstRgb = previousDstRgb;
-            srcAlpha = previousSrcAlpha;
-            dstAlpha = previousDstAlpha;
-            cull = previousCull;
-            currentShader = previousShader;
-            samplers[0] = previousSampler0;
-            samplers[1] = previousSampler1;
-            blendMode = previousBlendMode;
-        }
+    @Override
+    public RenderStateScope pushFilterRenderState() {
+        return new PipelineFilterState();
     }
 
     /**
@@ -679,8 +887,18 @@ public final class RenderService implements AuiRenderService {
      * full-size readback, glMemoryBarrier and glFlush/glFinish all fail to
      * un-stick the sampler cache; only this resolve path works.</p>
      *
+     * <p>The blit's <em>destination</em> needs the same treatment, otherwise nothing
+     * samples it correctly later in the frame: the backdrop's blur and composite
+     * passes then read the target's pre-blit contents (its cleared state) and, since
+     * the backdrop composite promotes the sample to opaque alpha, opaque black gets
+     * painted over the whole element. {@code glMemoryBarrier}, {@code glFlush}/
+     * {@code glFinish}, binding through {@code GlStateManager} and issuing the blit
+     * against vanilla's own attachments all fail to make the write visible;
+     * {@link #resolveBlitDestination(int, int, int)} (one pixel through the read path)
+     * is the only thing that works.</p>
+     *
      * @return true if the blit happened; false if the hardware path is unusable
-     *         and the caller should fall back to the sampling quad.
+     * and the caller should fall back to the sampling quad.
      */
     private boolean blitRegionHardware(GpuTextureView sourceView, GpuTexture sourceTexture,
                                        RenderTarget destination, int srcX0, int srcY0,
@@ -707,12 +925,40 @@ public final class RenderService implements AuiRenderService {
             // 36009 = GL_FRAMEBUFFER, 0x4000 = GL_COLOR_BUFFER_BIT, 0x2601 = GL_LINEAR
             org.lwjgl.opengl.ARBDirectStateAccess.glBlitNamedFramebuffer(
                     readFbo, drawFbo, srcX0, srcY0, srcX1, srcY1, 0, 0, dstW, dstH, 0x4000, 0x2601);
+            resolveBlitDestination(drawFbo, dstW / 2, dstH / 2);
             return true;
         } finally {
             if (previous.enabled()) {
                 RenderSystem.enableScissorForRenderTypeDraws(
                         previous.x(), previous.y(), previous.width(), previous.height());
             }
+        }
+    }
+
+    /**
+     * Pulls one pixel out of a freshly blitted attachment so the driver resolves it
+     * and later sampling in the same frame sees the blit's content.
+     *
+     * <p>Verified on NVIDIA 610.88 / 26.1: without this, the backdrop snapshot stays
+     * invisible to the sampler for the rest of the frame and every
+     * {@code backdrop-filter} element composites opaque black over itself. The same
+     * applies to the engine copies below. Both only run for backdrop/blur/blend
+     * scratch targets, so the readback cost is limited to elements that use
+     * {@code backdrop-filter}, {@code filter} or {@code mix-blend-mode}.</p>
+     *
+     * <p>It has to run on every frame: the failure only shows up once the client runs
+     * at full speed (a frame probe shows byte-identical snapshot calls before and
+     * after the backdrop starts going black), so what is missing is the
+     * attachment-to-sampler dependency itself, not any AUI-side state.</p>
+     */
+    private void resolveBlitDestination(int fbo, int x, int y) {
+        int previousReadFbo = GL11.glGetInteger(GL30.GL_READ_FRAMEBUFFER_BINDING);
+        GlStateManager._glBindFramebuffer(GL30.GL_READ_FRAMEBUFFER, fbo);
+        try {
+            blitResolveScratch.clear();
+            GL11.glReadPixels(x, y, 1, 1, GL11.GL_RGBA, GL11.GL_UNSIGNED_BYTE, blitResolveScratch);
+        } finally {
+            GlStateManager._glBindFramebuffer(GL30.GL_READ_FRAMEBUFFER, previousReadFbo);
         }
     }
 
@@ -724,6 +970,31 @@ public final class RenderService implements AuiRenderService {
     private int blitDrawFbo() {
         if (blitDrawFbo == 0) blitDrawFbo = org.lwjgl.opengl.ARBDirectStateAccess.glCreateFramebuffers();
         return blitDrawFbo;
+    }
+
+    /**
+     * Resolves an offscreen compositing group through the read path so the pass
+     * that samples it next sees the freshly written content. See
+     * {@link AuiRenderService#resolveTarget(FboHandle)}.
+     */
+    @Override
+    public void resolveTarget(FboHandle target) {
+        if (target == null) return;
+        RenderTarget renderTarget = target.as();
+        GpuTexture color = renderTarget.getColorTexture();
+        if (!(color instanceof com.mojang.blaze3d.opengl.GlTexture glColor)) return;
+        int drawFbo = blitDrawFbo();
+        org.lwjgl.opengl.ARBDirectStateAccess.glNamedFramebufferTexture(
+                drawFbo, 36064, glColor.glId(), 0);
+        int halfW = Math.max(0, target.width / 2);
+        int halfH = Math.max(0, target.height / 2);
+        // The group's content is wherever the element sits, so poke a few points
+        // rather than only the centre.
+        resolveBlitDestination(drawFbo, halfW, halfH);
+        resolveBlitDestination(drawFbo, halfW / 2, halfH / 2);
+        resolveBlitDestination(drawFbo, halfW + halfW / 2, halfH + halfH / 2);
+        resolveBlitDestination(drawFbo, halfW / 2, halfH + halfH / 2);
+        resolveBlitDestination(drawFbo, halfW + halfW / 2, halfH / 2);
     }
 
     @Override
@@ -765,6 +1036,17 @@ public final class RenderService implements AuiRenderService {
             RenderSystem.getDevice().createCommandEncoder().copyTextureToTexture(
                     sourceTexture, destinationTexture, boundedSrcX0, boundedSrcY0, 0,
                     0, 0, copyW, copyH);
+            // Same attachment-visibility problem as the hardware blit below: the engine copy
+            // writes through DSA framebuffers, and a later sample of the destination in the
+            // same frame can still read its previous contents (blend/shadow/backdrop sources
+            // then paint stale pixels, e.g. a black rectangle where an element sits). Resolve
+            // the destination before returning.
+            if (destinationTexture instanceof com.mojang.blaze3d.opengl.GlTexture glDst) {
+                int drawFbo = blitDrawFbo();
+                org.lwjgl.opengl.ARBDirectStateAccess.glNamedFramebufferTexture(
+                        drawFbo, 36064, glDst.glId(), 0);
+                resolveBlitDestination(drawFbo, Math.max(0, copyW / 2), Math.max(0, copyH / 2));
+            }
             return;
         }
 
@@ -851,17 +1133,18 @@ public final class RenderService implements AuiRenderService {
         return false;
     }
 
-    // ------------------------------------------------------------------
-    // Textures
-    // ------------------------------------------------------------------
-
     @Override
     public Object createDynamicTexture(String name, Object nativeImage, boolean linear) {
         return new DynamicTexture(() -> name, (NativeImage) nativeImage);
     }
 
-    @Override public void uploadTextureRegion(Object texture, Object nativeImage, int x, int y,
-                                               int width, int height, boolean linear) {
+    // ------------------------------------------------------------------
+    // Textures
+    // ------------------------------------------------------------------
+
+    @Override
+    public void uploadTextureRegion(Object texture, Object nativeImage, int x, int y,
+                                    int width, int height, boolean linear) {
         // 26.1 的 DynamicTexture.upload() 只有"整张重传"这一条路：图集按字形逐个追加时，
         // 每次都会把整页 4096² 重新上传。这里直接拿 GpuTexture 走区域写，代价与区域成正比。
         DynamicTexture dynamic = (DynamicTexture) texture;
@@ -871,7 +1154,36 @@ public final class RenderService implements AuiRenderService {
                 .writeToTexture(gpuTexture, (NativeImage) nativeImage, 0, 0, x, y, width, height, x, y);
     }
 
-    @Override public void closeTexture(Object texture) { ((DynamicTexture) texture).close(); }
+    @Override
+    public boolean uploadTexturePixels(Object texture, ByteBuffer pixels, int byteOffset,
+                                       int x, int y, int width, int height) {
+        GpuTexture gpuTexture = ((DynamicTexture) texture).getTexture();
+        if (gpuTexture == null) return false;
+        pixels.position(byteOffset);
+        RenderSystem.getDevice().createCommandEncoder().writeToTexture(
+                gpuTexture, pixels, NativeImage.Format.RGBA, 0, 0, x, y, width, height);
+        return true;
+    }
+
+    @Override
+    public Object createDynamicTexture(String name, int width, int height, boolean linear) {
+        return new DynamicTexture(() -> name, width, height, true);
+    }
+
+    @Override
+    public void drawScreenTexture(Object graphics, Object texture, Object location,
+                                  int x, int y, int width, int height, float alpha) {
+        GpuTextureView view = ((DynamicTexture) texture).getTextureView();
+        GpuSampler sampler = ((DynamicTexture) texture).getSampler();
+        if (view == null || sampler == null) return;
+        ((GuiGraphicsExtractor) graphics).blit(view, sampler, x, y, width, height,
+                0.0f, 0.0f, 1.0f, 1.0f);
+    }
+
+    @Override
+    public void closeTexture(Object texture) {
+        ((DynamicTexture) texture).close();
+    }
 
     @Override
     public void registerTexture(Object texture, Object location) {
@@ -883,7 +1195,8 @@ public final class RenderService implements AuiRenderService {
         Minecraft.getInstance().getTextureManager().release((Identifier) location);
     }
 
-    @Override public void setImagePixel(Object nativeImage, int x, int y, int pixel) {
+    @Override
+    public void setImagePixel(Object nativeImage, int x, int y, int pixel) {
         ((NativeImage) nativeImage).setPixelABGR(x, y, pixel);
     }
 
@@ -898,5 +1211,42 @@ public final class RenderService implements AuiRenderService {
         }
     }
 
-    private record TextureBatchHandle(MultiBufferSource.BufferSource source, RenderType renderType) { }
+    private record TextureBatchHandle(MultiBufferSource.BufferSource source, RenderType renderType) {
+    }
+
+    private final class PipelineFilterState implements RenderStateScope {
+        private final boolean previousDepthTest = depthTest;
+        private final int previousDepthFunc = depthFunc;
+        private final boolean previousDepthMask = depthMask;
+        private final boolean previousBlend = blend;
+        private final int previousSrcRgb = srcRgb;
+        private final int previousDstRgb = dstRgb;
+        private final int previousSrcAlpha = srcAlpha;
+        private final int previousDstAlpha = dstAlpha;
+        private final boolean previousCull = cull;
+        private final RenderPipeline previousShader = currentShader;
+        private final GpuTextureView previousSampler0 = samplers[0];
+        private final GpuTextureView previousSampler1 = samplers[1];
+        private final float previousBlendMode = blendMode;
+        private boolean closed;
+
+        @Override
+        public void close() {
+            if (closed) return;
+            closed = true;
+            depthTest = previousDepthTest;
+            depthFunc = previousDepthFunc;
+            depthMask = previousDepthMask;
+            blend = previousBlend;
+            srcRgb = previousSrcRgb;
+            dstRgb = previousDstRgb;
+            srcAlpha = previousSrcAlpha;
+            dstAlpha = previousDstAlpha;
+            cull = previousCull;
+            currentShader = previousShader;
+            samplers[0] = previousSampler0;
+            samplers[1] = previousSampler1;
+            blendMode = previousBlendMode;
+        }
+    }
 }

@@ -32,6 +32,23 @@ public final class ApricityUI {
         return Window.window;
     }
 
+    /**
+     * 把可信 Markdown 渲染成 HTML，原始 HTML 原样透传。
+     *
+     * <p>与 {@code ApricityUIClientUtil} 上的同名方法一致：部分 target（26.1）
+     * 的页面脚本全局绑定的是本类，而不是 KJS 绑定类，所以两个入口都要保留。</p>
+     */
+    public static String renderMarkdown(String markdown) {
+        return com.sighs.apricityui.util.Markdown.render(markdown);
+    }
+
+    /**
+     * 用 Txtmark safe mode 渲染 Markdown。只转义少数容器标签，不是 HTML 消毒器。
+     */
+    public static String renderMarkdownSafe(String markdown) {
+        return com.sighs.apricityui.util.Markdown.renderSafe(markdown);
+    }
+
     public static Document ensureDocument(String path) {
         Document result;
         ArrayList<Document> documents = Document.get(path);
@@ -110,7 +127,7 @@ public final class ApricityUI {
 
     /**
      * @deprecated Configure the logical size through {@code aui-viewport} and use
-     *             {@link #createWorldWindow(String, Vec3, int)}.
+     * {@link #createWorldWindow(String, Vec3, int)}.
      */
     @Deprecated
     public static WorldWindow createWorldWindow(String documentPath, Vec3 position, float width, float height, int maxDistance) {
@@ -125,7 +142,9 @@ public final class ApricityUI {
         return window;
     }
 
-    /** Creates and registers a world window with an independent display-distance limit. */
+    /**
+     * Creates and registers a world window with an independent display-distance limit.
+     */
     public static WorldWindow createWorldWindow(String documentPath, Vec3 position,
                                                 int maxDistance, int maxDisplayDistance) {
         WorldWindow window = createWorldWindow(documentPath, position, maxDistance);

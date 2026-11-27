@@ -16,8 +16,15 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfoReturnable;
 
 @Mixin(value = AbstractContainerScreen.class)
 public abstract class AbstractContainerScreenMixin {
-    @Invoker("recalculateQuickCraftRemaining")
-    protected abstract void apricityui$recalculateQuickCraftRemaining();
+    // The 4-int renderSlotHighlight overload is a Forge-added patch method:
+    // it has no SRG name, keeps its literal name in production, and the AP
+    // cannot map it — so remap must stay off for this injector.
+    @Inject(method = "renderSlotHighlight(Lcom/mojang/blaze3d/vertex/PoseStack;IIII)V", at = @At("HEAD"), cancellable = true, remap = false)
+    private static void apricityui$cancelVanillaSlotHighlightLegacy(CallbackInfo ci) {
+        if (Minecraft.getInstance().screen instanceof ApricityContainerScreen<?>) {
+            ci.cancel();
+        }
+    }
 
     // NOTE: no @Shadow members here. The build's refmap only contains method
     // mappings, so shadowed fields (leftPos/topPos) cannot be resolved in a
@@ -25,22 +32,15 @@ public abstract class AbstractContainerScreenMixin {
     // getters below are public members of the target class and reobfuscate
     // like any other method call.
 
+    @Invoker("recalculateQuickCraftRemaining")
+    protected abstract void apricityui$recalculateQuickCraftRemaining();
+
     @Inject(method = "renderSlot", at = @At("HEAD"), cancellable = true)
     private void apricityui$cancelVanillaRenderSlot(PoseStack p_281607_, Slot p_282613_, CallbackInfo ci) {
-        if ((Object) this instanceof ApricityContainerScreen screen) {
+        if ((Object) this instanceof ApricityContainerScreen<?> screen) {
             if (screen.pruneInvalidQuickCraftSlot(p_282613_)) {
                 apricityui$recalculateQuickCraftRemaining();
             }
-            ci.cancel();
-        }
-    }
-
-    // The 4-int renderSlotHighlight overload is a Forge-added patch method:
-    // it has no SRG name, keeps its literal name in production, and the AP
-    // cannot map it — so remap must stay off for this injector.
-    @Inject(method = "renderSlotHighlight(Lcom/mojang/blaze3d/vertex/PoseStack;IIII)V", at = @At("HEAD"), cancellable = true, remap = false)
-    private static void apricityui$cancelVanillaSlotHighlightLegacy(CallbackInfo ci) {
-        if (Minecraft.getInstance().screen instanceof ApricityContainerScreen) {
             ci.cancel();
         }
     }
@@ -57,7 +57,7 @@ public abstract class AbstractContainerScreenMixin {
             String p_282568_,
             CallbackInfo ci
     ) {
-        if ((Object) this instanceof ApricityContainerScreen screen) {
+        if ((Object) this instanceof ApricityContainerScreen<?> screen) {
             screen.captureFloatingItem(p_281330_, p_281772_, p_281689_, p_282568_);
             ci.cancel();
         }
@@ -65,7 +65,7 @@ public abstract class AbstractContainerScreenMixin {
 
     @Inject(method = "isHovering(Lnet/minecraft/world/inventory/Slot;DD)Z", at = @At("HEAD"), cancellable = true)
     private void apricityui$injectSlotHovering(Slot p_97775_, double p_97776_, double p_97777_, CallbackInfoReturnable<Boolean> cir) {
-        if (!((Object) this instanceof ApricityContainerScreen screen)) {
+        if (!((Object) this instanceof ApricityContainerScreen<?> screen)) {
             return;
         }
         if (!screen.isSlotPointerInteractable(p_97775_)) {

@@ -59,7 +59,7 @@ Implemented per the CSS 2.1 replaced-element rules, matching a browser:
 
 - the inner page's **CSS viewport equals the element's content box** in CSS pixels: `innerWidth`, `vw`/`vh` and media queries all resolve against it;
 - the raster is captured at the content box's **device pixels** (content box × device scale) and the page's `devicePixelRatio` equals that scale, so it is 1:1 at real resolution and stays crisp at any screen scaling;
-- the raster can be shrunk by three things: `capture-scale`, a 4096 px per-axis cap, and by-area downscaling (past 1.2 million pixels). When that happens WebView2's ZoomFactor (`zoom`, clamped hard to 0.25 – 5) is recomputed in step, so the **page's CSS viewport stays exact** and only sharpness is traded;
+- the raster only shrinks when you ask it to (`capture-scale`) or when the element is larger than the whole window in physical pixels — both ceilings come from the framebuffer (a 2K display allows 2560×1440, a 4K one 3840×2160, reported as `raster capped by area`). When that happens WebView2's ZoomFactor (`zoom`, clamped hard to 0.25 – 5) is recomputed in step, so the **page's CSS viewport stays exact** and only sharpness is traded;
 - the texture is always painted to the content box, so a smaller raster never misplaces the content — it only softens it.
 
 ## Rendering pipeline
@@ -68,8 +68,8 @@ The pixels of an `<iframe>` are not painted by the framework. They arrive like t
 
 1. the **host thread** runs the real web page inside an offscreen hidden window (`WS_POPUP`, parked at -32000,-32000 by default) through WebView2's CompositionController; every iframe in the process shares one browser process and profile;
 2. the host periodically calls WebView2's `CapturePreview` and gets a PNG- or JPEG-encoded screenshot (both the capture and the encode happen in the browser process);
-3. a **decode thread** (below-normal priority) does the WIC decode and channel byte swap, diffs the result against the canvas the renderer is known to hold on a 32×32 tile grid, and writes only the changed rectangles into a block of **shared memory**;
-4. the render thread reads that shared memory in packets and writes only those rectangles into the texture, uploading only those regions.
+3. a **decode thread** (below-normal priority) does the WIC decode, diffs the result against the canvas the renderer is known to hold on a 32×32 tile grid, and writes only the changed rectangles — shrunk to the box that actually moved — into a block of **shared memory**. The BGRA→RGBA flip happens while those pixels are copied, so it no longer costs a whole-canvas pass per capture;
+4. the render thread reads that shared memory in packets and uploads each rectangle **straight from it** into the texture: no `NativeImage` in between, and no per-pixel Java copy.
 
 The transfer cost therefore follows the **changed area**, not the canvas size. Each instance owns a host thread, a decode thread, a shared-memory section and a hidden window; the browser process and profile are shared.
 
@@ -78,7 +78,7 @@ The transfer cost therefore follows the **changed area**, not the canvas size. E
 - **A single capture costs about 20 ms, fixed.** WebView2 only offers a lossless (PNG) and a lossy (JPEG) format, and `CapturePreview` needs at least ~21 ms per call (measured at 400×300 and 1280×720: ~21 ms for the small one, ~28 ms for the large one — and the same numbers on a page that is not animating, so this is the readback + encode + IPC inside the browser process, not "waiting for a new composited frame"). Heavy pages cost more: a 900×700 page costs a ~110 ms PNG round trip (≈9 fps) against JPEG's ~31 ms; area costs about 20 ms + 28 ms per megapixel;
 - `capture` defaults to **auto**: a page that is not changing uses the lossless codec (with the de-duplication below, that is free), and as soon as frames keep changing it switches to the fast codec — two publishes inside a 250 ms window flip it over, and 1.5 s of quiet flips it back. Pin it with `capture="lossless"` or `capture="fast"`;
 - **captures are pipelined**: most of that ~21 ms is waiting, so up to four `CapturePreview` calls are in flight at once and the next starts while one is still out; a completion that arrives after a newer one has published is dropped (counted as `stale=`). Measured on an 800×600 page repainting at 60 fps: PNG 33→**61 fps** and JPEG 39→**61 fps**; 1280×720 went 30→**60 fps**, 1600×900 sits at about **59 fps**. The in-flight depth adapts: four overlap while a capture costs less than 45 ms, dropping to two past 60 ms;
-- **two layers of de-duplication**: ① the host compares this frame's compressed payload byte-for-byte against the previous one and, when it is identical and the reader owes nothing, **skips the whole frame** (no decode, no transfer, no upload); ② a tile-by-tile diff on 32×32 blocks sends only the changed rectangles. Measured on an 800×600 page with a single 48×48 box moving: about **1.5%** of the canvas is dirty per frame (the same page captured with JPEG averages about **4%** of the canvas per upload, since JPEG noise dirties more tiles); a completely still page publishes **nothing at all**. Whole-canvas transfers only happen on the first frame, on a resize, and when the reader asks for a refresh;
+- **two layers of de-duplication**: ① the host compares this frame's compressed payload byte-for-byte against the previous one and, when it is identical and the reader owes nothing, **skips the whole frame** (no decode, no transfer, no upload); ② a tile-by-tile diff on 32×32 blocks finds the changed area, and each box is then shrunk to the pixels that actually differ before it is sent (the tile grid is a detection grid, not a shipping unit: moving one 40×40 box publishes about 6.4K pixels per frame instead of 24.6K). Measured on an 800×600 page with a single 48×48 box moving: about **1.5%** of the canvas is dirty per frame (the same page captured with JPEG averages about **4%** of the canvas per upload, since JPEG noise dirties more tiles); a completely still page publishes **nothing at all**. Whole-canvas transfers only happen on the first frame, on a resize, and when the reader asks for a refresh;
 - **the capture rate follows the element's draw rate**: measured, a 60 fps game gets 57 captures/s, a 30 fps game 27, a 20 fps game 20; the request interval follows the measured frame time, clamped to 16 – 50 ms (the 50 ms floor keeps the page from looking frozen);
 - frames and updates are taken in the **render phase** (once per rendered frame), so the page is not capped by the 20 Hz logic tick; the capture loop pauses after two seconds without a draw;
 - `capture-scale` is a **CPU and bandwidth** control, not a frame-rate one: 800×600 → 400×300 saves about 5 ms per capture, but the pipeline already hides that latency;
@@ -126,7 +126,38 @@ AuiServices.webView().unavailableReason();  // why it is unavailable
 - `window.parent` / `postMessage` inside the page point at the browser's own tree and are **not** wired to AUI; `contentWindow` / `contentDocument` are not exposed either;
 - the page is composited opaque; there is no alpha channel;
 - ZoomFactor is clamped by WebView2 to 0.25 – 5 and the SDK cannot widen it;
-- **there is no scripting-facing webview API**: on the JS side only the generic DOM attributes / events are available (`getAttribute`/`setAttribute`); on the Java side there is no `reload()` / `navigate()` either — change the attribute instead.
+- AUI scripts still navigate an iframe through DOM attributes. WebView2 pages have a separate `window.aui` JSON bridge, enabled only by explicit Java capability registration, never by HTML attributes.
+
+## Java ↔ WebView2 JS bridge
+
+Configure `iframe.bridge().allowPage(absoluteUrl).register(method, handler)` on the client thread. Handlers receive `(Context, JsonElement)` and return `CompletionStage<JsonElement>`; invocation happens during the iframe client tick and must not block. `Context` contains the verified source URI and document session. Existing Gson types are used; no Java object or reflection access is exposed.
+
+Inside the actual WebView2 page:
+
+```javascript
+await aui.ready();
+const result = await aui.call('player.getInfo', {});
+const unsubscribe = aui.on('player.healthChanged', data => console.log(data));
+unsubscribe();
+```
+
+Java publishes events with `iframe.bridge().emit(name, json)`, which returns false before handshake or under backpressure. `allowPage` authorizes exact absolute http/https/file page URLs (fragment ignored, path/query checked); remote file hosts are rejected. Do not authorize untrusted content. Navigation invalidates sessions and late responses. The convenience API is only installed in the top-level document.
+
+The transport uses WebView2 web messages and bounded JNI queues, independently of pixel streaming. Messages are limited to 64 KiB, JS to 64 concurrent calls, and native incoming/outgoing queues to 256 entries. Each tick drains at most 32 incoming messages. Requests time out after 10 seconds by default; the third `call` argument accepts 1–60000ms. Timeout does not undo Java side effects. Unknown methods return `METHOD_NOT_FOUND`; handler failures return a sanitized `JAVA_ERROR`.
+
+The page `common/src/main/resources/assets/apricityui/apricity/tests/webview-bridge-test.html` is loaded by the real native regression harness, which explicitly registers its `test.*` methods. These methods are not installed in production. The page is a browser document, not an AUI-engine document.
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts/build-webview-native.ps1
+.\gradlew.bat -p common test --tests com.sighs.apricityui.webview.WebViewBridgeTest
+.\gradlew.bat -p common webviewBridgeTest
+```
+
+The final task requires Windows x64 and an installed WebView2 Runtime. It loads the actual bundled DLL and HTML, including navigation and denied-source checks, without launching Minecraft.
+
+## Startup phase
+
+The startup phase (around the game window appearing, while resources load) can paint a loading page through the same capture pipeline, but it has its own entry points: `@StartupHook`, `StartupContext`, and page projects that are folders (instance first, jar extraction as the fallback). Usage, contract, extraction rules and troubleshooting are in **[Startup phase and the startup loading screen](startup)**.
 
 ## Debugging
 
@@ -163,7 +194,7 @@ AuiServices.webView().unavailableReason();  // why it is unavailable
 
 **The wheel also switched the game hotbar**: the host document does not declare `aui-mouse-events: intercept`, so the native wheel leaked through to the game. Add that meta (see the [ApricityScreen meta section](apricity-screen#page-meta-configuration)).
 
-**A large iframe looks soft**: the 4096 px per-axis cap or by-area downscaling kicked in (`raster capped by area` in `status()`). That is intentional — it protects the frame rate and trades only sharpness; the page's CSS viewport stays exact.
+**A large iframe looks soft**: it is now rasterised at the element's device resolution, with both ceilings taken from the framebuffer (2560×1440 on a 2K display, 3840×2160 on a 4K one), so only an element larger than the whole window is downscaled (`raster capped by area` in `status()`); an explicit `capture-scale` also shrinks it. That fallback protects the frame rate and trades only sharpness; the page's CSS viewport stays exact. To save CPU on a full-screen iframe, prefer a ratio such as `capture-scale="0.75"` over a fixed ceiling.
 
 **Video stutters**: captures cost a fixed amount, and a heavy page on PNG drops to single-digit frame rates. Keep the default `capture="auto"` (it switches to JPEG), lower `capture-scale` if needed, or pin JPEG with `capture="fast"`.
 

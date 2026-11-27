@@ -50,6 +50,19 @@ public class FontDrawer {
             "apricityui.fontRaster.strokeControl",
             "apricityui.fontRaster.frc",
     };
+    /**
+     * 当前文档的像素缩放（物理像素 / 逻辑像素）。字形按 {@code renderedFontSize * pixelScale} 光栅，
+     * 绘制时再除以它，于是屏幕上恒为 1:1。
+     */
+    private static final ThreadLocal<java.util.ArrayDeque<Double>> PIXEL_SCALE_STACK =
+            ThreadLocal.withInitial(java.util.ArrayDeque::new);
+    private static final ThreadLocal<java.util.ArrayDeque<Boolean>> PAINT_COMPLETENESS =
+            ThreadLocal.withInitial(java.util.ArrayDeque::new);
+    /**
+     * 一行的临时数组池。绘制只在渲染线程发生，所以按线程持有即可；容量只增不减，
+     * 长行偶发一次扩容后即可长期复用。
+     */
+    private static final ThreadLocal<LineScratch> LINE_SCRATCH = ThreadLocal.withInitial(LineScratch::new);
 
     static {
         warnRetiredTuning();
@@ -74,12 +87,24 @@ public class FontDrawer {
         }
     }
 
-    /**
-     * 当前文档的像素缩放（物理像素 / 逻辑像素）。字形按 {@code renderedFontSize * pixelScale} 光栅，
-     * 绘制时再除以它，于是屏幕上恒为 1:1。
-     */
-    private static final ThreadLocal<java.util.ArrayDeque<Double>> PIXEL_SCALE_STACK =
-            ThreadLocal.withInitial(java.util.ArrayDeque::new);
+    public static void beginPaintCompletenessTracking() {
+        PAINT_COMPLETENESS.get().push(Boolean.TRUE);
+    }
+
+    public static void markPaintIncomplete() {
+        java.util.ArrayDeque<Boolean> stack = PAINT_COMPLETENESS.get();
+        if (stack.isEmpty()) return;
+        stack.pop();
+        stack.push(Boolean.FALSE);
+    }
+
+    public static boolean endPaintCompletenessTracking() {
+        java.util.ArrayDeque<Boolean> stack = PAINT_COMPLETENESS.get();
+        if (stack.isEmpty()) return false;
+        boolean complete = stack.pop();
+        if (stack.isEmpty()) PAINT_COMPLETENESS.remove();
+        return complete;
+    }
 
     public static void pushDocumentPixelScale(double scale) {
         double safe = scale > 0 && Double.isFinite(scale) ? scale : 1.0d;
@@ -98,21 +123,38 @@ public class FontDrawer {
         return scale != null && scale > 0 && Double.isFinite(scale) ? scale : 1.0d;
     }
 
-    /** 每帧开始时重置逐字形光栅预算，并把上一帧的字形存储状态发布给 HUD/日志。 */
+    /**
+     * 每帧开始时重置逐字形光栅预算，并把上一帧的字形存储状态发布给 HUD/日志。
+     */
     public static void beginFrame() {
         GlyphCache.beginFrame();
         drainCompletedRasters();
     }
 
-    /** 把字形存储状态发布给 HUD/日志。 */
+    /**
+     * 把字形存储状态发布给 HUD/日志。
+     */
     public static void drainCompletedRasters() {
         int[] state = GlyphCache.storageState();
         RenderBatchStats.setFontStorageState(state[0], state[1], GlyphCache.cachedGlyphs(), state[2] != 0);
     }
 
-    /** 字体资源变化（资源重载、web 字体就绪）时整体失效字形缓存。 */
+    /**
+     * 资源重载 / 字体重新解码后整体失效字形缓存。单个 web 字体就绪时不走这里：
+     * 新字体是新实例，字形键自然不命中，只需 {@link #evictFontGlyphs(java.awt.Font)}
+     * 清掉被它替换掉的旧字体实例。
+     */
     public static void clearCache() {
         GlyphCache.clear();
+    }
+
+    /**
+     * 只丢弃由 {@code replaced} 这个字体实例光栅出的字形，其余字体的缓存保持有效。
+     *
+     * @return 被移除的缓存条目数
+     */
+    public static int evictFontGlyphs(java.awt.Font replaced) {
+        return GlyphCache.evictFont(replaced);
     }
 
     public static void drawFont(PoseStack poseStack, Element element) {
@@ -139,18 +181,25 @@ public class FontDrawer {
         String content = text.content;
         if (content == null || content.isEmpty()) return;
 
-        Text.Shadow shadow = text.shadow;
-        if (shadow != null) {
-            Color previousColor = text.color;
-            text.color = shadow.color();
-            try {
-                drawContent(poseStack, text, content,
-                        new Position(position.x + shadow.offsetX(), position.y + shadow.offsetY()), baselineOffset);
-            } finally {
-                text.color = previousColor;
+        boolean nativeFont = text.fontFamily == null || "unset".equals(text.fontFamily);
+        // Native glyphs use the loader's shared buffers, outside AUI's local batches.
+        if (nativeFont) Base.commitDraws();
+        try {
+            Text.Shadow shadow = text.shadow;
+            if (shadow != null) {
+                Color previousColor = text.color;
+                text.color = shadow.color();
+                try {
+                    drawContent(poseStack, text, content,
+                            new Position(position.x + shadow.offsetX(), position.y + shadow.offsetY()), baselineOffset);
+                } finally {
+                    text.color = previousColor;
+                }
             }
+            drawContent(poseStack, text, content, position, baselineOffset);
+        } finally {
+            if (nativeFont) Base.commitDraws();
         }
-        drawContent(poseStack, text, content, position, baselineOffset);
     }
 
     private static void drawContent(PoseStack poseStack, Text text, String content, Position position, double baselineOffset) {
@@ -161,7 +210,9 @@ public class FontDrawer {
         }
     }
 
-    /** 默认（原版 MC）字体：交给各 loader 的 ClientService，按行推进。 */
+    /**
+     * 默认（原版 MC）字体：交给各 loader 的 ClientService，按行推进。
+     */
     private static void drawDefaultFontLines(PoseStack poseStack, Text text, String content,
                                              Position position, double baselineOffset) {
         boolean baselineAnchored = !Double.isNaN(baselineOffset);
@@ -224,35 +275,6 @@ public class FontDrawer {
     }
 
     /**
-     * 一行的临时数组池。绘制只在渲染线程发生，所以按线程持有即可；容量只增不减，
-     * 长行偶发一次扩容后即可长期复用。
-     */
-    private static final ThreadLocal<LineScratch> LINE_SCRATCH = ThreadLocal.withInitial(LineScratch::new);
-
-    private static final class LineScratch {
-        private GlyphCache.Glyph[] fills = new GlyphCache.Glyph[0];
-        private GlyphCache.Glyph[] strokes = new GlyphCache.Glyph[0];
-        private double[] penX = new double[0];
-
-        GlyphCache.Glyph[] fills(int count) {
-            if (fills.length < count) fills = new GlyphCache.Glyph[count];
-            java.util.Arrays.fill(fills, 0, count, null);
-            return fills;
-        }
-
-        GlyphCache.Glyph[] strokes(int count) {
-            if (strokes.length < count) strokes = new GlyphCache.Glyph[count];
-            java.util.Arrays.fill(strokes, 0, count, null);
-            return strokes;
-        }
-
-        double[] penX(int count) {
-            if (penX.length < count) penX = new double[count];
-            return penX;
-        }
-    }
-
-    /**
      * 一行自定义字体文本：先算每个码点的字形与落点，再按「描边 → 填充 → 装饰线」三层绘制。
      * 三层都用白色字形/白色块 + 顶点染色，颜色变化不触发任何重新光栅。
      *
@@ -293,7 +315,12 @@ public class FontDrawer {
                 int cp = runText.codePointAt(offset);
                 GlyphCache.Glyph fill = GlyphCache.entry(run.font(), cp, 0);
                 fills[index] = fill;
-                if (strokes != null) strokes[index] = GlyphCache.entry(run.font(), cp, strokeRaster);
+                GlyphCache.Glyph stroke = strokes == null ? null : GlyphCache.entry(run.font(), cp, strokeRaster);
+                if (strokes != null) strokes[index] = stroke;
+                if ((fill != null && fill.hasInk && !fill.drawable())
+                        || (stroke != null && stroke.hasInk && !stroke.drawable())) {
+                    markPaintIncomplete();
+                }
                 penX[index] = cursor;
                 index++;
                 if (fill != null) {
@@ -425,5 +452,28 @@ public class FontDrawer {
         ImageDrawer.drawWithUvWindow(poseStack, GlyphCache.whiteTile(),
                 (float) x, (float) y, (float) width, (float) height, true,
                 1, 1, 0, 0, 1, 1, tintArgb);
+    }
+
+    private static final class LineScratch {
+        private GlyphCache.Glyph[] fills = new GlyphCache.Glyph[0];
+        private GlyphCache.Glyph[] strokes = new GlyphCache.Glyph[0];
+        private double[] penX = new double[0];
+
+        GlyphCache.Glyph[] fills(int count) {
+            if (fills.length < count) fills = new GlyphCache.Glyph[count];
+            java.util.Arrays.fill(fills, 0, count, null);
+            return fills;
+        }
+
+        GlyphCache.Glyph[] strokes(int count) {
+            if (strokes.length < count) strokes = new GlyphCache.Glyph[count];
+            java.util.Arrays.fill(strokes, 0, count, null);
+            return strokes;
+        }
+
+        double[] penX(int count) {
+            if (penX.length < count) penX = new double[count];
+            return penX;
+        }
     }
 }

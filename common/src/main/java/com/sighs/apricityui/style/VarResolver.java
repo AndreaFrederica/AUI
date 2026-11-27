@@ -1,8 +1,13 @@
 package com.sighs.apricityui.style;
 
 import java.lang.reflect.Field;
+
 import com.sighs.apricityui.init.Element;
 import com.sighs.apricityui.parser.CssString;
+import com.sighs.apricityui.parser.CSS;
+
+import java.util.HashMap;
+import java.util.Map;
 
 /**
  * var() 引用解析。从 Style 拆出；Style.resolveVarReferences 保留为 public 委托。
@@ -32,15 +37,41 @@ public final class VarResolver {
                 String value = (String) field.get(style);
                 if (value == null || !value.contains("var(")) continue;
                 String resolved = resolveVarInValue(style, value, context, 0);
+                if (resolved.startsWith(ShorthandParser.PENDING_BACKGROUND)) {
+                    String background = resolved.substring(ShorthandParser.PENDING_BACKGROUND.length(), resolved.length() - 1);
+                    Style probe = new Style();
+                    ShorthandParser.applyBackground(probe, background.contains("var(") ? "" : background);
+                    resolved = (String) field.get(probe);
+                } else if (resolved.startsWith(ShorthandParser.PENDING_TRANSITION)) {
+                    String transition = resolved.substring(ShorthandParser.PENDING_TRANSITION.length(), resolved.length() - 1);
+                    Style probe = new Style();
+                    ShorthandParser.applyTransition(probe, transition.contains("var(") ? "initial" : transition);
+                    resolved = (String) field.get(probe);
+                }
                 if (!resolved.equals(value)) {
                     field.set(style, resolved);
                 }
             } catch (IllegalAccessException ignored) {
             }
         }
+        Map<String, CSS.Declaration> pending = style.pendingShorthands;
+        style.pendingShorthands = null;
+        if (pending == null) return;
+        Map<CSS.Declaration, Map<String, String>> expansions = new HashMap<>();
+        pending.forEach((property, declaration) -> {
+            Map<String, String> longhands = expansions.computeIfAbsent(declaration, entry -> {
+                String value = resolveVarInValue(style, entry.value(), context, 0);
+                return "flex".equals(entry.pendingShorthand()) ? ShorthandParser.expandFlex(value)
+                        : ShorthandParser.expandGrid(entry.pendingShorthand(), value);
+            });
+            // Invalid at computed-value time uses unset; an earlier cascade candidate cannot revive.
+            style.update(property, longhands.getOrDefault(property, "unset"));
+        });
     }
 
-    /** 递归解析字符串中的所有 var() 引用。 */
+    /**
+     * 递归解析字符串中的所有 var() 引用。
+     */
     private static String resolveVarInValue(Style style, String value, Element context, int depth) {
         if (value == null || !value.contains("var(") || depth >= MAX_DEPTH) return value;
 
@@ -113,7 +144,9 @@ public final class VarResolver {
         return result.toString();
     }
 
-    /** 查找自定义属性值：先查当前 Style，再沿 DOM 继承链向上。 */
+    /**
+     * 查找自定义属性值：先查当前 Style，再沿 DOM 继承链向上。
+     */
     private static String lookupVar(Style style, String varName, Element context) {
         if (varName == null || varName.isBlank()) return null;
         String normalized = normalizeCustomPropertyName(varName);

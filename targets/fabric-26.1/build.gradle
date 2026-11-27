@@ -90,6 +90,11 @@ tasks.named('processResources', ProcessResources).configure {
             mod_description: mod_description
     ]
     inputs.properties replaceProperties
+    // Named runtimes do not use the shared legacy refmap.
+    inputs.property 'omitMixinRefmap', true
+    filesMatching('apricityui.mixins.json') {
+        filter { line -> line.trim().startsWith('"refmap":') ? null : line }
+    }
     filesMatching('fabric.mod.json') {
         expand replaceProperties + [project: project]
     }
@@ -103,6 +108,11 @@ tasks.named('sourcesJar', Jar).configure {
 tasks.withType(JavaCompile).configureEach {
     options.encoding = 'UTF-8'
     options.release = 25
+    // -g:none: ship classes without debug metadata (LocalVariableTable/
+    // LineNumberTable/SourceFile). Measured -17% jar size (fabric-1.21.1).
+    // Cost: stack traces lose line numbers, jacoco reports lose source
+    // annotation, and the jar no longer carries MethodParameters.
+    options.debug = false
 }
 
 tasks.named('test', Test).configure {
@@ -128,4 +138,5 @@ tasks.matching { it.name == 'runClient' }.configureEach {
     }
 }
 
+apply from: file('../../gradle/target-conventions/background-shaders.gradle')
 apply from: file('../../gradle/target-conventions/publish.gradle')

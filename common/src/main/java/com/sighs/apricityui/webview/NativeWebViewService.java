@@ -21,7 +21,7 @@ public final class NativeWebViewService implements AuiWebViewService {
 
     public static final NativeWebViewService INSTANCE = new NativeWebViewService();
 
-    /** Only a ceiling: the host never overlaps two captures, so a slow codec throttles itself. */
+    /** Requested cadence; the native host applies its shared budget and idle backoff. */
     private static final int DEFAULT_FRAME_INTERVAL_MS = 16;
 
     /**
@@ -31,8 +31,10 @@ public final class NativeWebViewService implements AuiWebViewService {
      */
     private static final int FORMAT_PNG = 0;
     private static final int FORMAT_JPEG = 1;
-    private static final int FORMAT_AUTO = 2;
-    /** Raw composition stream: no codec at all (see {@code FrameStream} in the native host). */
+    static final int FORMAT_AUTO = 2;
+    /**
+     * Raw composition stream: no codec at all (see {@code FrameStream} in the native host).
+     */
     private static final int FORMAT_STREAM = 3;
 
     // COREWEBVIEW2_MOUSE_EVENT_KIND values, which reuse the Win32 message ids.
@@ -63,50 +65,6 @@ public final class NativeWebViewService implements AuiWebViewService {
     private NativeWebViewService() {
     }
 
-    @Override
-    public boolean isAvailable() {
-        return WebViewNative.isAvailable();
-    }
-
-    @Override
-    public String backendName() {
-        return "webview2";
-    }
-
-    @Override
-    public String unavailableReason() {
-        return WebViewNative.unavailableReason();
-    }
-
-    /** Installed runtime version, for diagnostics; empty when unavailable. */
-    public String browserVersion() {
-        return WebViewNative.browserVersion();
-    }
-
-    @Override
-    public View create(String url, int width, int height, boolean transparent, int frameIntervalMs) {
-        if (!WebViewNative.isAvailable()) {
-            return null;
-        }
-        long handle = WebViewNative.create(
-                url,
-                userDataDirectory(),
-                Math.max(1, width),
-                Math.max(1, height),
-                transparent,
-                true,
-                frameIntervalMs <= 0 ? DEFAULT_FRAME_INTERVAL_MS : Math.max(8, frameIntervalMs),
-                // Auto lets the host prefer its raw composition stream and, when that is
-                // unavailable, choose between WebView2's lossless (PNG) and lossy (JPEG)
-                // codecs by whether the page is actually changing. JPEG has no alpha, so a
-                // transparent view has to be pinned to the lossless codec.
-                transparent ? FORMAT_PNG : FORMAT_AUTO);
-        if (handle == 0L) {
-            return null;
-        }
-        return new NativeView(handle);
-    }
-
     /**
      * A per-installation profile directory so cookies and local storage survive a
      * restart, and so every iframe in one game process shares a single browser
@@ -133,6 +91,49 @@ public final class NativeWebViewService implements AuiWebViewService {
         }
     }
 
+    @Override
+    public boolean isAvailable() {
+        return WebViewNative.isAvailable();
+    }
+
+    @Override
+    public String backendName() {
+        return "webview2";
+    }
+
+    @Override
+    public String unavailableReason() {
+        return WebViewNative.unavailableReason();
+    }
+
+    /**
+     * Installed runtime version, for diagnostics; empty when unavailable.
+     */
+    public String browserVersion() {
+        return WebViewNative.browserVersion();
+    }
+
+    @Override
+    public View create(String url, int width, int height, boolean transparent, int frameIntervalMs) {
+        if (!WebViewNative.isAvailable()) {
+            return null;
+        }
+        long handle = WebViewNative.create(
+                url,
+                userDataDirectory(),
+                Math.max(1, width),
+                Math.max(1, height),
+                transparent,
+                true,
+                frameIntervalMs <= 0 ? DEFAULT_FRAME_INTERVAL_MS : Math.max(8, frameIntervalMs),
+                // JPEG has no alpha; transparent views must stay lossless.
+                transparent ? FORMAT_PNG : FORMAT_AUTO);
+        if (handle == 0L) {
+            return null;
+        }
+        return new NativeView(handle);
+    }
+
     private static final class NativeView implements View {
         private final long handle;
         private boolean closed;
@@ -149,6 +150,17 @@ public final class NativeWebViewService implements AuiWebViewService {
 
         private NativeView(long handle) {
             this.handle = handle;
+        }
+
+        private static int modifierKeys(int glfwModifiers) {
+            int keys = 0;
+            if ((glfwModifiers & GLFW.GLFW_MOD_SHIFT) != 0) {
+                keys |= VK_SHIFT;
+            }
+            if ((glfwModifiers & GLFW.GLFW_MOD_CONTROL) != 0) {
+                keys |= VK_CONTROL;
+            }
+            return keys;
         }
 
         @Override
@@ -305,6 +317,21 @@ public final class NativeWebViewService implements AuiWebViewService {
         }
 
         @Override
+        public void enableBridge(boolean enabled) {
+            if (!closed) WebViewNative.enableBridge(handle, enabled);
+        }
+
+        @Override
+        public String[] drainMessages() {
+            return closed ? new String[0] : WebViewNative.drainMessages(handle);
+        }
+
+        @Override
+        public boolean postMessage(long generation, String json) {
+            return !closed && WebViewNative.postMessage(handle, generation, json);
+        }
+
+        @Override
         public Channel channel() {
             if (closed) {
                 return null;
@@ -337,17 +364,6 @@ public final class NativeWebViewService implements AuiWebViewService {
                 channel = null;
             }
             WebViewNative.destroy(handle);
-        }
-
-        private static int modifierKeys(int glfwModifiers) {
-            int keys = 0;
-            if ((glfwModifiers & GLFW.GLFW_MOD_SHIFT) != 0) {
-                keys |= VK_SHIFT;
-            }
-            if ((glfwModifiers & GLFW.GLFW_MOD_CONTROL) != 0) {
-                keys |= VK_CONTROL;
-            }
-            return keys;
         }
     }
 

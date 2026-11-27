@@ -40,6 +40,7 @@ import org.lwjgl.glfw.GLFW;
 
 import java.util.ArrayList;
 import java.util.HashMap;
+
 import com.sighs.apricityui.resource.Font;
 import com.sighs.apricityui.config.ApricityUIConfig;
 import com.sighs.apricityui.screen.ApricityContainerScreen;
@@ -196,7 +197,7 @@ public class Client {
 
     @SubscribeEvent
     public static void drawScreen(ScreenEvent.DrawScreenEvent.Post event) {
-        if (Minecraft.getInstance().screen instanceof ApricityContainerScreen) {
+        if (Minecraft.getInstance().screen instanceof ApricityContainerScreen<?>) {
             return;
         }
         if (Minecraft.getInstance().screen instanceof ApricityScreen) {
@@ -205,7 +206,7 @@ public class Client {
         if (Minecraft.getInstance().level == null || Minecraft.getInstance().screen != null) {
             FrameTimingHud.beginFrame();
             try {
-                drawPersistentScreenDocuments(event.getPoseStack());
+                Base.drawPersistentScreenDocuments(event.getPoseStack(), null);
                 Minecraft.getInstance().renderBuffers().bufferSource().endBatch();
                 Cursor.drawPseudoCursor(event.getPoseStack());
                 Minecraft.getInstance().renderBuffers().bufferSource().endBatch();
@@ -229,9 +230,9 @@ public class Client {
             DevTools.handleInspectMouseMove(getMousePositionDirectly());
             FrameTimingHud.beginFrame();
             try {
-                for (Document document : DocumentLayerOrder.backToFront(Document.getAll())) {
-                    if (document == null || document.inWorld || document.isManuallyRendered()) continue;
-                    Base.drawOverlayDocument(event.getMatrixStack(), document);
+                Base.FlatLayerPlan flatLayers = Base.planFlatLayers();
+                for (Document document : flatLayers.orderedDocuments()) {
+                    Base.drawOverlayDocument(event.getMatrixStack(), document, flatLayers.baseZOf(document));
                     com.sighs.apricityui.dev.resource.ResourcePreviewDialog.draw(event.getMatrixStack(), document);
                 }
                 Minecraft.getInstance().renderBuffers().bufferSource().endBatch();
@@ -242,20 +243,6 @@ public class Client {
                 drawFrameTimingHud(event.getMatrixStack());
             }
 //            com.sighs.apricityui.dev.BackdropFilterTestRunner.onRenderGuiPost();
-        }
-    }
-
-    public static void drawPersistentScreenDocuments(PoseStack poseStack) {
-        drawPersistentScreenDocuments(poseStack, null);
-    }
-
-    public static void drawPersistentScreenDocuments(PoseStack poseStack, Document excludedDocument) {
-        for (Document document : DocumentLayerOrder.backToFront(Document.getAll())) {
-            if (document == null || document == excludedDocument || document.inWorld || document.isManuallyRendered() || !document.isReloadPersistent()) {
-                continue;
-            }
-            Base.drawOverlayDocument(poseStack, document);
-            com.sighs.apricityui.dev.resource.ResourcePreviewDialog.draw(poseStack, document);
         }
     }
 
@@ -300,8 +287,8 @@ public class Client {
     }
 
     @SubscribeEvent
-    // 1.18.2 的 InputEvent.MouseInputEvent 还没有 1.19 那个 Pre 子类。
-    public static void mouseButton(InputEvent.MouseInputEvent event) {
+    // 1.18.2 用可取消的 RawMouseEvent 拦截原版处理；MouseInputEvent 是不可取消的事后通知。
+    public static void mouseButton(InputEvent.RawMouseEvent event) {
         boolean nativeConsumed = false;
         if (event.getAction() == InputConstants.PRESS) nativeConsumed = Operation.onMouseDown(event.getButton());
         if (event.getAction() == InputConstants.RELEASE) nativeConsumed = Operation.onMouseUp(event.getButton());
@@ -346,7 +333,8 @@ public class Client {
             return;
         }
         int action = event.getAction();
-        if (action != InputConstants.PRESS && action != InputConstants.REPEAT && action != InputConstants.RELEASE) return;
+        if (action != InputConstants.PRESS && action != InputConstants.REPEAT && action != InputConstants.RELEASE)
+            return;
         if (action == InputConstants.PRESS && handleViewportZoomKeyAtMouse(event.getKey(), event.getModifiers())) {
             return;
         }
@@ -521,7 +509,9 @@ public class Client {
         return getMousePosition();
     }
 
-    /** Returns the live cursor position directly from the GLFW window handle. */
+    /**
+     * Returns the live cursor position directly from the GLFW window handle.
+     */
     public static Position getMousePositionDirectly() {
         Window window = Minecraft.getInstance().getWindow();
         long handle = window.getWindow();
@@ -635,7 +625,9 @@ public class Client {
         drawDefaultFont(poseStack, text, text.content, position);
     }
 
-    /** Draws the frame-timing HUD overlay, if enabled. */
+    /**
+     * Draws the frame-timing HUD overlay, if enabled.
+     */
     public static void drawFrameTimingHud(PoseStack poseStack) {
         if (poseStack == null || !FrameTimingHud.isEnabled()) return;
         String text = FrameTimingHud.frameStatsText();

@@ -9,7 +9,24 @@ import net.neoforged.neoforge.client.event.RegisterShadersEvent;
 import java.io.IOException;
 
 public class ShaderRegistry {
+    private static ShaderInstance filterShader;
+    private static ShaderInstance filterBlurShader;
+    private static ShaderInstance filterBlendShader;
+    private static ShaderInstance filterMaskShader;
+    private static ShaderInstance filterMaskIntersectShader;
+    private static ShaderInstance filterMaskSubtractShader;
+    private static ShaderInstance filterMaskExcludeShader;
+
+    private static ShaderInstance backgroundShader;
+
+    public static ShaderInstance getBackgroundShader() {
+        return backgroundShader;
+    }
+
     public static void register(RegisterShadersEvent event) throws IOException {
+        event.registerShader(new ShaderInstance(event.getResourceProvider(),
+                ResourceLocation.fromNamespaceAndPath("apricityui", "background"), DefaultVertexFormat.POSITION_TEX),
+                instance -> backgroundShader = instance);
         event.registerShader(new ShaderInstance(event.getResourceProvider(),
                 ResourceLocation.fromNamespaceAndPath("apricityui", "filter"), DefaultVertexFormat.POSITION_TEX), (instance) -> {
             filterShader = instance;
@@ -39,14 +56,6 @@ public class ShaderRegistry {
             filterMaskExcludeShader = instance;
         });
     }
-
-    private static ShaderInstance filterShader;
-    private static ShaderInstance filterBlurShader;
-    private static ShaderInstance filterBlendShader;
-    private static ShaderInstance filterMaskShader;
-    private static ShaderInstance filterMaskIntersectShader;
-    private static ShaderInstance filterMaskSubtractShader;
-    private static ShaderInstance filterMaskExcludeShader;
 
     public static void init(ResourceManager resourceManager) throws IOException {
         filterShader = new ShaderInstance(resourceManager, ResourceLocation.fromNamespaceAndPath("apricityui", "filter"), DefaultVertexFormat.POSITION_TEX);

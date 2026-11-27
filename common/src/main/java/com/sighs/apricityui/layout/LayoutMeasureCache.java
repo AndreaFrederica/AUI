@@ -9,7 +9,6 @@ import java.util.Map;
 import java.util.WeakHashMap;
 
 public final class LayoutMeasureCache {
-    private static final int MAX_PARAMETERIZED_ENTRIES = 4096;
     public static final int SIZE_NATURAL = 1;
     public static final int CONTENT_FLEX = 2;
     public static final int LAYOUT_FLEX = 4;
@@ -17,10 +16,48 @@ public final class LayoutMeasureCache {
     public static final int FLEX_ASSIGNED_MAIN_SIZES = 6;
     public static final int SIZE_NATURAL_CONSTRAINED = 7;
     public static final int LAYOUT_GRID = 8;
-
+    public static final int LAYOUT_TABLE = 9;
+    private static final int MAX_PARAMETERIZED_ENTRIES = 4096;
     private static final ThreadLocal<State> STATE = new ThreadLocal<>();
+    private static final ThreadLocal<Object> CONTEXT = new ThreadLocal<>();
+    private static final ThreadLocal<MeasurementProbe> PROBE = new ThreadLocal<>();
 
     private LayoutMeasureCache() {
+    }
+
+    static MeasurementProbe probeMeasurements() {
+        return new MeasurementProbe();
+    }
+
+    static void recordMeasurement() {
+        MeasurementProbe probe = PROBE.get();
+        if (probe != null) probe.count++;
+    }
+
+    /** Opt-in diagnostics, including measurements outside a layout commit. */
+    static final class MeasurementProbe implements AutoCloseable {
+        private final MeasurementProbe previous = PROBE.get();
+        private int count;
+
+        private MeasurementProbe() { PROBE.set(this); }
+
+        int count() { return count; }
+
+        @Override
+        public void close() {
+            if (previous == null) PROBE.remove();
+            else {
+                previous.count += count;
+                PROBE.set(previous);
+            }
+        }
+    }
+
+    static Object setContext(Object context) {
+        Object previous = CONTEXT.get();
+        if (context == null) CONTEXT.remove();
+        else CONTEXT.set(context);
+        return previous;
     }
 
     public static void begin() {
@@ -44,25 +81,27 @@ public final class LayoutMeasureCache {
     }
 
     public static Size getSize(int mode, Element element, double availableWidth, double availableHeight, boolean natural) {
+        if (Size.isMinContentMeasurementContext()) mode += 100;
         State state = STATE.get();
         if (state == null || state.depth <= 0 || element == null) return null;
-        if (mode == SIZE_NATURAL && Double.isNaN(availableWidth) && Double.isNaN(availableHeight)) {
+        if (CONTEXT.get() == null && mode == SIZE_NATURAL && Double.isNaN(availableWidth) && Double.isNaN(availableHeight)) {
             return state.getVersioned(state.naturalSizes, element);
         }
-        if (mode == CONTENT_FLEX && Double.isNaN(availableWidth) && Double.isNaN(availableHeight)) {
+        if (CONTEXT.get() == null && mode == CONTENT_FLEX && Double.isNaN(availableWidth) && Double.isNaN(availableHeight)) {
             return state.getVersioned(natural ? state.naturalFlexContentSizes : state.flexContentSizes, element);
         }
         return state.sizes.get(state.probeKey(mode, element, availableWidth, availableHeight, natural, false));
     }
 
     public static void putSize(int mode, Element element, double availableWidth, double availableHeight, boolean natural, Size size) {
+        if (Size.isMinContentMeasurementContext()) mode += 100;
         State state = STATE.get();
         if (state == null || state.depth <= 0 || element == null || size == null) return;
-        if (mode == SIZE_NATURAL && Double.isNaN(availableWidth) && Double.isNaN(availableHeight)) {
+        if (CONTEXT.get() == null && mode == SIZE_NATURAL && Double.isNaN(availableWidth) && Double.isNaN(availableHeight)) {
             state.putVersioned(state.naturalSizes, element, size);
             return;
         }
-        if (mode == CONTENT_FLEX && Double.isNaN(availableWidth) && Double.isNaN(availableHeight)) {
+        if (CONTEXT.get() == null && mode == CONTENT_FLEX && Double.isNaN(availableWidth) && Double.isNaN(availableHeight)) {
             state.putVersioned(natural ? state.naturalFlexContentSizes : state.flexContentSizes, element, size);
             return;
         }
@@ -70,19 +109,20 @@ public final class LayoutMeasureCache {
     }
 
     public static Object getObject(int mode, Element element, double availableWidth, double availableHeight, boolean natural) {
+        if (Size.isMinContentMeasurementContext()) mode += 100;
         State state = STATE.get();
         if (state == null || state.depth <= 0 || element == null) return null;
         return state.objects.get(state.probeKey(mode, element, availableWidth, availableHeight, natural, true));
     }
 
     public static void putObject(int mode, Element element, double availableWidth, double availableHeight, boolean natural, Object value) {
+        if (Size.isMinContentMeasurementContext()) mode += 100;
         State state = STATE.get();
         if (state == null || state.depth <= 0 || element == null || value == null) return;
         state.objects.put(new Key(mode, element, availableWidth, availableHeight, natural, true), value);
     }
 
     private static final class State {
-        private int depth = 0;
         private final Map<Element, VersionedSize> naturalSizes = new WeakHashMap<>();
         private final Map<Element, VersionedSize> flexContentSizes = new WeakHashMap<>();
         private final Map<Element, VersionedSize> naturalFlexContentSizes = new WeakHashMap<>();
@@ -92,6 +132,7 @@ public final class LayoutMeasureCache {
         // （约 104MB）。命中路径用共享 probe 零分配；put（未命中）才 new 真 key。
         // State 是 ThreadLocal，不存在并发复用。
         private final Key probe = new Key();
+        private int depth = 0;
 
         private Key probeKey(int mode, Element element, double availableWidth, double availableHeight,
                              boolean natural, boolean includeTextDependency) {
@@ -101,12 +142,12 @@ public final class LayoutMeasureCache {
 
         private Size getVersioned(Map<Element, VersionedSize> entries, Element element) {
             VersionedSize entry = entries.get(element);
-            return entry != null && entry.dependency == element.getRenderer().layoutDependency()
+            return entry != null && entry.dependency == element.getLayout().layoutDependency()
                     ? entry.value : null;
         }
 
         private void putVersioned(Map<Element, VersionedSize> entries, Element element, Size value) {
-            entries.put(element, new VersionedSize(element.getRenderer().layoutDependency(), value));
+            entries.put(element, new VersionedSize(element.getLayout().layoutDependency(), value));
         }
     }
 
@@ -129,6 +170,7 @@ public final class LayoutMeasureCache {
 
     private static final class Key {
         private int mode;
+        private Object context;
         private Element element;
         private long availableWidth;
         private long availableHeight;
@@ -137,7 +179,9 @@ public final class LayoutMeasureCache {
         private long textDependency;
         private int hash;
 
-        /** 探测 key（State.probe）专用；随后必须调用 set。 */
+        /**
+         * 探测 key（State.probe）专用；随后必须调用 set。
+         */
         private Key() {
         }
 
@@ -150,16 +194,21 @@ public final class LayoutMeasureCache {
             set(mode, element, availableWidth, availableHeight, natural, includeTextDependency);
         }
 
+        private static long bits(double value) {
+            return Double.doubleToLongBits(value == 0.0d ? 0.0d : value);
+        }
+
         private void set(int mode, Element element, double availableWidth, double availableHeight,
                          boolean natural, boolean includeTextDependency) {
             this.mode = mode;
+            this.context = CONTEXT.get();
             this.element = element;
             this.availableWidth = bits(availableWidth);
             this.availableHeight = bits(availableHeight);
             this.natural = natural;
-            this.dependency = element.getRenderer().layoutDependency();
-            this.textDependency = includeTextDependency ? element.getRenderer().textDependency() : 0L;
-            int result = mode;
+            this.dependency = element.getLayout().layoutDependency();
+            this.textDependency = includeTextDependency ? element.getLayout().textDependency() : 0L;
+            int result = 31 * mode + System.identityHashCode(context);
             result = 31 * result + System.identityHashCode(element);
             result = 31 * result + Long.hashCode(this.availableWidth);
             result = 31 * result + Long.hashCode(this.availableHeight);
@@ -169,15 +218,12 @@ public final class LayoutMeasureCache {
             this.hash = result;
         }
 
-        private static long bits(double value) {
-            return Double.doubleToLongBits(value == 0.0d ? 0.0d : value);
-        }
-
         @Override
         public boolean equals(Object obj) {
             if (this == obj) return true;
             if (!(obj instanceof Key other)) return false;
             return mode == other.mode
+                    && context == other.context
                     && element == other.element
                     && availableWidth == other.availableWidth
                     && availableHeight == other.availableHeight

@@ -10,19 +10,19 @@ AUI 是自研的 HTML/CSS 引擎，不是内嵌浏览器。这篇回答一个问
 | 🟡 | 部分支持：能解析、有行为，但与规范有明确差距 |
 | ❌ | 不支持：设置后被忽略（CSS 属性会 warn 一次） |
 
-总体画像：选择器层最完整；布局是"常用子集 + 关键缺失"（没 float、没表格布局、没 sticky）；绘制层覆盖挺广（阴影、滤镜、clip-path、transform、动画都行）；HTML 层面向 UI 而非文档——**没有 UA 默认样式**，`h1` 和 `div` 视觉上没区别。
+总体画像：选择器层最完整；布局是"常用子集 + 关键缺失"（如复杂表格布局仍有限制）；绘制层覆盖挺广（阴影、滤镜、clip-path、transform、动画都行）；HTML 层面向 UI 而非文档——**没有 UA 默认视觉样式**，`h1` 和 `div` 视觉上没区别。
 
 ## 迁移速查
 
 赶时间只看这一节。把浏览器页面搬进 AUI 前，按优先级检查：
 
 1. **UA 样式为零**：h1-h6、p、ul/li 的样式全部自己写；别用 br/hr 表达布局；
-2. **布局避开**：float、sticky、grid 的 areas/auto-flow/命名线、负 margin、表格布局；
-3. **值解析避开**：calc 乘除、border 虚线等样式（只有实线）、currentColor、26 个以外的命名色、radial/conic 渐变、skew/matrix transform；
+2. **布局避开**：复杂负 margin 组合、复杂表格布局；
+3. **值解析避开**：calc 乘除、border/outline 虚线等样式（只有实线）、currentColor、26 个以外的命名色、radial/conic 渐变、skew/matrix transform；
 4. **层叠注意**：层叠按浏览器标准排序——内联普通 > 样式表普通，样式表 `!important` > 内联普通，内联 `!important` 最高；
 5. **文本注意**：italic 无效（用 oblique）、justify 无效、vertical-align 只有 baseline 有效、text-decoration 只有下划线/删除线；
 6. **表单注意**：date/email/url 等 type 降级为纯文本框；form 提交只发事件不发请求；
-7. **transition 白名单**：名单外属性（gap、grid-template、font-size 等）直接跳变。
+7. **transition 白名单**：名单外属性（font-size 等）直接跳变；数值 Grid 轨道和 gap 支持过渡，轨道结构变化直接切换。
 
 ## HTML 解析器
 
@@ -31,7 +31,7 @@ AUI 是自研的 HTML/CSS 引擎，不是内嵌浏览器。这篇回答一个问
 - ✅ 属性各种写法、注释、doctype 剥离、自闭合与 void 标签、script/style raw text、总是合成 html/head/body；
 - 🟡 命名实体只有 `amp apos gt lt nbsp quot` 六个 + 数字实体；有弹栈错误恢复，但**没有浏览器的隐含标签生成**——不会自动闭合 `<p>`、不补 `<tbody>`；
 - 🟡 `<script>` 带 src 又写内联时**两个都执行**（非标准）；没有 defer/async/module；
-- `<head>` 子节点（title 等）不进 DOM，没有 `document.title`；`<meta>` 只读 aui-viewport、aui-mouse-events 两个 aui-* 专用配置（见 [meta 章节](apricity-screen#页面-meta-配置)），charset 固定 UTF-8。
+- `<head>` 子节点（title 等）不进 DOM，没有 `document.title`；`<meta>` 只读取 aui-viewport、aui-mouse-events、aui-hyphen-break、aui-preload 四个 aui-* 专用配置（见 [meta 章节](apricity-screen#页面-meta-配置)），charset 固定 UTF-8。
 
 ## HTML 元素
 
@@ -53,9 +53,9 @@ AUI 是自研的 HTML/CSS 引擎，不是内嵌浏览器。这篇回答一个问
 
 **表单**：submit/requestSubmit/reset、约束校验、FormData 收集、label 关联、fieldset disabled 级联、`form=id` 外部关联都 ✅；action 提交和导航 ❌（只触发事件）。
 
-**无专用类的标签**：p/h1-h6/ul/ol/li/table 等按通用 block/inline 处理，**无 UA 样式**；table 没有表格布局，`display:table` 也降级为 block；br/hr 基本别用；video/object/embed 无实现；iframe 有**专用类**，由系统 WebView 离屏渲染，见 [WebView 与 iframe](webview)。
+**无专用类的标签**：p/h1-h6/ul/ol/li/table 等按通用 block/inline 处理，**无 UA 样式**；table 支持 Markdown 常见表格布局（范围见下文）；br/hr 基本别用；video/object/embed 无实现；iframe 有**专用类**，由系统 WebView 离屏渲染，见 [WebView 与 iframe](webview)。
 
-**UA 默认样式表**全部内容：约 30 个标签是 inline（a、b、i、code、img、input、canvas、iframe 等），head/script/style/title/meta/option 等 display:none，其余一切 block。没了。
+**UA 默认样式表**全部内容：约 30 个标签是 inline（a、b、i、code、img、input、canvas、iframe 等），head/script/style/title/meta/option 等 display:none，table/thead/tbody/tfoot/tr/th/td 分别采用表格对应的 display；表格单元格默认顶部对齐，并接受 `align="left|center|right"`（作者 CSS 优先）；其余标签 block。
 
 扩展标签（texture、sprite、translation 等）见[扩展元素文档](extension-elements)；item、ingredient、recipe 见[MC 物品与配方元素](mc-elements)；container 和 slot 见[容器文档](container)。未知标签按通用 Element 渲染，不警告。
 
@@ -79,19 +79,47 @@ AUI 是自研的 HTML/CSS 引擎，不是内嵌浏览器。这篇回答一个问
 
 ## 布局
 
-**display**：block/inline/inline-block/flex/inline-flex/grid/inline-grid/none ✅；table/list-item/flow-root 降级 block；contents 等未知值一律 block。
+**display**：block/inline/inline-block/flex/inline-flex/grid/inline-grid/none ✅；table/table-header-group/table-footer-group/table-row-group/table-row/table-cell ✅；`flow-root` ✅，list-item 降级 block；contents 等未知值一律 block。
 
 **盒模型**：
 
 - ✅ margin/padding（含 auto 居中）、margin 折叠、border 简写、border-radius（含椭圆双半径）、border-image 九宫格、box-shadow（多重、inset）、box-sizing、宽高 min/max、aspect-ratio、px/%/em/rem/vw/vh、min()/max()/clamp()；
+- ✅ `outline` 全家（`outline` 简写 + `outline-width`/`outline-style`/`outline-color`/`outline-offset`）：画在边框盒外侧、不占布局也不影响盒模型，`outline-offset` 支持负值（焦点框内缩）；线型与 border 一样只画实线，`none`/`hidden` 不画；`outline-color` 的 `auto`/`currentColor` 取元素自身 `color`（其余属性的 currentColor 仍是黑），宽度关键字 thin/medium/thick 按 1/3/5px；不在 transition 白名单里（切换时直接跳变）；
 - 🟡 **负 margin 被钳成 0**；calc() **只支持加减**，不能乘除嵌套；
 - ❌ border-style（全部画成实线）、border-width 关键字（thin/medium/thick）、fit-content/min-content/max-content、vmin/vmax/ch/ex、物理单位。
 
-**定位**：static/relative/fixed/absolute ✅（absolute 包含块规则正常；已知偏差：双侧 auto 锚定包含块原点而非静态位置，transform/filter 祖先不形成包含块）；z-index ✅；**sticky ❌、float/clear ❌**。
+**定位**：static/relative/fixed/absolute ✅（absolute 包含块规则正常；已知偏差：双侧 auto 锚定包含块原点而非静态位置，transform/filter 祖先不形成包含块）；z-index ✅。
+
+**浮动与绕排**。支持 `float: left | right | none` 和 `clear: left | right | both | none`。给外层加 `display: flow-root` 可以包住内部浮动。直接 Flex 或 Grid 子项由各自的布局规则摆放。
+
+```html
+<div style="display:flow-root">
+  <img src="icon.png" style="float:left;width:48px;margin-right:8px">
+  <p>这段文字会绕着图标排版。</p>
+  <div style="clear:both">此行移到浮动图片下方。</div>
+</div>
+```
+
+**滚动吸附**。用 `position: sticky` 搭配至少一个非 `auto` 的 `top`、`right`、`bottom` 或 `left` 值，也可以用 `inset` 简写。元素保留原本的占位，贴住最近滚动区域的边缘，并在所属布局区域末端离开。适用于普通流、Flex、Grid 和表格表头。`overflow: hidden` 会建立吸附参考，单独使用 `overflow: clip` 时会继续向上寻找滚动区域。首版支持横排和物理方向属性。
+
+```html
+<div style="height:120px;overflow:auto">
+  <div style="position:sticky;top:0;z-index:1;background:white">列表标题</div>
+  <div style="height:300px">可滚动的列表内容</div>
+</div>
+```
 
 **Flexbox**：row/column、row-reverse/column-reverse、wrap/wrap-reverse（**含 column 方向换行**：定高容器按累计高超限切列，列内 justify-content、列间 align-content、列内 align-items 均生效；auto 高按规范保持单列）、justify-content 六值及 `start`/`end`/`left`/`right`/`normal` 别名（`left`/`right` 在 column 方向按规范退 flex-start）、grow/shrink/basis（**`flex-basis: content` 取自然尺寸不塌缩**；`flex` 简写省略 basis 时按规范为 `0%`）、**分配过程遵守 min/max**（flex base 先钳成 hypothetical main size，min 冲突时胜出；grow 触 max 冻结并把余量重分给兄弟项，全冻结后剩余空间交给 justify-content）、gap、auto margin、匿名 item、order、align-content（含 `end`/`normal`，后者按规范等同 stretch）都 ✅；匿名文本项（直接文本）在 row 容器内容宽处**软换行** ✅（已知 MVP 偏差：混排时文本按容器全宽折行而非 shrink 后实分宽度；多个匿名项各自按全宽折行）；align-items/align-self 的 **baseline ✅**：row 方向按基线共享组对齐（混合 align-self 时仅 computed 值为 baseline 的项进组，其余项保持自身对齐）、wrap 容器按每一行分别对齐、column 方向按规范等价 flex-start；`first baseline`/`last baseline` 别名按规范等同 `baseline`。
 
-**Grid**（MVP）：template-columns/rows（px/auto/fr/minmax/repeat 含 auto-fill/fit）、gap、items/self 对齐、`grid-row/column` 的 `N`、`span N`、`N / M`、自动放置 ✅；❌ 命名线、template-areas、auto-flow、隐式轨道、place-* 简写、subgrid。
+**Grid**：显式／隐式轨道、`grid-auto-rows/columns` 循环尺寸、`grid-auto-flow: row/column` 与 dense、稳定 order 排序、正负线号、span、命名线（含重复名称序号）、`grid-template-areas` 与区域派生线名 ✅。轨道支持现有长度单位、百分比、calc()、auto、fr、min-content/max-content、minmax()、fit-content()、repeat()；auto-fill 保留空轨道，auto-fit 折叠空轨道及关联间距。items/self、auto margin、首末基线、content 对齐与 space-* 分配、safe/unsafe 溢出对齐 ✅；匿名直接文本参与放置、换行、绘制和选择，绝对定位子项可按现有网格线确定包含块。`grid`、`grid-template`、`grid-area`、`grid-row/column`、place-* 简写在声明阶段展开，参与正常层叠。
+
+`grid-template-columns: 2` 这类数字列数扩展已移除；两列请写 `repeat(2, auto)`。非法声明整体忽略；每轴最多 10,000 条轨道。支持行、列和双轴 `subgrid`，包括多层嵌套、父级／局部命名线、名称 repeat、后代内在尺寸贡献、默认／显式 gap 及边缘盒模型。继承行轨道的后代可与父网格项目、兄弟 subgrid 共享 first/last baseline，基线补偿参与内在尺寸计算；跨轨项目的 min/max-content 贡献、低于 1fr 的轨道内在尺寸与最终尺寸分别处理。subgrid 轴不生成隐式轨道，越界放置限制在继承区间。❌ masonry、RTL／竖排 Grid、分页。轨道的内容关键字支持不表示 width/height 同名关键字也已支持。测试页：[Grid 布局示例](../../common/src/main/resources/assets/apricityui/apricity/tests/grid-layout-test.html)。
+
+**Table（自动布局）**：`table/thead/tbody/tfoot/tr/th/td`、直接 `table > tr`、任意列数与不等长行 ✅。表头和正文共享列宽，按各列最小／最大内容宽度自动分配；`width:auto` 根据内容和可用宽度收缩，`width:100%` 填充容器。文字、行内元素、图片、padding 和单元格独立边框参与测量；列宽确定后重测行高，单元格顶部对齐。内容最小宽度超出容器时允许表格溢出，请在外层设置 `overflow:auto`。内置主题 `.table` 已采用此布局，无需列模板。
+
+`td/th` 支持 `colspan`（1–1000）和 `rowspan`（0–65534）；非法／缺失值按 1 处理，`colspan=0` 按 1 处理，`rowspan=0` 延伸到当前行组末尾，正跨度截断于行组边界。跨列约束、固定／百分比单元格宽度参与自动列宽分配；跨行高度按内容和行约束分配。首个表头组置前、首个表尾组置后，额外的同类组按正文组处理，DOM 顺序不变。动态设置／移除跨度、增删／隐藏行会更新布局与命中区域。普通 CSS `display:table-cell` 元素不读取 HTML 跨度属性。
+
+固定零单元格间距，使用独立边框；`border-spacing:0` 可用于同一 HTML 的浏览器预览，非零间距不支持。❌ caption/colgroup、inline-table、table-layout:fixed、border-collapse、完整匿名表格盒修复、表格单元格的 baseline/middle/bottom 对齐。表格布局本身不依赖 Markdown 解析器；内置 Markdown 渲染见[模组专属 API](apricity-api)。示例：[Table 布局](../../common/src/main/resources/assets/apricityui/apricity/tests/table-layout-test.html)。
 
 **行内**：inline/inline-block 换行、基线对齐 ✅；**vertical-align**：baseline 行内基线对齐、middle/center/bottom/text-bottom 文本垂直对齐 ✅；sub/super/top/text-top 静默无效。
 
@@ -102,14 +130,15 @@ AUI 是自研的 HTML/CSS 引擎，不是内嵌浏览器。这篇回答一个问
 | 属性 | 支持度 | 备注 |
 | --- | --- | --- |
 | color、background-color、opacity | ✅ | |
-| background-image | 🟡 | url()、linear-gradient、多背景分层；无 radial/conic |
+| background-image | 🟡 | url()、linear-gradient、repeating-linear-gradient、多背景分层；无 radial/conic |
 | background-repeat | 🟡 | `space` 被当普通 repeat |
 | background-size/position/简写 | ✅ | |
 | background-attachment/origin/clip/blend-mode | ❌ | |
 | object-fit / object-position | ✅ | |
+| image-rendering | ✅ | `auto`/`smooth`/`high-quality`/`pixelated`/`crisp-edges`；作用于 `<img>`、`<texture>`、`background-image`、`border-image`、`mask-image`、`<canvas>`、`<svg>`；`auto` 与浏览器一致为平滑缩放，`smooth`/`high-quality` 线性过滤，`crisp-edges` 两向最近邻，`pixelated` 放大最近邻、缩小等同 `auto`；`<texture>` 拿不到固有尺寸，`pixelated` 按放大处理 |
 | visibility | 🟡 | collapse 等同 hidden |
 | clip-path | 🟡 | polygon/circle/ellipse/inset；polygon 支持 nonzero/evenodd 前缀（统一按 nonzero 填充）、凹多边形按耳切正确填充；circle/ellipse 省略半径时按 closest-side；inset 的 round 半径被忽略 |
-| mask | 🟡 | mask 简写 + mask-image/mode/repeat/position/size/clip/origin/composite：url()、linear-gradient、多层逐层合成（add/subtract/intersect/exclude，对应 source-over/source-out/source-in/xor）、alpha 与 luminance 模式（多层混合 mode 时按 alpha）、mask-clip/origin 的 border-box/padding-box/content-box/no-clip（margin-box/fill-box 等按 border-box）；加载失败的 mask 层被跳过（内容保持可见，与浏览器"全遮掉"不同）；世界窗口中与 filter 一样不生效 |
+| mask | 🟡 | mask 简写 + mask-image/mode/repeat/position/size/clip/origin/composite：url()、linear-gradient、多层逐层合成（add/subtract/intersect/exclude，对应 source-over/source-out/source-in/xor）、alpha 与 luminance 模式（多层混合 mode 时按 alpha）、mask-clip/origin 的 border-box/padding-box/content-box/no-clip（margin-box/fill-box 等按 border-box）；仍在加载的层被跳过（内容保持可见，加载完成重绘）；不可用/无效的层按规范当 transparent black——全部层都不可用时整块被遮住，与浏览器一致（混入可用层时仍只跳过该层）；世界窗口中与 filter 一样不生效 |
 | filter / backdrop-filter | 🟡 | blur/brightness/contrast/saturate/sepia/grayscale/invert/hue-rotate/opacity/drop-shadow，可动画；函数按固定顺序应用（brightness→contrast→saturate→sepia→grayscale→invert→hue-rotate），而非书写顺序 |
 | transform | 🟡 | translate/rotate/scale 各轴向，角度单位全；**无 skew、matrix、perspective** |
 | transform-origin | ✅ | |
@@ -130,11 +159,11 @@ AUI 是自研的 HTML/CSS 引擎，不是内嵌浏览器。这篇回答一个问
 
 **颜色**：hex 全家、rgb/rgba 新旧语法、hsl/hsla、transparent ✅；支持 `color(srgb-linear r g b / a)` 线性光颜色，组件在渲染器 16 倍 SDR 工作范围内保留；`dynamic-range-limit` 支持 `standard`、`constrained`、`no-limit`、数字和百分比，并在 filter shader 中映射工作范围。普通 8-bit framebuffer 在最终显示时仍会钳制 SDR 白点以上的能量。命名色只有 26 个（CSS 有 148 个）；**currentColor 解析为黑**（SVG 内部除外）；hwb/lab/lch/oklch ❌。
 
-**交互**：cursor 常用值 + `url()` 自定义 ✅（move/wait/grab 等回退箭头）；user-select、pointer-events、accent-color、appearance、resize（textarea）✅；outline ❌。
+**交互**：cursor 常用值 + `url()` 自定义 ✅（move/wait/grab 等回退箭头）；user-select、pointer-events、accent-color、appearance、resize（textarea）✅；焦点框用 `outline`（见"布局"一节的盒模型）。
 
 **伪元素 content**：只支持单个引号字符串；attr()/counter()/url()/多段拼接 ❌。
 
-**transition**：简写、逗号列表、all、延迟、中断反向重定向 ✅；但**可动画属性是白名单**——opacity、宽高、transform、filter、color、background-color、位置四边、margin/padding、border-width、border-radius、box-shadow；名单外直接跳变。
+**transition**：简写、逗号列表、all、延迟、中断反向重定向 ✅；但**可动画属性是白名单**——opacity、宽高、transform、filter、color、background-color、位置四边、margin/padding、border-width、border-radius、box-shadow、gap/row-gap/column-gap、grid-template-columns/rows；名单外直接跳变。Grid 轨道支持数量相同的数值列表，长度、百分比、线性 calc() 可相互插值，fr 仅与 fr 插值（含 0fr → 1fr）。轨道数量变化、命名线、repeat()/minmax()/fit-content()、auto/min-content/max-content/subgrid 等离散切换；本轮未扩展 Grid 的 @keyframes 插值。
 
 **animation**：简写全家、多动画、四种 direction/fill-mode、steps/cubic-bezier ✅；插值上 transform/filter/box-shadow 有专用插值，其余走通用数值/颜色插值，离散属性不动画。
 

@@ -13,7 +13,9 @@ import net.neoforged.neoforge.client.event.RegisterGuiLayersEvent;
 import net.neoforged.neoforge.client.event.RegisterPictureInPictureRenderersEvent;
 import net.neoforged.neoforge.client.event.RegisterRenderPipelinesEvent;
 
-/** Client-only service and 26.1 render-event wiring. */
+/**
+ * Client-only service and 26.1 render-event wiring.
+ */
 public final class ClientServicesBootstrap {
     private ClientServicesBootstrap() {
     }
@@ -24,10 +26,16 @@ public final class ClientServicesBootstrap {
         AuiServices.setKeys(KeyService.INSTANCE);
         AuiServices.setRender(RenderService.INSTANCE);
         AuiServices.setItems(ItemRenderService.INSTANCE);
+        AuiServices.setModels(com.sighs.apricityui.model.ModelRenderService.INSTANCE);
         AuiServices.setAudio(com.sighs.apricityui.media.openal.OpenAlAudioService.create(
                 () -> net.minecraft.client.Minecraft.getInstance().options
                         .getSoundSourceVolume(net.minecraft.sounds.SoundSource.MASTER)));
         AuiServices.setWebView(com.sighs.apricityui.webview.NativeWebViewService.INSTANCE);
+        // Start the loading screen's browser now: by the time the loading overlay appears the
+        // page is already there, instead of the browser starting while resources load.
+        // Startup hooks run first: the page they configure is the page the browser opens.
+        com.sighs.apricityui.startup.StartupHooks.dispatch();
+        com.sighs.apricityui.webview.StartupLoadingOverlay.prepare();
         DevToolsLogBridge.install(ApricityUI.LOGGER);
         ApricityUIRegistry.register();
 

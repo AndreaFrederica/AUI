@@ -2,11 +2,13 @@ package com.sighs.apricityui.element;
 
 import com.mojang.blaze3d.platform.NativeImage;
 import com.mojang.blaze3d.vertex.PoseStack;
+import com.sighs.apricityui.ApricityUI;
 import com.sighs.apricityui.init.Document;
 import com.sighs.apricityui.render.Drawer;
 import com.sighs.apricityui.init.Element;
 import com.sighs.apricityui.registry.annotation.ElementRegister;
 import com.sighs.apricityui.render.Base;
+import com.sighs.apricityui.render.DevicePixelGrid;
 import com.sighs.apricityui.render.ImageDrawer;
 import com.sighs.apricityui.render.FrameTimingHud;
 import com.sighs.apricityui.render.Rect;
@@ -22,6 +24,9 @@ import com.sighs.apricityui.spi.TextureKey;
 import com.sighs.apricityui.webview.FrameUpdateChannel;
 import org.lwjgl.glfw.GLFW;
 
+import java.nio.ByteBuffer;
+import java.nio.ByteOrder;
+import java.nio.IntBuffer;
 import java.nio.charset.StandardCharsets;
 import java.util.Locale;
 import java.util.UUID;
@@ -38,9 +43,10 @@ import java.util.concurrent.CompletableFuture;
  *
  * <p>Pixels arrive as an incremental update stream ({@link FrameUpdateChannel} over the
  * backend's shared-memory channel): the host diffs each capture against the canvas this
- * element is known to hold and publishes only the rectangles that changed, and this element
- * rewrites just those rectangles in its image and re-uploads just those regions to the GPU.
- * A page that repaints one button costs one button, not one 1600×900 texture.</p>
+ * element is known to hold and publishes only the rectangles that changed, shrunk to the box
+ * that actually moved. This element then uploads each of those rectangles straight from the
+ * stream buffer to the texture — no pixel copy on the way. A page that repaints one button
+ * costs one button, not one 1600×900 texture.</p>
  *
  * <h2>Attributes</h2>
  * <ul>
@@ -67,44 +73,52 @@ import java.util.concurrent.CompletableFuture;
 public class Iframe extends Element {
     public static final String TAG_NAME = "IFRAME";
 
-    /** HTML's default replaced-element size, shared with {@link Canvas}. */
+    /**
+     * HTML's default replaced-element size, shared with {@link Canvas}.
+     */
     private static final int DEFAULT_WIDTH = 300;
     private static final int DEFAULT_HEIGHT = 150;
 
-    /** Upper bound on the hosted raster, so a runaway layout cannot allocate gigabytes. */
-    private static final int MAX_VIEWPORT = 4096;
+    /**
+     * Per-edge limit used when the window size cannot be asked.
+     */
+    private static final int DEFAULT_VIEWPORT_LIMIT = 4096;
 
     /**
-     * Upper bound on the raster <em>area</em>.
+     * Hard ceiling on the per-edge limit, whatever the display reports.
      *
-     * <p>A capture costs its area in encode, decode, transfer and upload time, and an iframe
-     * sized in device pixels can ask for several million of them. Past this the raster is
-     * scaled down (zoom follows, so the page's CSS viewport stays exact) rather than letting
-     * one large element halve the frame rate of everything else.</p>
+     * <p>Every raster pixel costs GPU and arena memory, and a texture wider than this is not
+     * something the capture pipeline can carry anyway.</p>
      */
-    private static final double MAX_CAPTURE_PIXELS = 1_200_000.0;
+    private static final int ABSOLUTE_VIEWPORT_LIMIT = 8192;
 
-    /** WebView2 clamps ZoomFactor to this range by default and the SDK cannot widen it. */
+    /**
+     * WebView2 clamps ZoomFactor to this range by default and the SDK cannot widen it.
+     */
     private static final double MIN_ZOOM = 0.25d;
     private static final double MAX_ZOOM = 5.0d;
 
-    /** Bounds for {@code capture-scale}; below this the page stops being readable. */
+    /**
+     * Bounds for {@code capture-scale}; below this the page stops being readable.
+     */
     private static final double MIN_CAPTURE_SCALE = 0.25d;
 
-    /**
-     * Capture interval. This is only an upper bound on the request rate — the host never
-     * starts a new capture while one is in flight, so a heavy page self-throttles.
-     * 16 ms targets 60 fps for the codec to keep up with.
-     */
+    /** Requested cadence before native shared-budget and static-page throttling. */
     private static final int FRAME_INTERVAL_MS = 16;
 
-    /** Ticks without a draw (20 Hz) before the capture loop is paused. */
+    /**
+     * Ticks without a draw (20 Hz) before the capture loop is paused.
+     */
     private static final int IDLE_TICKS_BEFORE_PAUSE = 40;
 
-    /** Slowest capture rate asked for, whatever the game is doing: ~20 fps. */
+    /**
+     * Slowest capture rate asked for, whatever the game is doing: ~20 fps.
+     */
     private static final int MAX_CAPTURE_INTERVAL_MS = 50;
 
-    /** Change the requested interval only when it moves by this much, to avoid JNI churn. */
+    /**
+     * Change the requested interval only when it moves by this much, to avoid JNI churn.
+     */
     private static final int INTERVAL_HYSTERESIS_MS = 4;
 
     private String requestedUrl;
@@ -112,20 +126,92 @@ public class Iframe extends Element {
     private boolean backendUnavailable;
     private CompletableFuture<AuiWebViewService.View> pendingView;
     private AuiWebViewService.View view;
+    private com.sighs.apricityui.webview.WebViewBridge bridge;
     private int viewportWidth;
     private int viewportHeight;
     private double viewportZoom = Double.NaN;
-    /** True while the raster is being scaled down by {@link #MAX_CAPTURE_PIXELS}. */
+    /**
+     * True while the raster is being scaled down by {@link #MAX_CAPTURE_PIXELS}.
+     */
     private boolean rasterAreaCapped;
-
     private AuiWebViewService.Channel viewChannel;
     private FrameUpdateChannel updates;
-    /** Removes this element's line from the frame-timing HUD again. */
+    /**
+     * Whether rectangles are uploaded straight from the stream.
+     *
+     * <p>{@code -Dapricityui.webview.directUpload=false} puts them through a {@link NativeImage}
+     * again, which is the A/B switch for "is the direct upload the thing that shows up
+     * wrong" — the pixels end up identical either way, only the route differs.</p>
+     */
+    private static final boolean DIRECT_UPLOAD =
+            !"false".equalsIgnoreCase(System.getProperty("apricityui.webview.directUpload"));
+    /**
+     * Word view of the stream, for backends without a direct upload path.
+     */
+    private IntBuffer channelWords;
+    /**
+     * Scratch for the same fallback path; reused across rectangles.
+     */
+    private int[] fallbackPixels = new int[0];
+    /**
+     * Removes this element's line from the frame-timing HUD again.
+     */
     private AutoCloseable hudLine;
     private NativeImage nativeImage;
     private Object texture;
     private TextureKey textureLocation;
+    /**
+     * Turns one dirty rectangle of the stream into a texture update.
+     *
+     * <p>The pixels are uploaded straight from the stream buffer, so a packet that touches one
+     * button costs one button: no full-frame copy, no per-pixel walk through the image, no
+     * full texture upload. Backends without a direct path fall back to writing the image and
+     * uploading the region from it.</p>
+     */
+    private final FrameUpdateChannel.Target updateTarget = new FrameUpdateChannel.Target() {
+        @Override
+        public void resize(int width, int height) {
+            if (width <= 0 || height <= 0) {
+                return;
+            }
+            if (nativeImage != null && nativeImage.getWidth() == width
+                    && nativeImage.getHeight() == height) {
+                return;
+            }
+            destroyTexture();
+            nativeImage = new NativeImage(NativeImage.Format.RGBA, width, height, true);
+            texture = AuiServices.render().createDynamicTexture("webview/" + uuid, nativeImage, true);
+            textureLocation = TextureKey.of("webview/"
+                    + UUID.nameUUIDFromBytes(uuid.toString().getBytes(StandardCharsets.UTF_8)));
+            AuiServices.render().registerTexture(texture, AuiServices.resources().textureLocation(textureLocation));
+        }
 
+        @Override
+        public void rect(int x, int y, int width, int height, ByteBuffer pixels, int byteOffset) {
+            if (nativeImage == null || texture == null || textureLocation == null) {
+                return;
+            }
+            if (DIRECT_UPLOAD && AuiServices.render().uploadTexturePixels(texture, pixels, byteOffset,
+                    x, y, width, height)) {
+                return;
+            }
+            final int count = width * height;
+            if (fallbackPixels.length < count) {
+                fallbackPixels = new int[count];
+            }
+            final IntBuffer words = channelWords;
+            if (words != null) {
+                words.position(byteOffset >>> 2);
+                words.get(fallbackPixels, 0, count);
+            } else {
+                for (int index = 0; index < count; index++) {
+                    fallbackPixels[index] = pixels.getInt(byteOffset + index * 4);
+                }
+            }
+            AuiServices.render().writeImagePixels(nativeImage, x, y, width, height, fallbackPixels);
+            AuiServices.render().uploadTextureRegion(texture, nativeImage, x, y, width, height, true);
+        }
+    };
     /**
      * DOM button indices currently held down over the view.
      *
@@ -139,7 +225,9 @@ public class Iframe extends Element {
     private boolean pointerInside;
     private int ticksSinceDraw = Integer.MAX_VALUE;
     private boolean capturePaused;
-    /** Fraction of the box's device resolution to capture at; lower is faster but softer. */
+    /**
+     * Fraction of the box's device resolution to capture at; lower is faster but softer.
+     */
     private double captureScale = 1.0d;
     private int captureQuality = AuiWebViewService.CAPTURE_AUTO;
 
@@ -158,6 +246,155 @@ public class Iframe extends Element {
         addInternalEventListener("blur", event -> setViewFocus(false));
     }
 
+    private static int clampViewport(int value, int limit) {
+        return Math.max(1, Math.min(limit, value));
+    }
+
+    /**
+     * The window's framebuffer size in device pixels, or {@code null} when it cannot be read.
+     *
+     * <p>Both ceilings below are derived from it, which is what keeps the raster tied to the
+     * actual display instead of a hardcoded resolution.</p>
+     */
+    private static int[] windowDeviceSize() {
+        try {
+            double width = AuiServices.client().getWindowWidth();
+            double height = AuiServices.client().getWindowHeight();
+            if (width >= 1.0d && height >= 1.0d) {
+                return new int[]{(int) Math.round(width), (int) Math.round(height)};
+            }
+        } catch (Throwable ignored) {
+            // Fall through to the constants.
+        }
+        return null;
+    }
+
+    /**
+     * Area ceiling for the raster: the framebuffer area, or a 4096² fallback.
+     */
+    private static double captureAreaLimit(int[] window) {
+        if (window == null) {
+            return (double) DEFAULT_VIEWPORT_LIMIT * DEFAULT_VIEWPORT_LIMIT;
+        }
+        return (double) window[0] * window[1];
+    }
+
+    /**
+     * Per-edge ceiling for the raster: the longer framebuffer edge, floored at 4096 and capped
+     * at 8192 so a nonsense window size cannot ask for an unbounded texture.
+     */
+    private static int viewportEdgeLimit(int[] window) {
+        if (window == null) {
+            return DEFAULT_VIEWPORT_LIMIT;
+        }
+        int edge = Math.max(window[0], window[1]);
+        return Math.max(DEFAULT_VIEWPORT_LIMIT, Math.min(ABSOLUTE_VIEWPORT_LIMIT, edge));
+    }
+
+    /**
+     * WebView2 clamps ZoomFactor to [0.25, 5] by default and this SDK exposes no way to widen it.
+     */
+    private static double clampZoom(double zoom) {
+        if (!(zoom > 0.0d) || !Double.isFinite(zoom)) {
+            return 1.0d;
+        }
+        return Math.max(MIN_ZOOM, Math.min(MAX_ZOOM, zoom));
+    }
+
+    /**
+     * Bit for one DOM button index; only used to remember which buttons are held.
+     */
+    private static int buttonBit(int button) {
+        return button >= 0 && button < 8 ? 1 << button : 0;
+    }
+
+    private static int modifiersOf(MouseEvent mouse) {
+        int modifiers = 0;
+        if (mouse.shiftKey) {
+            modifiers |= GLFW.GLFW_MOD_SHIFT;
+        }
+        if (mouse.controlKey) {
+            modifiers |= GLFW.GLFW_MOD_CONTROL;
+        }
+        if (mouse.altKey) {
+            modifiers |= GLFW.GLFW_MOD_ALT;
+        }
+        return modifiers;
+    }
+
+    private static int clamp(int value, int limit) {
+        return Math.max(0, Math.min(limit, value));
+    }
+
+    private static void consume(Event event) {
+        event.stopPropagation();
+    }
+
+    /**
+     * {@code capture="lossless"} / {@code capture="fast"}; anything else means auto.
+     */
+    private static int parseCaptureQuality(String value) {
+        if (value == null) {
+            return AuiWebViewService.CAPTURE_AUTO;
+        }
+        String normalized = value.trim().toLowerCase(Locale.ROOT);
+        if ("stream".equals(normalized) || "raw".equals(normalized)) {
+            return AuiWebViewService.CAPTURE_STREAM;
+        }
+        if ("lossless".equals(normalized) || "png".equals(normalized)) {
+            return AuiWebViewService.CAPTURE_LOSSLESS;
+        }
+        if ("fast".equals(normalized) || "jpeg".equals(normalized)) {
+            return AuiWebViewService.CAPTURE_FAST;
+        }
+        return AuiWebViewService.CAPTURE_AUTO;
+    }
+
+    /**
+     * {@code capture-scale="0.5"} captures at half the box's device resolution.
+     */
+    private static double parseCaptureScale(String value) {
+        if (value == null || value.isBlank()) {
+            return 1.0d;
+        }
+        try {
+            double parsed = Double.parseDouble(value.trim());
+            if (!Double.isFinite(parsed) || parsed <= 0.0d) {
+                return 1.0d;
+            }
+            return Math.max(MIN_CAPTURE_SCALE, Math.min(1.0d, parsed));
+        } catch (NumberFormatException ignored) {
+            return 1.0d;
+        }
+    }
+
+    private static String normalizeUrl(String value) {
+        if (value == null) {
+            return null;
+        }
+        String trimmed = value.trim();
+        return trimmed.isEmpty() ? null : trimmed;
+    }
+
+    private static int parseDimension(String value, int fallback) {
+        if (value == null || value.isBlank()) {
+            return fallback;
+        }
+        try {
+            return Math.max(1, (int) Math.round(Double.parseDouble(value.trim())));
+        } catch (NumberFormatException ignored) {
+            return fallback;
+        }
+    }
+
+    /**
+     * Java-only capability registration; HTML attributes cannot enable the bridge.
+     */
+    public com.sighs.apricityui.webview.WebViewBridge bridge() {
+        if (bridge == null) bridge = new com.sighs.apricityui.webview.WebViewBridge();
+        return bridge;
+    }
+
     @Override
     protected void onInitFromDom(Element origin) {
         requestedUrl = normalizeUrl(getAttributes().get("src"));
@@ -167,6 +404,8 @@ public class Iframe extends Element {
             document.markDirty(this, Drawer.RELAYOUT | Drawer.REPAINT);
         }
     }
+
+    // --- view lifecycle ------------------------------------------------------
 
     @Override
     public void setAttribute(String name, String value) {
@@ -209,18 +448,24 @@ public class Iframe extends Element {
         }
     }
 
-    /** Intrinsic size from the {@code width}/{@code height} attributes, never from the frame. */
+    /**
+     * Intrinsic size from the {@code width}/{@code height} attributes, never from the frame.
+     */
     public Size getIntrinsicSize() {
         return new Size(parseDimension(getAttributes().get("width"), DEFAULT_WIDTH),
                 parseDimension(getAttributes().get("height"), DEFAULT_HEIGHT));
     }
 
-    /** A page may host its own inputs, so the element always accepts committed text. */
+    /**
+     * A page may host its own inputs, so the element always accepts committed text.
+     */
     public boolean canEditText() {
         return true;
     }
 
-    /** Receives committed characters from {@code charTyped}, mirroring {@code AbstractText}. */
+    /**
+     * Receives committed characters from {@code charTyped}, mirroring {@code AbstractText}.
+     */
     public void insertText(String text) {
         if (view != null && text != null && !text.isEmpty()) {
             view.keyText(text);
@@ -248,9 +493,12 @@ public class Iframe extends Element {
             return;
         }
         tickView();
+        if (bridge != null) bridge.tick(view);
         tickIdleCapture();
         tickPointerLeave();
     }
+
+    // --- update stream -------------------------------------------------------
 
     @Override
     public void drawPhase(PoseStack poseStack, Base.RenderPhase phase) {
@@ -298,7 +546,9 @@ public class Iframe extends Element {
         destroyTexture();
     }
 
-    /** Diagnostic snapshot of the native host, or an explanation of why there is none. */
+    /**
+     * Diagnostic snapshot of the native host, or an explanation of why there is none.
+     */
     public String status() {
         if (backendUnavailable) {
             return "unavailable: " + AuiServices.webView().unavailableReason();
@@ -323,8 +573,6 @@ public class Iframe extends Element {
                 + " buttons=" + Integer.bitCount(pressedButtons)
                 + stream;
     }
-
-    // --- view lifecycle ------------------------------------------------------
 
     private void tickView() {
         if (view == null && pendingView == null && requestedUrl != null) {
@@ -384,6 +632,7 @@ public class Iframe extends Element {
     }
 
     private void releaseView() {
+        if (bridge != null) bridge.detach();
         activeUrl = null;
         pressedButtons = 0;
         // Drop the update stream first: closing the view unmaps the block behind it.
@@ -417,6 +666,8 @@ public class Iframe extends Element {
         view.resize(rasterWidth, rasterHeight, zoom);
     }
 
+    // --- input ---------------------------------------------------------------
+
     /**
      * The iframe's raster size and page zoom.
      *
@@ -443,41 +694,32 @@ public class Iframe extends Element {
         double scale = Math.max(MIN_CAPTURE_SCALE, Math.min(1.0d, captureScale));
         double rasterWidthExact = boxWidth * deviceScale * scale;
         double rasterHeightExact = boxHeight * deviceScale * scale;
-        // Area ceiling. Every capture, encode, decode and transfer costs area, and a
-        // GUI-scaled full-screen iframe can easily ask for four million pixels — which the
-        // codec path pays for on every frame. Past this the raster is scaled down and the
-        // zoom is derived from what we got, so the page's CSS viewport is still exact and
-        // only sharpness is traded away.
+        // Ceiling: the framebuffer itself. It follows the display instead of a fixed resolution,
+        // so a 2K or 4K screen gets a raster at its own size and only an element larger than the
+        // whole window is downscaled. Past this the raster is scaled down and the zoom is derived
+        // from what we got, so the page's CSS viewport is still exact and only sharpness is
+        // traded away.
         double area = rasterWidthExact * rasterHeightExact;
-        rasterAreaCapped = area > MAX_CAPTURE_PIXELS;
+        final int[] window = windowDeviceSize();
+        double areaLimit = captureAreaLimit(window);
+        rasterAreaCapped = area > areaLimit;
         if (rasterAreaCapped) {
-            double shrink = Math.sqrt(MAX_CAPTURE_PIXELS / area);
+            double shrink = Math.sqrt(areaLimit / area);
             rasterWidthExact *= shrink;
             rasterHeightExact *= shrink;
         }
-        int rasterWidth = clampViewport((int) Math.round(rasterWidthExact));
-        int rasterHeight = clampViewport((int) Math.round(rasterHeightExact));
+        final int edgeLimit = viewportEdgeLimit(window);
+        int rasterWidth = clampViewport((int) Math.round(rasterWidthExact), edgeLimit);
+        int rasterHeight = clampViewport((int) Math.round(rasterHeightExact), edgeLimit);
         // Derive zoom from the raster we actually got, so a clamped raster still yields
         // the correct CSS viewport.
         double zoom = clampZoom(rasterWidth / boxWidth);
         return new double[]{rasterWidth, rasterHeight, zoom};
     }
 
-    private static int clampViewport(int value) {
-        return Math.max(1, Math.min(MAX_VIEWPORT, value));
-    }
-
-    /** WebView2 clamps ZoomFactor to [0.25, 5] by default and this SDK exposes no way to widen it. */
-    private static double clampZoom(double zoom) {
-        if (!(zoom > 0.0d) || !Double.isFinite(zoom)) {
-            return 1.0d;
-        }
-        return Math.max(MIN_ZOOM, Math.min(MAX_ZOOM, zoom));
-    }
-
-    // --- update stream -------------------------------------------------------
-
-    /** Maps the backend's update channel; called once the view exists. */
+    /**
+     * Maps the backend's update channel; called once the view exists.
+     */
     private void openChannel() {
         if (viewChannel != null || view == null) {
             return;
@@ -492,16 +734,23 @@ public class Iframe extends Element {
             releaseChannel();
             return;
         }
+        // The fallback upload path reads the stream as ints; built once, positioned per
+        // rectangle, and only used by a backend whose uploadTexturePixels returns false.
+        IntBuffer words = viewChannel.buffer().duplicate().order(ByteOrder.LITTLE_ENDIAN).asIntBuffer();
+        channelWords = words.order() == ByteOrder.LITTLE_ENDIAN ? words : null;
         hudLine = FrameTimingHud.registerStream(this::streamStatus);
     }
 
-    /** The stream's counters for the frame-timing HUD; null once the view is gone. */
+    /**
+     * The stream's counters for the frame-timing HUD; null once the view is gone.
+     */
     private String streamStatus() {
         return updates == null ? null : updates.stats();
     }
 
     private void releaseChannel() {
         updates = null;
+        channelWords = null;
         if (hudLine != null) {
             try {
                 hudLine.close();
@@ -545,7 +794,9 @@ public class Iframe extends Element {
         lastDrawNanos = now;
     }
 
-    /** Applies every fully written packet: only the rectangles that changed. */
+    /**
+     * Applies every fully written packet: only the rectangles that changed.
+     */
     private void drainUpdates() {
         if (updates == null) {
             return;
@@ -554,47 +805,24 @@ public class Iframe extends Element {
             updates.drain(updateTarget);
         } catch (RuntimeException failure) {
             // A failed apply must not take the frame down; the canvas simply stays as it is
-            // until the next update, and the reader re-syncs itself.
+            // until the next update, and the reader re-syncs itself. Log it, because a stream
+            // that stops here looks exactly like "the iframe froze" and nothing else reports it.
+            ApricityUI.LOGGER.warn("[AUI WebView] update stream stopped: {}", status(), failure);
             updates = null;
             releaseChannel();
         }
     }
 
     /**
-     * Turns one dirty rectangle of the stream into a texture update.
+     * Draws the view's texture, snapped to whole device pixels.
      *
-     * <p>The image is written first and the same region is uploaded straight after, so a
-     * packet that touches one button rewrites one button — no full-frame copy, no full
-     * texture upload.</p>
+     * <p>Layout positions are fractional more often than not (percentages, flex centring,
+     * fractional document scales). A quad that starts half a pixel off makes the sampler read
+     * every texel halfway between two texels, so a 1:1 texture comes out uniformly soft — the
+     * same look as an upscale, which is what made the page read as blurry even after the raster
+     * matched the screen. Snapping the quad to the device grid costs at most a sub-pixel shift
+     * and removes that resample entirely.</p>
      */
-    private final FrameUpdateChannel.Target updateTarget = new FrameUpdateChannel.Target() {
-        @Override
-        public void resize(int width, int height) {
-            if (width <= 0 || height <= 0) {
-                return;
-            }
-            if (nativeImage != null && nativeImage.getWidth() == width
-                    && nativeImage.getHeight() == height) {
-                return;
-            }
-            destroyTexture();
-            nativeImage = new NativeImage(NativeImage.Format.RGBA, width, height, true);
-            texture = AuiServices.render().createDynamicTexture("webview/" + uuid, nativeImage, true);
-            textureLocation = TextureKey.of("webview/"
-                    + UUID.nameUUIDFromBytes(uuid.toString().getBytes(StandardCharsets.UTF_8)));
-            AuiServices.render().registerTexture(texture, AuiServices.resources().textureLocation(textureLocation));
-        }
-
-        @Override
-        public void rect(int x, int y, int width, int height, int[] pixels) {
-            if (nativeImage == null || texture == null || textureLocation == null) {
-                return;
-            }
-            AuiServices.render().writeImagePixels(nativeImage, x, y, width, height, pixels);
-            AuiServices.render().uploadTextureRegion(texture, nativeImage, x, y, width, height, true);
-        }
-    };
-
     private void drawView(PoseStack poseStack, Rect rectRenderer) {
         if (textureLocation == null) {
             return;
@@ -604,9 +832,20 @@ public class Iframe extends Element {
         if (contentSize.width() <= 0 || contentSize.height() <= 0) {
             return;
         }
+        // Device pixels per document pixel, the same factor the raster size is derived from.
+        double scale = documentScale();
         ImageDrawer.draw(poseStack, textureLocation,
-                (float) contentPos.x, (float) contentPos.y,
-                (float) contentSize.width(), (float) contentSize.height(), true);
+                DevicePixelGrid.snap(contentPos.x, scale), DevicePixelGrid.snap(contentPos.y, scale),
+                DevicePixelGrid.snap(contentSize.width(), scale),
+                DevicePixelGrid.snap(contentSize.height(), scale), true);
+    }
+
+    /**
+     * Device pixels per document pixel for this element's document.
+     */
+    private double documentScale() {
+        double scale = document == null ? 1.0d : document.getViewport().scissorScale();
+        return scale > 0.0d && Double.isFinite(scale) ? scale : 1.0d;
     }
 
     private void destroyTexture() {
@@ -620,8 +859,6 @@ public class Iframe extends Element {
         nativeImage = null;
         textureLocation = null;
     }
-
-    // --- input ---------------------------------------------------------------
 
     private void handleMouseMove(Event event) {
         if (!(event instanceof MouseEvent mouse) || view == null) {
@@ -675,11 +912,6 @@ public class Iframe extends Element {
         consume(event);
     }
 
-    /** Bit for one DOM button index; only used to remember which buttons are held. */
-    private static int buttonBit(int button) {
-        return button >= 0 && button < 8 ? 1 << button : 0;
-    }
-
     private void handleWheel(Event event) {
         if (!(event instanceof MouseEvent mouse) || view == null) {
             return;
@@ -694,20 +926,6 @@ public class Iframe extends Element {
         // Prevent the engine's own scroll default; this element owns the gesture.
         event.preventDefault();
         consume(event);
-    }
-
-    private static int modifiersOf(MouseEvent mouse) {
-        int modifiers = 0;
-        if (mouse.shiftKey) {
-            modifiers |= GLFW.GLFW_MOD_SHIFT;
-        }
-        if (mouse.controlKey) {
-            modifiers |= GLFW.GLFW_MOD_CONTROL;
-        }
-        if (mouse.altKey) {
-            modifiers |= GLFW.GLFW_MOD_ALT;
-        }
-        return modifiers;
     }
 
     private void handleKeyDown(Event event) {
@@ -759,7 +977,11 @@ public class Iframe extends Element {
         view.mouseLeave();
     }
 
-    /** Maps a document-space pointer position to viewport pixels; null when outside. */
+    // --- helpers -------------------------------------------------------------
+
+    /**
+     * Maps a document-space pointer position to viewport pixels; null when outside.
+     */
     private int[] toViewport(MouseEvent mouse) {
         return toViewport(mouse, false);
     }
@@ -796,68 +1018,5 @@ public class Iframe extends Element {
             return (int) Math.round(localY);
         }
         return clamp((int) Math.round(localY * viewportHeight / contentHeight), viewportHeight);
-    }
-
-    private static int clamp(int value, int limit) {
-        return Math.max(0, Math.min(limit, value));
-    }
-
-    private static void consume(Event event) {
-        event.stopPropagation();
-    }
-
-    // --- helpers -------------------------------------------------------------
-
-    /** {@code capture="lossless"} / {@code capture="fast"}; anything else means auto. */
-    private static int parseCaptureQuality(String value) {
-        if (value == null) {
-            return AuiWebViewService.CAPTURE_AUTO;
-        }
-        String normalized = value.trim().toLowerCase(Locale.ROOT);
-        if ("stream".equals(normalized) || "raw".equals(normalized)) {
-            return AuiWebViewService.CAPTURE_STREAM;
-        }
-        if ("lossless".equals(normalized) || "png".equals(normalized)) {
-            return AuiWebViewService.CAPTURE_LOSSLESS;
-        }
-        if ("fast".equals(normalized) || "jpeg".equals(normalized)) {
-            return AuiWebViewService.CAPTURE_FAST;
-        }
-        return AuiWebViewService.CAPTURE_AUTO;
-    }
-
-    /** {@code capture-scale="0.5"} captures at half the box's device resolution. */
-    private static double parseCaptureScale(String value) {
-        if (value == null || value.isBlank()) {
-            return 1.0d;
-        }
-        try {
-            double parsed = Double.parseDouble(value.trim());
-            if (!Double.isFinite(parsed) || parsed <= 0.0d) {
-                return 1.0d;
-            }
-            return Math.max(MIN_CAPTURE_SCALE, Math.min(1.0d, parsed));
-        } catch (NumberFormatException ignored) {
-            return 1.0d;
-        }
-    }
-
-    private static String normalizeUrl(String value) {
-        if (value == null) {
-            return null;
-        }
-        String trimmed = value.trim();
-        return trimmed.isEmpty() ? null : trimmed;
-    }
-
-    private static int parseDimension(String value, int fallback) {
-        if (value == null || value.isBlank()) {
-            return fallback;
-        }
-        try {
-            return Math.max(1, (int) Math.round(Double.parseDouble(value.trim())));
-        } catch (NumberFormatException ignored) {
-            return fallback;
-        }
     }
 }

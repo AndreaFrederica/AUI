@@ -1,5 +1,126 @@
 # Changelog
 
+## 1.3.2 - 2026-11-26
+
+### Added
+
+- CSS floats: `float: left | right | none` and `clear: left | right | both | none`. A floated element's margin box is placed at the edge of its block container and later inline content wraps around it, in both block and inline formatting. `display: flow-root` now establishes a block container that contains its floats, and floats are ignored on direct flex and grid items, as in browsers.
+- Sticky positioning: `position: sticky` with at least one non-`auto` `top`/`right`/`bottom`/`left` (or the `inset` shorthand) keeps the element's place in layout but offsets its painted box against the nearest scrollport, then leaves at the end of its containing block. It applies in normal flow, flex, grid, and table headers; `overflow: hidden` establishes a scrollport while `overflow: clip` alone lets the element look farther up the tree. This release covers horizontal writing mode and physical edge properties.
+- DevTools 3D view: the toolbar's new view captures a static snapshot of element bounds separated in paint order, colors layers from purple (back) to pink (front), and labels non-`auto` values of `z-index`. Only real DOM elements become layers — `::before`/`::after` decorations do not. Left-drag rotates, right-drag pans, and the wheel zooms; hovering highlights a layer and shows its captured value, and clicking one selects and reveals that node in the DOM inspector. Later page animations and layout changes do not alter the snapshot; re-entering the view or switching/reloading the document captures it again. The reset button restores rotation, zoom, and panning together.
+
+### Changed
+
+- Layout, scrolling, text selection, animation, and event handling now share committed geometry instead of each recomputing what it needs. Scrollbar CSS is interpreted by the new `style/ScrollbarStyle` without reading layout, scrollbar occupancy is solved from used boxes by the new `layout/ScrollLayout` before visual geometry is published, line boxes live in `layout/TextFlowGeometry` so document transforms and scrolling no longer invalidate text lines, and sticky offsets are resolved as visual-only offsets that keep the layout box unchanged. `ScrollModel` and `TextSelection` are reduced accordingly. Auto scrollbars only ever add bars within a layout pass, and a new layout recomputes the mandatory gutters from scratch, which keeps content from oscillating between bar and no-bar states.
+- The DevTools toolbar orders the element picker next to the drag handle, before Save, so selection and panel movement are adjacent.
+
+### Fixed
+
+- Reapplying styles from the cache (stylesheet reload, runtime stylesheet registration, DevTools stylesheet edits) only invalidated `body`, so the root element kept its old computed style and rules targeting `html` did not take effect until something else dirtied it (#155). The document element is now invalidated and repainted too.
+- Rounded rectangles now honor each corner's horizontal and vertical radii independently: the filter pipeline passes `ClipRadii` and `ClipRadiiY` to the shader, so filtered and masked layers keep elliptical corners instead of receiving a mixed set of values (#157). Corner radii whose arcs cross the opposite edge are clipped to the border box (CSS Backgrounds 3 §4.2) instead of distorting the whole shape, `padding-box`/`content-box` mask radii inset from the already-scaled border-box radius, and zero-sized rects no longer emit geometry.
+- Inline SVG now resolves `fill`, `fill-opacity`, `fill-rule`, `stroke`, `stroke-opacity`, `stroke-width`, `stroke-linecap`, and `stroke-linejoin` through the CSS cascade, so they inherit from HTML ancestors and follow `currentColor`. A computed paint change — such as a `:hover` color — invalidates the SVG raster and re-renders it instead of keeping the first render's colors (#162).
+
+## 1.3.1 - 2026-11-06
+
+### Performance
+
+- Style recalculation now returns early for elements that provably cannot change: when the computed style is cached and both the matched rules and the inherited style are unchanged, the pass only resets pseudo-element state instead of resolving and diffing a new style. Changing an ancestor selector that only affects paint no longer invalidates the computed style of its children.
+- Natural-size text measurement has its own cache, so scratch measurements no longer evict the layout text cache. Entries are dropped when the element's layout or text dependency changes, font metrics are rebuilt, or the document's root font size changes.
+- Layout measurement caching now spans whole style-recalculation and subtree-commit passes, so repeated natural-size queries within a pass reuse results instead of opening a fresh measurement context each time.
+- A `RELAYOUT` on an out-of-flow subtree whose parent already has committed geometry no longer forces a full-document commit; only that subtree is laid out again in the same pass.
+- Root font size is memoized per document against its `font-size` declaration and the viewport size, and lengths that contain no `em` units no longer resolve the root font size at all.
+- Subtree commits iterate the document's committed targets instead of scanning the paint list for every commit, and the render queue only treats reorder, layout, and hit-test masks as global dirty work.
+- Percentage `transform` transitions resolve lazily. While a percentage translation has no measured basis, the raw transform is kept and its components are produced on the first frame that can measure the element, so frame priming and rapid retargeting no longer trigger layout measurement of a pending transform. Transition lengths are also parsed through `CssLength` and only resolve a percentage basis when the value actually depends on one.
+
+### Fixed
+
+- Fixed gradients rendering black on 1.20.1. The legacy `background` shader now declares the separate alpha blend the newer pipeline uses (`srcrgb=srcalpha`, `dstrgb=1-srcalpha`, alpha `one`/`1-srcalpha`); with the default blend function the shader's alpha was composited incorrectly and the gradient came out opaque black.
+- Custom CSS cursors no longer push a manual `+1000` Z offset before drawing. The overlay batch is already flushed after page content, so the cursor still draws last, without the translate disturbing depth ordering.
+
+## 1.3.0 - 2026-11-02
+
+### Added
+
+- Added Forge 1.16.5 and NeoForge 26.3 targets, bringing the release matrix to ten loader/Minecraft combinations. The 26.3 port adapts input to SDL scancodes and rendering to the new pipeline, picture-in-picture GUI, item-rendering, and world-projection APIs.
+- Added `<model>` for entity and player previews (#152). `type="bakedmodel"` takes an entity registry ID, while `type="player"` takes a player UUID and loads its skin asynchronously. Previews support `yaw`/`pitch`/`roll`, optional `flat` projection, CSS sizing, clipping, filters, and transforms. They are static previews rather than ticking entities; creature previews require a client world, while player previews also work without one.
+- Added lite jars for every target, keeping runtime classes and the `ore` theme while omitting bundled documentation, developer-tool pages, test pages, and other themes. Normal and lite jars are published to CurseForge, Modrinth, and Maven; Maven uses the `lite` classifier.
+- Added page-open timing diagnostics covering document creation, stylesheet readiness, initial layout, and first paint to help distinguish loading costs.
+- WebView pages can request capture explicitly with `window.aui.invalidate()` and switch between automatic and manual capture with `window.aui.setCaptureMode('auto' | 'manual')`.
+
+- `ApricityEvents.startup` gives KubeJS `startup_scripts` the startup loading screen: the event fires from the loading screen's first frame (by then the startup scripts are loaded) and carries the phase's `StartupContext`, so a script calls `event.context.loadProject('loading')` exactly like a Java hook. Annotations are a Java concept, so this event is how scripts reach the same API; the browser starts when the event installs its page, so a script's page is the first one shown too, about half a second later than a `@StartupHook` page. KubeJS 1.18.2 predates event groups and keeps the `ApricityUI.startup()` accessor.
+- `@StartupHook`: a static method annotated with it runs once at the start of client loading, with a `StartupContext` that shows a page in the startup loading screen (`showPage`/`showPageUrl`/`loadProject`/`eval`/`hide`) and reads what the client knows that early — raster size, physical and scaled window size, GUI scale, game directory, elapsed phase time, and whether the WebView backend is available. `loadProject` takes a **folder project** whose entry point is `index.html`: the instance is checked first (relative to the page root, relative to the game directory, or absolute) and counts only when the folder exists, is not empty and holds an `index.html`; otherwise the same folder is taken from the jars or resource packs and extracted whole under `apricity/` at the corresponding place (bounded, existing files never overwritten), because the browser cannot read a jar. A `<instance>/apricity/startup/` project is picked up with no code at all. Local pages are loaded over `file:` with `--allow-file-access-from-files`, so `fetch` and ES modules behave as they would over http. Hooks are discovered through the loader's annotation scanner (any mod, any package), run in `priority` order with stable ties, and an exception in one is logged without failing the launch. The startup page's browser is started right after the last hook returns, so the page a hook configures is the page it opens. `-Dapricityui.startupOverlay=false` disables the whole loading screen.
+
+### Performance
+
+- Gradient backgrounds gain a GPU shader path with batching and reusable background targets, reducing CPU geometry generation and repeated work for layered gradients; unsupported cases retain the existing rendering path.
+- DOM construction and `innerHTML` replacement batch element-index updates and layout invalidation instead of repeating whole-tree work for each inserted node. Initial layout revisions are tracked to avoid redundant commits.
+- Page opening does less repeated HTML/CSS parsing, selector matching, style resolution, and natural-size measurement. Grid syntax, transition properties, inline styles, image geometry, SVG layout checks, and font codepoint data reuse cached or scratch results.
+- Initial layout slicing is no longer forced back into a synchronous commit by the tick path. Stylesheet loading and invalidation are coalesced to reduce repeated style rebuilds and reflows.
+- Eligible static screen documents can reuse an offscreen paint cache until their visual state changes. Unsupported content, effects, oversized targets, or unavailable offscreen rendering fall back to normal painting. Transform-only animation updates avoid unnecessary layout work, and pending glyph uploads keep incomplete text from being cached as a finished frame.
+- `<iframe>` capture now combines idle-page backoff, shared capture budgeting across WebViews, and explicit refresh requests. Manual capture mode can avoid continuous polling of unchanged pages; input and pending frame updates still request fresh content. Native capture/decode scheduling and diagnostics were also improved.
+- `<iframe>` now ships tighter dirty rectangles and uploads them straight from shared memory. The 32×32 tile grid is a detection grid only: each merged box is shrunk to the rows and columns that actually differ before it is published, so moving one 40×40 box costs ~6.4K pixels per frame instead of the ~24.6K the tile-aligned boxes carried. The BGRA→RGBA flip moved out of the per-capture whole-canvas pass and into the copy of the rectangles being sent (the reference canvas keeps the source's byte order), and the render thread no longer walks pixels through `int[]` into a `NativeImage`: each rectangle is handed to the texture as a direct buffer through the new `AuiRenderService.uploadTexturePixels` (`glTexSubImage2D` on 1.18.2–1.21.1, `CommandEncoder.writeToTexture` on 26.1), which also removes the per-pixel `setPixelRGBA`/`setPixelABGR` loop for a repainting page.
+
+### Changed
+
+- `ApricityContainerScreen<M extends ApricityContainerMenu>` now preserves custom menu subtypes through the screen API instead of fixing the menu type to the base class (#153).
+- The built-in theme switcher inherits the active theme's styling, uses updated icons, and discovers themes from files rather than a hardcoded list.
+- `<iframe>` is rasterised at its element's device resolution again, and both ceilings now come from the display instead of a constant: the area limit is the window's framebuffer area (2560×1440 on a 2K screen, 3840×2160 on a 4K one) and the per-edge limit is the longer framebuffer edge clamped to 4096–8192, so only an element larger than the whole window is downscaled. The viewport fallback used when the monitor mode cannot be queried is the window framebuffer too, instead of a hardcoded 1920×1080 that laid the page out at ~1080p and scaled it up on bigger screens. The drawn quad is also snapped to whole device pixels, because a half-pixel offset makes the sampler read every texel halfway between two texels and softens a 1:1 texture the same way an upscale does. Capture cost is unchanged per pixel (≈20 ms + 28 ms per megapixel) — `capture-scale` is the knob for trading sharpness back, and `Iframe.status()` keeps reporting `raster=` / `raster capped by area` so the actual resolution is visible.
+- `<canvas>` now rasterises at its content box's device resolution instead of at CSS-pixel resolution. The raster is rebuilt whenever the box or the display scale changes, and existing content is rescaled rather than dropped; the 2D context gets the device scale as a base transform, so scripts keep drawing in CSS pixels at the same coordinates. The drawn quad is snapped to the device pixel grid and sized from the raster, so a 1:1 texture is never sampled at a half-texel offset. `width`/`height` attributes are now the design (intrinsic) size, `canvas.width/height` stays in CSS px, and the pixel-level APIs (`getBitmapWidth/getBitmapHeight`, `getImageData/putImageData`, `createImageBitmap(canvas)`) use raster pixels.
+
+### Fixed
+
+- Fixed stencil and scissor state leaking between parent and offscreen render targets when combining filters, backdrop filters, blend modes, or mask images (#151). Nested layers and exception cleanup now restore the parent target's clipping state.
+- Fixed duplicate keybinding and client-loader event registration on NeoForge 26.3.
+- `window.devicePixelRatio` reported the Minecraft GUI scale, which is a different number from "physical pixels per document CSS pixel" whenever the display scaling differs from the GUI scale — so the standard `canvas.width = rect.width * devicePixelRatio` recipe produced a backing store that was too large or too small and the canvas was resampled either way. It now returns the document viewport's device scale (`scissorScale`, the value iframes already use for their rasters) and falls back to 1 when no document is active.
+- The client-only `/aui worldwindow` debug window now has a prominent fixed Close button (revealed only by the client command) that destroys the WorldWindow and its Document. World windows are also cleared automatically when the client leaves the level or returns to the title screen, so a debug window no longer survives a save change.
+- `<iframe>` froze parts of the picture during large repaints. When the remaining payload budget of a packet could not hold one row of the next dirty rectangle, the packer added the row anyway: `payloadBytes` then exceeded the 256 KB cap the reader validates, the reader called the packet implausible and dropped it whole — up to a thousand rectangles at once — while the host had already advanced the reference canvas it diffs against, so that area stayed at an older frame until it changed again. The packer now stops the packet when no row fits, and the reader tolerates one extra canvas row of payload so a marginally oversized packet is applied instead of discarded. `Iframe.status()` / the frame-timing HUD reports `resync=` when a packet is dropped this way.
+- Clicking an `<iframe>` no longer lets the outer document's text-selection handler move focus to BODY. Mouse input already reached the embedded page, but losing the framework focus prevented keyboard and character input from being forwarded to WebView2.
+- Resizing the game window no longer rebuilds the open AUI page. `Screen.resize()` calls `init()`; `ApricityScreen` and `ApricityContainerScreen` now reuse the live Document instead of removing and recreating it, so form values, scroll positions, and script state survive a resize. A new Document is still created on first open, after close, or when the old one was disposed.
+
+## 1.2.9 - 2026-10-26
+
+### Added
+
+- Page zoom now shows a transient HUD in the bottom-right with the current percentage and a Reset button. It appears for Ctrl+wheel, Ctrl+`+`/`-`, and Ctrl+`0`, stays while hovered, and auto-hides after a few seconds; Reset is equivalent to Ctrl+`0`.
+- Built-in Markdown rendering backed by Txtmark 0.13 (Apache-2.0): `com.sighs.apricityui.util.Markdown.render/renderSafe` on the Java side and `ApricityUI.renderMarkdown/renderMarkdownSafe` for page scripts. The parser classes are merged into every target jar, so no extra mod or runtime dependency is needed. `renderSafe` only escapes Txtmark's container-tag blacklist and is not an HTML sanitizer.
+- Added the `t16-terminal` and `t02-create` themes, rebuilt the Modrinth light/dark themes, and added `SKILL.md` guides for the built-in themes. `t00-example.html` now previews the new themes as well.
+- CSS `image-rendering` is implemented with browser semantics for `auto`, `smooth`, `high-quality`, `pixelated`, and `crisp-edges`. It is inherited, initial value `auto`, and selects linear versus nearest-neighbour sampling for `<img>`, `<texture>`, `background-image`, `border-image`, `mask-image`, `<canvas>`, and `<svg>` by switching the existing image render type's texture filter. `auto` scales smoothly like browsers; `smooth`/`high-quality` are linear; `crisp-edges` is nearest in both directions; `pixelated` uses nearest when enlarging and falls back to smooth when shrinking, so upscaled pixel art stays crisp without aliasing downscaled images. Because `<texture>` cannot report its intrinsic size, `pixelated` there is treated as enlarging. The non-standard `blur` attribute still parses but now matches the `auto` default.
+- Page scripts now have a runtime fallback chain. On Forge 1.18.2/1.19.2/1.20.1 and NeoForge 1.21.1, KubeJS is used when installed; without KubeJS but with Rhino, AUI runs the scripts on its own Rhino runtime (per-document scope, `ApricityUI` client binding, `event` binding, cached `global.js` compilation, browser-like primitive wrapping, and the same refresh-generation scope reset); with neither mod installed, pages still render and only scripts are skipped. `mods.toml` and `neoforge.mods.toml` now declare both KubeJS and Rhino as optional dependencies, so the loader never requires them. NeoForge 26.1 keeps its existing Rhino-only bridge and now declares Rhino as an optional dependency. Fabric targets still do not execute page scripts.
+- `<iframe>` now has an explicit Java <-> WebView2 JSON bridge: `iframe.bridge().allowPage(...)`, `register(...)`, `emit(...)`, and the page-side `window.aui` API with request timeouts, bounded queues, per-document sessions, navigation resets, and JSON-only messages. It uses WebView2 messages plus a bounded JNI queue and never opens a network port or exposes Java reflection.
+- Added the `aui-hyphen-break` meta to control hyphen line breaking and an HTML preload meta for template warm-up.
+
+### Changed
+
+- Native table layout now supports the Markdown table subset and built-in themes were migrated to it, including colspan/rowspan, automatic column sizing, per-cell borders, and scroll overflow.
+- Grid and Flex layout were extended: explicit/implicit tracks, `grid-auto-flow` and dense packing, line names and `grid-template-areas`, subgrid, track sizing keywords, baseline/content alignment, anonymous direct text, and absolute items against grid lines. Flex wrapping, positioned items, and min/max distribution were aligned with browser behavior.
+- Layout dispatch, geometry state, cache invalidation, and commit scheduling were consolidated under the `layout` package while preserving the existing CSS algorithms and lazy measurement behavior.
+
+### Performance
+
+- Canvas and SVG now use classic batching plus cached surfaces: draws are batched by state, unchanged surfaces are not re-uploaded, and dirty regions are tracked, reducing per-frame texture uploads and draw calls for scripted canvases, SVG rasters, and animations.
+- `clientWidth`/`clientHeight`/`offsetWidth`/`offsetHeight` now open the same `GeometryQueryScope` as `getBoundingClientRect()`, so repeated geometry reads reuse layout/style measurement caches instead of re-running nested layout.
+- Updating an element's direct `textContent`/`innerText` no longer marks `REORDER`, so timeline clocks, status bars, and other high-frequency text updates stop rebuilding the paint list; structural child replacement still requests `REORDER`.
+- Grid/table measurement, Flex wrapping, and repeated-gradient generation were tightened to avoid repeated parsing and unbounded work while preserving layout output.
+
+### Fixed
+
+- The HTML tokenizer is now quote-aware: `>` and `<` inside single- or double-quoted attribute values no longer terminate the tag, so attributes such as `title="1 > 0"` keep their value and later attributes are not leaked into text (issue #148). Stray `<` characters in text are also preserved instead of being dropped.
+- SVG paint properties now resolve from CSS as well as presentation attributes (issue #147). `fill`, `fill-opacity`, `fill-rule`, `stroke`, `stroke-width`, `stroke-opacity`, `stroke-linecap`, and `stroke-linejoin` follow element CSS > presentation attribute > inherited paint > initial value, including `currentColor`; CSS changes are included in the raster fingerprint and trigger a re-render.
+- `currentColor` now resolves against the element's own color in borders, backgrounds, background shorthands, gradients, and mask images, including inherited colors and color changes that invalidate cached backgrounds (issue #145).
+- Text inputs now dispatch `input` for deletion as well as insertion, and the event carries browser-compatible `inputType` values such as `deleteContentBackward`, `deleteByCut`, `insertFromPaste`, and `insertFromDrop` (issue #142).
+- Elements with inline `width`/`height` no longer collapse to 0x0 when `display:inline` and the element is a replaced tag such as `<texture>` or `<sprite>`; replaced-inline sizing is now shared between size computation and normal-flow layout.
+- CSS functions with omitted arguments and shortened animation/transition declarations are now parsed like browsers, restoring theme animations that previously stopped after a missing argument.
+- Recipe preview arrows, flame, slots, and product layout were corrected in the built-in CSS.
+- Corrected browser-parity issues across theme layouts: flex wrapping and anonymous text, positioned flex sizing, absolute static positions and shrink-to-fit text, max-width inline wrapping, input stretching, text transforms, border rendering, rounded zero-blur shadows, and variable-backed background shorthands.
+- Fixed repeating-gradient image sizing and phase, clipped gradient backgrounds, shadow falloff and knockout, SVG image handling, and the Vaporwave perspective floor grid.
+- Fixed HTML/tag extraction that could truncate documents, and improved runtime stylesheet refresh and link lifecycle handling.
+- Fixed stale or incorrectly ordered incremental hit-test geometry, root inline-transform reentrancy, and redundant multi-document layer ordering.
+- Fixed item tooltips hidden behind UI documents, native items incorrectly showing through overlays, and item lighting changing with GUI scale.
+- Fixed native Minecraft-font rendering at custom UI batch boundaries.
+- Fixed unbound/unknown key codes opening tools and Alt handling consuming unrelated native clicks; corrected Forge 1.18.2 mouse interception to use the cancellable raw-input event.
+- Fixed 26.1 client/render integration and filter/backdrop-filter state, viewport scaling, post-processing pipeline bypass, and pipeline handling.
+- Fixed Windows WebView native-library compatibility with older MSVC runtimes already loaded by JBR 21.0.8, and added native smoke-test tooling.
+- Removed the custom JavaScript `console` that conflicted with KubeJS.
+
 ## 1.2.7 - 2026-10-05
 
 ### Added

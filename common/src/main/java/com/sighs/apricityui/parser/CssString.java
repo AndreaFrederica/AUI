@@ -7,11 +7,13 @@ import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Set;
+
 import com.sighs.apricityui.init.Element;
 
 /**
  * CSS 字符串处理的纯函数工具（class 解析、伪元素 content 解析、转义还原）。
- * 从 Element 拆出，不持有状态。Element 上的 parseClassNames 保留为受保护委托，
+ * 从 Element 拆出，仅持有有界且线程隔离的纯解析缓存，不保留 DOM 引用。
+ * Element 上的 parseClassNames 保留为受保护委托，
  * 供子类以继承方式调用。
  */
 public final class CssString {
@@ -53,7 +55,7 @@ public final class CssString {
     public static String unescapeCssString(String value) {
         if (value == null || value.isEmpty()) return "";
         StringBuilder result = new StringBuilder(value.length());
-        for (int index = 0; index < value.length();) {
+        for (int index = 0; index < value.length(); ) {
             char current = value.charAt(index++);
             if (current != '\\') {
                 result.append(current);
@@ -98,7 +100,9 @@ public final class CssString {
         return result.toString();
     }
 
-    /** 在顶层（不进入方括号/圆括号/引号）查找第一个指定分隔符的下标，找不到返回 -1。 */
+    /**
+     * 在顶层（不进入方括号/圆括号/引号）查找第一个指定分隔符的下标，找不到返回 -1。
+     */
     public static int findTopLevelDelimiter(String value, char delimiter) {
         if (value == null) return -1;
         int bracketDepth = 0, parenDepth = 0;
@@ -109,7 +113,10 @@ public final class CssString {
                 if (ch == quote && (i == 0 || value.charAt(i - 1) != '\\')) quote = 0;
                 continue;
             }
-            if (ch == '\'' || ch == '"') { quote = ch; continue; }
+            if (ch == '\'' || ch == '"') {
+                quote = ch;
+                continue;
+            }
             if (ch == '[') bracketDepth++;
             else if (ch == ']') bracketDepth = Math.max(0, bracketDepth - 1);
             else if (ch == '(') parenDepth++;
@@ -119,7 +126,9 @@ public final class CssString {
         return -1;
     }
 
-    /** 按顶层分隔符切分（方括号/圆括号/引号内不切）。不 trim、保留空段。 */
+    /**
+     * 按顶层分隔符切分（方括号/圆括号/引号内不切）。不 trim、保留空段。
+     */
     public static List<String> splitTopLevel(String value, char delimiter) {
         ArrayList<String> result = new ArrayList<>();
         if (value == null || value.isEmpty()) return result;
@@ -131,7 +140,10 @@ public final class CssString {
                 if (ch == quote && (i == 0 || value.charAt(i - 1) != '\\')) quote = 0;
                 continue;
             }
-            if (ch == '\'' || ch == '"') { quote = ch; continue; }
+            if (ch == '\'' || ch == '"') {
+                quote = ch;
+                continue;
+            }
             if (ch == '[') bracketDepth++;
             else if (ch == ']') bracketDepth--;
             else if (ch == '(') parenDepth++;
@@ -145,7 +157,30 @@ public final class CssString {
         return result;
     }
 
-    /** 按顶层空白切分，函数体内的空白不切，顶层 '/' 作为独立 token。 */
+    /**
+     * 按顶层空白切分，函数体内的空白不切，顶层 '/' 作为独立 token。
+     */
+    private static final ThreadLocal<java.util.Map<String, List<String>>> TOKEN_CACHE = ThreadLocal.withInitial(
+            () -> new java.util.LinkedHashMap<>(64, 0.75f, true) {
+                @Override
+                protected boolean removeEldestEntry(java.util.Map.Entry<String, List<String>> eldest) {
+                    return size() > 512;
+                }
+            });
+
+    /** Immutable tokens for read-only style parsing; the legacy splitter still returns a fresh mutable list. */
+    public static List<String> splitTopLevelTokensCached(String raw) {
+        if (raw == null || raw.isBlank()) return List.of();
+        if (raw.length() > 4096) return List.copyOf(splitTopLevelTokens(raw));
+        var cache = TOKEN_CACHE.get();
+        List<String> tokens = cache.get(raw);
+        if (tokens == null) {
+            tokens = List.copyOf(splitTopLevelTokens(raw));
+            cache.put(raw, tokens);
+        }
+        return tokens;
+    }
+
     public static List<String> splitTopLevelTokens(String raw) {
         ArrayList<String> tokens = new ArrayList<>();
         if (raw == null || raw.isBlank()) return tokens;
@@ -176,13 +211,17 @@ public final class CssString {
         return tokens;
     }
 
-    /** CSS 值规范化：direction → rtl/ltr。 */
+    /**
+     * CSS 值规范化：direction → rtl/ltr。
+     */
     public static String normalizeDirection(String raw) {
         String value = raw == null ? "" : raw.trim().toLowerCase(Locale.ROOT);
         return "rtl".equals(value) ? "rtl" : "ltr";
     }
 
-    /** CSS 值规范化：text-align → 合法值，默认 start。 */
+    /**
+     * CSS 值规范化：text-align → 合法值，默认 start。
+     */
     public static String normalizeTextAlign(String raw) {
         String value = raw == null ? "" : raw.trim().toLowerCase(Locale.ROOT);
         return switch (value) {
@@ -191,7 +230,9 @@ public final class CssString {
         };
     }
 
-    /** CSS 值规范化：vertical-align → 合法值，默认 baseline。 */
+    /**
+     * CSS 值规范化：vertical-align → 合法值，默认 baseline。
+     */
     public static String normalizeVerticalAlign(String raw) {
         String value = raw == null ? "" : raw.trim().toLowerCase(Locale.ROOT);
         return switch (value) {
@@ -200,7 +241,9 @@ public final class CssString {
         };
     }
 
-    /** CSS 值规范化：white-space → 合法值，默认 normal。 */
+    /**
+     * CSS 值规范化：white-space → 合法值，默认 normal。
+     */
     public static String normalizeWhiteSpace(String raw) {
         String value = raw == null ? "" : raw.trim().toLowerCase(Locale.ROOT);
         return switch (value) {
@@ -209,7 +252,9 @@ public final class CssString {
         };
     }
 
-    /** CSS 值规范化：word-break → 合法值，默认 normal。 */
+    /**
+     * CSS 值规范化：word-break → 合法值，默认 normal。
+     */
     public static String normalizeWordBreak(String raw) {
         String value = raw == null ? "" : raw.trim().toLowerCase(Locale.ROOT);
         return switch (value) {
@@ -218,7 +263,9 @@ public final class CssString {
         };
     }
 
-    /** CSS 值规范化：text-decoration → 小写，unset/initial → none。 */
+    /**
+     * CSS 值规范化：text-decoration → 小写，unset/initial → none。
+     */
     public static String normalizeTextDecoration(String raw) {
         if (raw == null || raw.isBlank()) return "none";
         String normalized = raw.trim().toLowerCase(Locale.ROOT);
@@ -226,12 +273,15 @@ public final class CssString {
         return normalized;
     }
 
-    /** 判断 token 是否为 CSS 颜色（十六进制/rgb()/rgba()/hsl()/hsla()/颜色关键字）。 */
+    /**
+     * 判断 token 是否为 CSS 颜色（十六进制/rgb()/rgba()/hsl()/hsla()/颜色关键字）。
+     */
     public static boolean isColorToken(String token) {
         if (token == null || token.isBlank()) return false;
         String value = token.trim().toLowerCase(Locale.ROOT);
         if (Color.isColorKeyword(value)) return true;
         if (value.startsWith("#")) return true;
+        if ("currentcolor".equals(value)) return true;
         return value.startsWith("rgb(") || value.startsWith("rgba(")
                 || value.startsWith("hsl(") || value.startsWith("hsla(")
                 || isSrgbLinearColorFunction(value);

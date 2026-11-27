@@ -5,7 +5,7 @@ import com.sighs.apricityui.client.Client;
 import com.sighs.apricityui.layout.Position;
 import com.sighs.apricityui.layout.Size;
 import com.sighs.apricityui.screen.ApricityScreen;
-import com.sighs.apricityui.spi.AuiClientService;
+import com.sighs.apricityui.spi.MinecraftClientService;
 import com.sighs.apricityui.style.Text;
 import net.minecraft.client.Minecraft;
 import net.minecraft.world.phys.Vec3;
@@ -15,6 +15,7 @@ import org.joml.Vector3f;
 
 import java.io.File;
 import java.lang.annotation.Annotation;
+import java.lang.reflect.Method;
 import java.net.URI;
 import java.nio.file.Path;
 import java.util.Map;
@@ -22,11 +23,11 @@ import java.util.function.Consumer;
 import java.util.function.Predicate;
 
 /**
- * Forge implementation of {@link AuiClientService}, delegating to the loader's
+ * Forge implementation of {@link MinecraftClientService}, delegating to the loader's
  * {@link Client} static facade. Headless environments (no Minecraft instance)
  * fall back to deterministic defaults so common tests behave identically.
  */
-public final class ClientService implements AuiClientService {
+public final class ClientService implements MinecraftClientService {
     public static final ClientService INSTANCE = new ClientService();
 
     private ClientService() {
@@ -210,6 +211,16 @@ public final class ClientService implements AuiClientService {
                                       Runnable onFinished) {
         try {
             ReflectionUtils.findAnnotationClasses(annotationClass, annotationPredicate, consumer, onFinished);
+        } catch (RuntimeException | LinkageError ignored) {
+        }
+    }
+
+    @Override
+    public void scanAnnotationStaticMethods(Class<? extends Annotation> annotationClass,
+                                            Consumer<Method> consumer,
+                                            Runnable onFinished) {
+        try {
+            ReflectionUtils.findAnnotationStaticMethod(annotationClass, null, consumer, onFinished);
         } catch (RuntimeException | LinkageError ignored) {
         }
     }

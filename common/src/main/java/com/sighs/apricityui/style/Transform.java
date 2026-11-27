@@ -6,26 +6,10 @@ import com.sighs.apricityui.style.Style;
 import java.util.*;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
+
 import com.sighs.apricityui.parser.CSS;
 
 public interface Transform {
-    record Translate(double x, double y, double z) implements Transform {
-        public static final Translate DEFAULT = new Translate(0, 0, 0);
-    }
-
-    record Rotate(double x, double y, double z) implements Transform {
-        public static final Rotate DEFAULT = new Rotate(0, 0, 0);
-    }
-
-    record Scale(double x, double y) implements Transform {
-        public static final Scale DEFAULT = new Scale(1.0, 1.0);
-    }
-
-    static List<Transform> parse(String transform) {
-        Size window = Size.getWindowSize();
-        return parse(transform, window.width(), window.height());
-    }
-
     // 默认基准 parse 的缓存：readTransition 每帧对每个过渡元素都要 parse 一次
     // 基础 transform 字符串（JFR 归因大头在 readTransition，约 56MB/段）。
     // 只有不含 % 的字符串与窗口尺寸无关，可直接按字符串缓存。
@@ -37,6 +21,11 @@ public interface Transform {
                     return size() > DEFAULT_PARSE_CACHE_LIMIT;
                 }
             });
+
+    static List<Transform> parse(String transform) {
+        Size window = Size.getWindowSize();
+        return parse(transform, window.width(), window.height());
+    }
 
     static List<Transform> parseDefaultBasis(String transform) {
         if (transform == null) return List.of();
@@ -67,6 +56,12 @@ public interface Transform {
             List<String> args = splitArgs(argText);
 
             switch (func) {
+                case "perspective" -> {
+                    if (args.size() == 1) {
+                        Double distance = Size.tryResolveLength(args.get(0), 0);
+                        if (distance != null && distance >= 0) result.add(new Perspective(Math.max(1, distance)));
+                    }
+                }
                 case "translate", "translate3d" -> {
                     double x = parseLength(args, 0, percentBasisWidth, percentBasisHeight);
                     double y = parseLength(args, 1, percentBasisWidth, percentBasisHeight);
@@ -142,6 +137,7 @@ public interface Transform {
     static boolean affectsXY(String transform) {
         if (!createsStackingContext(transform)) return false;
         for (Transform item : parse(transform)) {
+            if (item instanceof Perspective) return true;
             if (item instanceof Translate t && (t.x() != 0 || t.y() != 0)) return true;
             if (item instanceof Rotate r && (r.x() != 0 || r.y() != 0 || r.z() != 0)) return true;
             if (item instanceof Scale s && (s.x() != 1 || s.y() != 1)) return true;
@@ -269,9 +265,15 @@ public interface Transform {
     }
 
     static void createTransition(Style startStyle, Style endStyle, List<Transition> result, double duration, double delay) {
+        Size basis = Size.getWindowSize();
+        createTransition(startStyle, endStyle, result, duration, delay, basis.width(), basis.height());
+    }
+
+    static void createTransition(Style startStyle, Style endStyle, List<Transition> result, double duration, double delay,
+                                 double width, double height) {
         long time = System.currentTimeMillis();
-        List<Transform> startTransforms = new ArrayList<>(parse(startStyle.transform));
-        List<Transform> endTransforms = new ArrayList<>(parse(endStyle.transform));
+        List<Transform> startTransforms = new ArrayList<>(parse(startStyle.transform, width, height));
+        List<Transform> endTransforms = new ArrayList<>(parse(endStyle.transform, width, height));
 
         int transformCount = padWithIdentityTransforms(startTransforms, endTransforms);
         for (int i = 0; i < transformCount; i++) {
@@ -299,8 +301,10 @@ public interface Transform {
     }
 
     static void readTransition(List<Transition.Change> changeList, Style originStyle) {
-        // 提取所有 transform 相关的变化。逐帧调用，避免 HashMap + Double 装箱
-        // （8 个固定通道用 NaN 哨兵）和 String.format（Formatter 分配很重）。
+        readTransition(changeList, originStyle, null);
+    }
+
+    static void readTransition(List<Transition.Change> changeList, Style originStyle, Size basis) {
         double tx = Double.NaN, ty = Double.NaN, tz = Double.NaN;
         double rx = Double.NaN, ry = Double.NaN, rz = Double.NaN;
         double sx = Double.NaN, sy = Double.NaN;
@@ -319,7 +323,8 @@ public interface Transform {
                 case "transform-rotatez" -> rz = c.value();
                 case "transform-scalex" -> sx = c.value();
                 case "transform-scaley" -> sy = c.value();
-                default -> { }
+                default -> {
+                }
             }
             it.remove();
             found = true;
@@ -330,10 +335,14 @@ public interface Transform {
         Translate baseTranslate = Translate.DEFAULT;
         Rotate baseRotate = Rotate.DEFAULT;
         Scale baseScale = Scale.DEFAULT;
+        Perspective basePerspective = null;
         boolean hasBaseTranslate = false;
         boolean hasBaseRotate = false;
         boolean hasBaseScale = false;
-        for (Transform transform : parseDefaultBasis(originStyle.transform)) {
+        List<Transform> base = basis != null && originStyle.transform.contains("%")
+                ? parse(originStyle.transform, basis.width(), basis.height())
+                : parseDefaultBasis(originStyle.transform);
+        for (Transform transform : base) {
             if (transform instanceof Translate value) {
                 baseTranslate = value;
                 hasBaseTranslate = true;
@@ -343,10 +352,17 @@ public interface Transform {
             } else if (transform instanceof Scale value) {
                 baseScale = value;
                 hasBaseScale = true;
+            } else if (transform instanceof Perspective value) {
+                basePerspective = value;
             }
         }
 
         StringBuilder sb = new StringBuilder(96);
+        if (basePerspective != null) {
+            sb.append("perspective(");
+            append2f(sb, basePerspective.distance());
+            sb.append("px) ");
+        }
 
         if (hasBaseTranslate || !Double.isNaN(tx) || !Double.isNaN(ty) || !Double.isNaN(tz)) {
             sb.append("translate3d(");
@@ -450,6 +466,21 @@ public interface Transform {
         if (t instanceof Transform.Rotate) return Transform.Rotate.DEFAULT;
         if (t instanceof Transform.Scale) return Transform.Scale.DEFAULT;
         return t;
+    }
+
+    record Translate(double x, double y, double z) implements Transform {
+        public static final Translate DEFAULT = new Translate(0, 0, 0);
+    }
+
+    record Rotate(double x, double y, double z) implements Transform {
+        public static final Rotate DEFAULT = new Rotate(0, 0, 0);
+    }
+
+    record Scale(double x, double y) implements Transform {
+        public static final Scale DEFAULT = new Scale(1.0, 1.0);
+    }
+
+    record Perspective(double distance) implements Transform {
     }
 
     record FunctionCall(String name, String arguments) {

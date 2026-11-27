@@ -18,6 +18,11 @@ properties.each { key, value -> ext.set(key.toString(), value.toString()) }
 group = mod_group_id
 version = mod_version
 
+// Artifact names use the project name (ApricityUI), not the mod id (apricityui).
+base {
+    archivesName = "${mod_name}-common"
+}
+
 java {
     toolchain.languageVersion = JavaLanguageVersion.of(17)
 }
@@ -49,9 +54,16 @@ dependencies {
     modCompileOnly ("curse.maven:rhino-416294:6186971")
     modCompileOnly ("curse.maven:architectury-api-419699:5137938")
 
+    // Built-in Markdown parser (Txtmark 0.13, Apache-2.0). Checked in as a jar
+    // because the build must not depend on extra remote repositories; targets
+    // compile this shared source tree directly and merge the classes into the
+    // mod jar (see gradle/target-conventions/publish.gradle).
+    implementation files('libs/txtmark-0.13.jar')
+
     testImplementation platform('org.junit:junit-bom:5.10.2')
     testImplementation 'org.junit.jupiter:junit-jupiter'
     testImplementation 'com.google.code.gson:gson:2.10.1'
+    testImplementation 'org.joml:joml:1.10.5'
     testImplementation ("curse.maven:rhino-416294:6186971")
 }
 
@@ -74,4 +86,9 @@ tasks.named('test', Test).configure {
 
 tasks.withType(JavaCompile).configureEach {
     options.encoding = 'UTF-8'
+    // -g:none: ship classes without debug metadata (LocalVariableTable/
+    // LineNumberTable/SourceFile). Measured -17% jar size (fabric-1.21.1).
+    // Cost: stack traces lose line numbers, jacoco reports lose source
+    // annotation, and the jar no longer carries MethodParameters.
+    options.debug = false
 }

@@ -106,6 +106,36 @@ class ResourcePipelineTest {
     }
 
     @Test
+    void quotedAttributeValuesMayContainTagDelimiterCharacters() {
+        Document document = TestDocumentFactory.createDocument();
+
+        Element doubleQuoted = HTML.createElement(document,
+                "<div title=\"1 > 0\" data-y=\"c\">x</div>");
+        assertNotNull(doubleQuoted);
+        assertEquals("1 > 0", doubleQuoted.getAttribute("title"));
+        assertEquals("c", doubleQuoted.getAttribute("data-y"));
+        assertEquals("x", doubleQuoted.getTextContent());
+
+        Element singleQuoted = HTML.createElement(document,
+                "<div title='1 > 0' data-y='c'></div>");
+        assertNotNull(singleQuoted);
+        assertEquals("1 > 0", singleQuoted.getAttribute("title"));
+        assertEquals("c", singleQuoted.getAttribute("data-y"));
+
+        Element lessThan = HTML.createElement(document,
+                "<div title=\"1 < 2\" data-y=\"c\"></div>");
+        assertNotNull(lessThan);
+        assertEquals("1 < 2", lessThan.getAttribute("title"));
+        assertEquals("c", lessThan.getAttribute("data-y"));
+
+        Element entity = HTML.createElement(document,
+                "<div title=\"1 &gt; 0\" data-y=\"c\"></div>");
+        assertNotNull(entity);
+        assertEquals("1 > 0", entity.getAttribute("title"));
+        assertEquals("c", entity.getAttribute("data-y"));
+    }
+
+    @Test
     void textareaInitialValueComesFromItsTextContent() {
         Document document = TestDocumentFactory.createDocument();
         Element.register(TextArea.TAG_NAME, (owner, tag) -> new TextArea(owner));
@@ -122,7 +152,7 @@ class ResourcePipelineTest {
     }
 
     @Test
-    void htmlNormalizationKeepsBodyAndDropsPreambleAndHeadContent() {
+    void htmlNormalizationKeepsHeadAndBodyButDropsPreamble() {
         String normalized = normalizeDocumentMarkup("""
                 <!DOCTYPE html>
                 <?xml version="1.0" encoding="UTF-8"?>
@@ -136,7 +166,7 @@ class ResourcePipelineTest {
                 </html>
                 """);
 
-        assertEquals("<body>\n    <main>content</main>\n  </body>", normalized);
+        assertEquals("<html><head>\n    <title>ignored</title>\n  </head><body>\n    <main>content</main>\n  </body></html>", normalized);
     }
 
     @Test
@@ -148,7 +178,7 @@ class ResourcePipelineTest {
                 </html>
                 """);
 
-        assertEquals("<body><section>loose</section></body>", normalized);
+        assertEquals("<html><head><title>ignored</title></head><body><section>loose</section></body></html>", normalized);
     }
 
     @Test

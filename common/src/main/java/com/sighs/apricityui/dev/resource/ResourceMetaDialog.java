@@ -12,9 +12,12 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
 import java.util.function.Consumer;
+
 import com.sighs.apricityui.parser.HTML;
 
-/** Resource-browser dialog for editing the meta elements in an HTML head. */
+/**
+ * Resource-browser dialog for editing the meta elements in an HTML head.
+ */
 public final class ResourceMetaDialog {
     private static final double MIN_ZOOM = 0.01d;
     private static final double MAX_ZOOM = 10.0d;
@@ -30,9 +33,19 @@ public final class ResourceMetaDialog {
             new Choice("NOT SET / PASS THROUGH", "", "tooltip.apricityui.meta.mouse_events.pass_through"),
             new Choice("INTERCEPT", "intercept", "tooltip.apricityui.meta.mouse_events.intercept")
     );
+    private static final List<Choice> HYPHEN_BREAK_CHOICES = List.of(
+            new Choice("NOT SET / AUTO", "", "tooltip.apricityui.meta.hyphen_break.auto"),
+            new Choice("DISABLED / NONE", "none", "tooltip.apricityui.meta.hyphen_break.none")
+    );
+    private static final List<Choice> PRELOAD_CHOICES = List.of(
+            new Choice("NOT SET / LAZY", "", "tooltip.apricityui.meta.preload.lazy"),
+            new Choice("ENABLED", "true", "tooltip.apricityui.meta.preload.enabled")
+    );
     private DialogWindow dialog;
     private Element viewportSelect;
     private Element mouseEventsSelect;
+    private Element hyphenBreakSelect;
+    private Element preloadSelect;
     private Element zoomInput;
     private Element saveButton;
     private Document document;
@@ -42,6 +55,28 @@ public final class ResourceMetaDialog {
     private Consumer<Double> zoomSave;
     private String charset = "";
     private List<String> preservedMeta = List.of();
+
+    private static String formatZoom(double value) {
+        return Double.isFinite(value) && value > 0 ? Double.toString(value) : "1.0";
+    }
+
+    private static String canonicalChoiceValue(List<Choice> choices, String value) {
+        String safe = value == null ? "" : value.trim();
+        if (safe.equalsIgnoreCase("mode=screen")
+                && choices.stream().anyMatch(choice -> "mode=window".equals(choice.value()))) {
+            return "mode=window";
+        }
+        return safe;
+    }
+
+    private static String valueOf(Element select) {
+        return select == null || select.getValue() == null ? "" : select.getValue();
+    }
+
+    private static String abbreviate(String value) {
+        String safe = value == null ? "" : value;
+        return safe.length() <= 54 ? safe : safe.substring(0, 51) + "...";
+    }
 
     public void open(Document document, String resourcePath, Path target, Runnable afterSave) {
         close();
@@ -56,7 +91,9 @@ public final class ResourceMetaDialog {
                 Double.NaN, null);
     }
 
-    /** Opens the editor with a live document zoom field, used by DevTools. */
+    /**
+     * Opens the editor with a live document zoom field, used by DevTools.
+     */
     public void open(Document document, String resourcePath, Path target, Runnable afterSave,
                      double currentZoom, Consumer<Double> onZoomSave) {
         close();
@@ -71,7 +108,9 @@ public final class ResourceMetaDialog {
                 currentZoom, onZoomSave);
     }
 
-    /** Opens the same editor for a not-yet-created document and returns its meta markup. */
+    /**
+     * Opens the same editor for a not-yet-created document and returns its meta markup.
+     */
     public void openTemplate(Document document, Consumer<String> onSave) {
         close();
         if (document == null || document.body == null) return;
@@ -103,6 +142,10 @@ public final class ResourceMetaDialog {
         preservedMeta = settings.preservedMeta();
         viewportSelect = appendSelectField(fields, "VIEWPORT", "tooltip.apricityui.meta.viewport", VIEWPORT_CHOICES, settings.viewport());
         mouseEventsSelect = appendSelectField(fields, "MOUSE EVENTS", "tooltip.apricityui.meta.mouse_events", MOUSE_EVENT_CHOICES, settings.mouseEvents());
+        hyphenBreakSelect = appendSelectField(fields, "HYPHEN BREAK",
+                "tooltip.apricityui.meta.hyphen_break", HYPHEN_BREAK_CHOICES, settings.hyphenBreak());
+        preloadSelect = appendSelectField(fields, "PRELOAD",
+                "tooltip.apricityui.meta.preload", PRELOAD_CHOICES, settings.preload());
         if (zoomSave != null) zoomInput = appendZoomField(fields, currentZoom);
         root.append(fields);
 
@@ -131,7 +174,8 @@ public final class ResourceMetaDialog {
         }
         String markup = HtmlMetaEditor.toMetaMarkup(new HtmlMetaEditor.MetaSettings(
                 charset, valueOf(viewportSelect),
-                valueOf(mouseEventsSelect), preservedMeta));
+                valueOf(mouseEventsSelect), valueOf(hyphenBreakSelect),
+                valueOf(preloadSelect), preservedMeta));
         Consumer<String> templateCallback = templateSave;
         if (templateCallback != null) {
             close();
@@ -189,10 +233,6 @@ public final class ResourceMetaDialog {
         }
     }
 
-    private static String formatZoom(double value) {
-        return Double.isFinite(value) && value > 0 ? Double.toString(value) : "1.0";
-    }
-
     private Element appendSelectField(Element parent, String label, String tooltipKey,
                                       List<Choice> choices, String currentValue) {
         Element field = element("DIV", "dialog-field");
@@ -226,28 +266,12 @@ public final class ResourceMetaDialog {
         return select;
     }
 
-    private static String canonicalChoiceValue(List<Choice> choices, String value) {
-        String safe = value == null ? "" : value.trim();
-        if (safe.equalsIgnoreCase("mode=screen")
-                && choices.stream().anyMatch(choice -> "mode=window".equals(choice.value()))) {
-            return "mode=window";
-        }
-        return safe;
-    }
-
-    private static String valueOf(Element select) {
-        return select == null || select.getValue() == null ? "" : select.getValue();
-    }
-
-    private static String abbreviate(String value) {
-        String safe = value == null ? "" : value;
-        return safe.length() <= 54 ? safe : safe.substring(0, 51) + "...";
-    }
-
     private void clearReferences() {
         dialog = null;
         viewportSelect = null;
         mouseEventsSelect = null;
+        hyphenBreakSelect = null;
+        preloadSelect = null;
         zoomInput = null;
         saveButton = null;
         document = null;
