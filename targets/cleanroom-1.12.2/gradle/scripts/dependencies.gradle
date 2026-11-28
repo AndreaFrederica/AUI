@@ -45,6 +45,8 @@ dependencies {
     // build.  NekoJS 1.1.0-preview3 is the Cleanroom 1.12.2 release; its jar
     // contains the matching Graal runtime as a contained dependency.
     String auiScriptBackend = propertyString('aui_script_backend').toLowerCase(Locale.ROOT)
+    // Only the optional legacy startup event adapter links to this mod.
+    compileOnly 'curse.maven:kubejs-238086:3052392'
     if (auiScriptBackend == 'nekojs') {
         modCompileOnly 'curse.maven:nekojs-1518701:9048721'
         modRuntimeOnly 'curse.maven:nekojs-1518701:9048721'

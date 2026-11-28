@@ -7,7 +7,9 @@ import org.slf4j.LoggerFactory;
 
 import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
+import java.util.ArrayDeque;
 import java.util.Base64;
+import java.util.Queue;
 
 public final class StartupLoadingOverlay {
     private static final Logger LOGGER = LoggerFactory.getLogger("apricityui/startup");
@@ -40,9 +42,10 @@ public final class StartupLoadingOverlay {
     }
 
     private static volatile State state = State.IDLE;
-    private static volatile long viewHandle;
-    private static volatile FrameUpdateChannel reader;
-    private static volatile boolean watchdogRunning;
+    private static long viewHandle;
+    private static FrameUpdateChannel reader;
+    private static long viewAttempt;
+    private static boolean watchdogRunning;
 
     private static final int PROVISIONAL_WIDTH = 1600;
     private static final int PROVISIONAL_HEIGHT = 900;
@@ -63,9 +66,9 @@ public final class StartupLoadingOverlay {
     private static volatile String pageUrlOverride;
 
     private static volatile boolean suppressed;
+    private static volatile boolean finished;
 
-    private static final java.util.Queue<String> PENDING_SCRIPTS =
-            new java.util.concurrent.ConcurrentLinkedQueue<>();
+    private static final Queue<String> PENDING_SCRIPTS = new ArrayDeque<>();
     private static final int MAX_PENDING_SCRIPTS = 32;
 
     private static volatile Runnable firstDrawAction;
@@ -77,22 +80,13 @@ public final class StartupLoadingOverlay {
         firstDrawAction = action;
     }
 
-    public static void prepare() {
-        if (!ENABLED || suppressed) {
-            return;
-        }
-        synchronized (StartupLoadingOverlay.class) {
-            if (state != State.IDLE) {
-                return;
-            }
-            if (pageUrl() == null) {
-                return;
-            }
-            start(PROVISIONAL_WIDTH, PROVISIONAL_HEIGHT, true);
+    public static synchronized void prepare() {
+        if (ENABLED && !suppressed && !finished && state == State.IDLE) {
+            start(PROVISIONAL_WIDTH, PROVISIONAL_HEIGHT, true, pageUrl());
         }
     }
 
-    public static void draw(Object graphics, int guiWidth, int guiHeight, int rasterWidth, int rasterHeight) {
+    public static synchronized void draw(Object graphics, int guiWidth, int guiHeight, int rasterWidth, int rasterHeight) {
 
         final Runnable once = firstDrawAction;
         if (once != null) {
@@ -103,21 +97,14 @@ public final class StartupLoadingOverlay {
                 LOGGER.warn("startup first-draw action failed: {}", failure.toString());
             }
         }
-        if (!ENABLED || suppressed) {
+        if (!ENABLED || suppressed || finished) {
             return;
         }
         try {
             if (guiWidth <= 0 || guiHeight <= 0 || rasterWidth <= 0 || rasterHeight <= 0) {
                 return;
             }
-            if (state == State.IDLE) {
-                synchronized (StartupLoadingOverlay.class) {
-
-                    if (state == State.IDLE && pageUrl() != null) {
-                        start(rasterWidth, rasterHeight, false);
-                    }
-                }
-            }
+            if (state == State.IDLE) start(rasterWidth, rasterHeight, false, pageUrl());
             if (state != State.READY || reader == null) {
                 return;
             }
@@ -132,13 +119,15 @@ public final class StartupLoadingOverlay {
             }
             AuiServices.render().drawScreenTexture(graphics, currentTexture, currentLocation,
                     0, 0, guiWidth, guiHeight, fadeInAlpha());
+            if (lastDrawNanos == 0L) LOGGER.info("startup loading screen: first frame drawn");
             lastDrawNanos = System.nanoTime();
         } catch (Throwable failure) {
             unavailable("draw failed: " + failure);
         }
     }
 
-    private static void start(int rasterWidth, int rasterHeight, boolean provisionalRaster) {
+    private static void start(int rasterWidth, int rasterHeight, boolean provisionalRaster, String page) {
+        if (page == null) return;
         state = State.STARTING;
         startedNanos = System.nanoTime();
 
@@ -148,7 +137,8 @@ public final class StartupLoadingOverlay {
         sizeChecked = false;
         final int width = clampRaster(rasterWidth);
         final int height = clampRaster(rasterHeight);
-        Thread worker = new Thread(() -> create(width, height), "aui-startup-loading");
+        final long attempt = ++viewAttempt;
+        Thread worker = new Thread(() -> create(attempt, page, width, height), "aui-startup-loading");
         worker.setDaemon(true);
         worker.start();
         ensureWatchdog();
@@ -167,57 +157,50 @@ public final class StartupLoadingOverlay {
         if (!aspectOff && !tooSmall) {
             return false;
         }
-        final long handle = viewHandle;
-        viewHandle = 0L;
-        reader = null;
-        state = State.IDLE;
-        if (handle != 0L) {
-            WebViewNative.destroy(handle);
-        }
-        synchronized (StartupLoadingOverlay.class) {
-            start(rasterWidth, rasterHeight, false);
-        }
+        stopView();
+        start(rasterWidth, rasterHeight, false, pageUrl());
         LOGGER.info("startup loading screen: re-rastered to {}x{} for the real window",
                 rasterWidth, rasterHeight);
         return true;
     }
 
-    private static void create(int width, int height) {
-        final String page = pageUrl();
-        if (page == null) {
-
-            state = State.IDLE;
-            return;
-        }
+    private static void create(long attempt, String page, int width, int height) {
         if (!WebViewNative.isAvailable()) {
-            unavailable("webview unavailable: " + WebViewNative.unavailableReason());
+            unavailable(attempt, "webview unavailable: " + WebViewNative.unavailableReason());
             return;
         }
         final long handle = WebViewNative.create(page, profileDirectory(), width, height,
                 false, true, CAPTURE_INTERVAL_MS, NativeWebViewService.FORMAT_AUTO);
         if (handle == 0L) {
-            unavailable("view creation failed: " + WebViewNative.lastCreateError());
+            unavailable(attempt, "view creation failed: " + WebViewNative.lastCreateError());
             return;
         }
         final ByteBuffer mapped = WebViewNative.mapChannel(handle);
         if (mapped == null) {
             WebViewNative.destroy(handle);
-            unavailable("the view has no update channel");
+            unavailable(attempt, "the view has no update channel");
             return;
         }
         final FrameUpdateChannel channel = new FrameUpdateChannel(mapped);
         if (!channel.isValid()) {
             WebViewNative.destroy(handle);
-            unavailable("the update channel carries an unknown layout");
+            unavailable(attempt, "the update channel carries an unknown layout");
             return;
         }
-        viewHandle = handle;
-        reader = channel;
-        state = State.READY;
-        LOGGER.info("startup loading screen: view {}x{} ready", width, height);
-
-        for (String script; (script = PENDING_SCRIPTS.poll()) != null; ) {
-            WebViewNative.eval(handle, script);
+        synchronized (StartupLoadingOverlay.class) {
+            if (attempt != viewAttempt) {
+                WebViewNative.destroy(handle);
+                return;
+            }
+            viewHandle = handle;
+            reader = channel;
+            state = State.READY;
+            LOGGER.info("startup loading screen: view {}x{} ready", width, height);
+            String currentPage = pageUrlOverride;
+            if (currentPage != null && !currentPage.equals(page)) WebViewNative.navigate(handle, currentPage);
+            for (String script; (script = PENDING_SCRIPTS.poll()) != null; ) {
+                WebViewNative.eval(handle, script);
+            }
         }
     }
 
@@ -230,40 +213,48 @@ public final class StartupLoadingOverlay {
             try {
                 while (true) {
                     Thread.sleep(500L);
-                    if (state == State.IDLE || state == State.UNAVAILABLE) {
+                    synchronized (StartupLoadingOverlay.class) {
+                        if (state == State.IDLE || state == State.UNAVAILABLE) return;
+                        final long now = System.nanoTime();
+                        final boolean drawn = lastDrawNanos != 0L;
+                        final long last = drawn ? lastDrawNanos : startedNanos;
+                        if (now - last < (drawn ? IDLE_STOP_NANOS : FIRST_DRAW_TIMEOUT_NANOS)) continue;
+                        stopView();
+                        LOGGER.info("startup loading screen: view stopped after {} ms without a draw", (now - last) / 1_000_000L);
                         return;
                     }
-                    final long now = System.nanoTime();
-                    final boolean drawn = lastDrawNanos != 0L;
-                    final long last = drawn ? lastDrawNanos : startedNanos;
-                    if (now - last < (drawn ? IDLE_STOP_NANOS : FIRST_DRAW_TIMEOUT_NANOS)) {
-                        continue;
-                    }
-                    final long handle = viewHandle;
-                    viewHandle = 0L;
-                    reader = null;
-                    state = State.IDLE;
-                    if (handle != 0L) {
-                        WebViewNative.destroy(handle);
-                        LOGGER.info("startup loading screen: view stopped after {} ms without a draw",
-                                (now - last) / 1_000_000L);
-                    }
-                    return;
                 }
             } catch (InterruptedException ignored) {
                 Thread.currentThread().interrupt();
             } finally {
-                watchdogRunning = false;
+                synchronized (StartupLoadingOverlay.class) {
+                    watchdogRunning = false;
+                    if (state == State.STARTING || state == State.READY) ensureWatchdog();
+                }
             }
         }, "aui-startup-loading-watchdog");
         watchdog.setDaemon(true);
         watchdog.start();
     }
 
+    private static synchronized void unavailable(long attempt, String reason) {
+        if (attempt == viewAttempt) unavailable(reason);
+    }
+
     private static void unavailable(String reason) {
+        stopView();
         state = State.UNAVAILABLE;
-        reader = null;
         LOGGER.warn("startup loading screen disabled: {}", reason);
+    }
+
+    // Mapped pixels become invalid as soon as the native view is destroyed.
+    private static void stopView() {
+        final long handle = viewHandle;
+        viewAttempt++;
+        viewHandle = 0L;
+        reader = null;
+        state = State.IDLE;
+        if (handle != 0L) WebViewNative.destroy(handle);
     }
 
     private static void drain() {
@@ -302,8 +293,7 @@ public final class StartupLoadingOverlay {
         releaseTexture();
         final Object created = AuiServices.render().createDynamicTexture(KEY.value(), width, height, true);
         if (created == null) {
-            unavailable("the render backend cannot create a dynamic texture");
-            return;
+            throw new IllegalStateException("the render backend cannot create a dynamic texture");
         }
         final Object resolved = AuiServices.resources().textureLocation(KEY);
         AuiServices.render().registerTexture(created, resolved);
@@ -386,8 +376,8 @@ public final class StartupLoadingOverlay {
                 + Base64.getEncoder().encodeToString(html.getBytes(StandardCharsets.UTF_8)));
     }
 
-    public static void showPageUrl(String url) {
-        if (url == null || url.isBlank()) {
+    public static synchronized void showPageUrl(String url) {
+        if (finished || url == null || url.isBlank()) {
             return;
         }
         pageUrlOverride = url;
@@ -398,8 +388,8 @@ public final class StartupLoadingOverlay {
         }
     }
 
-    public static void eval(String script) {
-        if (script == null || script.isEmpty()) {
+    public static synchronized void eval(String script) {
+        if (finished || script == null || script.isEmpty()) {
             return;
         }
         final long handle = viewHandle;
@@ -412,16 +402,18 @@ public final class StartupLoadingOverlay {
         }
     }
 
-    public static void hide() {
+    public static synchronized void hide() {
         suppressed = true;
         PENDING_SCRIPTS.clear();
-        final long handle = viewHandle;
-        viewHandle = 0L;
-        reader = null;
-        state = State.IDLE;
-        if (handle != 0L) {
-            WebViewNative.destroy(handle);
-        }
+        stopView();
+    }
+
+    /** Called after the last splash frame, while the caller owns the GL context. */
+    public static synchronized void finish() {
+        finished = true;
+        firstDrawAction = null;
+        hide();
+        releaseTexture();
     }
 
     public static boolean isWebViewAvailable() {
@@ -444,7 +436,7 @@ public final class StartupLoadingOverlay {
     }
 
     public static boolean isShowingStartupPage() {
-        return ENABLED && !suppressed && state != State.UNAVAILABLE;
+        return ENABLED && !finished && !suppressed && state != State.UNAVAILABLE;
     }
 
     public static int rasterWidth() {

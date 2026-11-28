@@ -49,6 +49,32 @@ import java.util.function.Predicate;
  */
 public final class CleanroomClientService implements AuiClientService {
     public static final CleanroomClientService INSTANCE = new CleanroomClientService();
+    private net.minecraftforge.fml.common.discovery.ASMDataTable annotationData;
+
+    public void setAnnotationData(net.minecraftforge.fml.common.discovery.ASMDataTable annotationData) {
+        this.annotationData = annotationData;
+    }
+
+    @Override
+    public void scanAnnotationStaticMethods(Class<? extends Annotation> annotation,
+            Consumer<java.lang.reflect.Method> consumer, Runnable onFinished) {
+        try {
+            if (annotationData == null) return;
+            var loader = Thread.currentThread().getContextClassLoader();
+            for (String name : annotationData.getAll(annotation.getName()).stream()
+                    .map(net.minecraftforge.fml.common.discovery.ASMDataTable.ASMData::getClassName).distinct().toList()) {
+                try {
+                    for (var method : Class.forName(name, false, loader).getDeclaredMethods()) {
+                        if (method.isAnnotationPresent(annotation)) consumer.accept(method);
+                    }
+                } catch (ClassNotFoundException | LinkageError failure) {
+                    com.sighs.apricityui.ApricityUI.LOGGER.warn("Cannot scan startup hooks in {}", name, failure);
+                }
+            }
+        } finally {
+            onFinished.run();
+        }
+    }
     private volatile boolean mouseGrabbed;
     private volatile Boolean productionEnvironment;
     private final Set<String> scanPackages = new HashSet<>();

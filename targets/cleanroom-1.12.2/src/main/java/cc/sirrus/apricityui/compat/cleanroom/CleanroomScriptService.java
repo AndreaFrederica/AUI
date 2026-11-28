@@ -71,6 +71,15 @@ public final class CleanroomScriptService implements AuiScriptService {
     }
 
     @Override
+    public void startupPhase(com.sighs.apricityui.startup.StartupContext context) {
+        net.minecraftforge.common.MinecraftForge.EVENT_BUS.post(
+                new com.sighs.apricityui.startup.CleanroomStartupEvent(context));
+        if (selectedBackend() == Backend.KUBEJS) {
+            LegacyKubeStartupEvent.post(context);
+        }
+    }
+
+    @Override
     public void eval(String code, Event event, String source) {
         if (code == null || code.isBlank()) return;
         synchronized (lock) {

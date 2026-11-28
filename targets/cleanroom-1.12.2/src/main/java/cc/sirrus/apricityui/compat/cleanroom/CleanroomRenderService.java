@@ -41,6 +41,7 @@ import org.lwjgl.BufferUtils;
 public final class CleanroomRenderService implements AuiRenderService {
     public static final CleanroomRenderService INSTANCE = new CleanroomRenderService();
     private Matrix4f projection = new Matrix4f();
+    private StartupTexture startupTexture;
     private boolean depth = true, depthMask = true, cull;
     private ShaderHandle backgroundShader;
     private boolean backgroundShaderAttempted;
@@ -553,6 +554,93 @@ public final class CleanroomRenderService implements AuiRenderService {
         }
     }
 
+    // The splash has its own GL thread. Keep its texture out of Minecraft's texture manager.
+    private record StartupTexture(int id, int width, int height) {
+    }
+
+    @Override
+    public Object createDynamicTexture(String name, int width, int height, boolean linear) {
+        if (width <= 0 || height <= 0) return null;
+        int previous = GL11.glGetInteger(GL11.GL_TEXTURE_BINDING_2D);
+        int id = GL11.glGenTextures();
+        try {
+            GL11.glBindTexture(GL11.GL_TEXTURE_2D, id);
+            applyTextureParameters(linear);
+            GL11.glTexImage2D(GL11.GL_TEXTURE_2D, 0, GL11.GL_RGBA8, width, height, 0,
+                    GL11.GL_RGBA, GL11.GL_UNSIGNED_BYTE, (ByteBuffer) null);
+            return new StartupTexture(id, width, height);
+        } finally {
+            GL11.glBindTexture(GL11.GL_TEXTURE_2D, previous);
+        }
+    }
+
+    @Override
+    public boolean uploadTexturePixels(Object texture, ByteBuffer pixels, int offset, int x, int y, int width, int height) {
+        if (!(texture instanceof StartupTexture target) || !pixels.isDirect()
+                || width <= 0 || height <= 0 || x < 0 || y < 0
+                || width > target.width - x || height > target.height - y
+                || offset < 0 || offset + (long) width * height * 4 > pixels.limit()) return false;
+        int previous = GL11.glGetInteger(GL11.GL_TEXTURE_BINDING_2D);
+        GL11.glPushClientAttrib(GL11.GL_CLIENT_PIXEL_STORE_BIT);
+        try {
+            GL11.glBindTexture(GL11.GL_TEXTURE_2D, target.id);
+            GL11.glPixelStorei(GL11.GL_UNPACK_ALIGNMENT, 4);
+            GL11.glPixelStorei(GL11.GL_UNPACK_ROW_LENGTH, 0);
+            GL11.glPixelStorei(GL11.GL_UNPACK_SKIP_ROWS, 0);
+            GL11.glPixelStorei(GL11.GL_UNPACK_SKIP_PIXELS, 0);
+            GL11.glTexSubImage2D(GL11.GL_TEXTURE_2D, 0, x, y, width, height, GL11.GL_RGBA, GL11.GL_UNSIGNED_BYTE,
+                    pixels.duplicate().position(offset).limit(offset + width * height * 4));
+            return true;
+        } finally {
+            GL11.glPopClientAttrib();
+            GL11.glBindTexture(GL11.GL_TEXTURE_2D, previous);
+        }
+    }
+
+    @Override
+    public void drawScreenTexture(Object graphics, Object texture, Object location,
+                                  int x, int y, int width, int height, float alpha) {
+        if (!(texture instanceof StartupTexture target) || alpha <= 0) return;
+        int matrix = GL11.glGetInteger(GL11.GL_MATRIX_MODE);
+        int program = GL11.glGetInteger(GL20.GL_CURRENT_PROGRAM);
+        GL11.glPushAttrib(GL11.GL_ALL_ATTRIB_BITS);
+        GL11.glMatrixMode(GL11.GL_PROJECTION);
+        GL11.glPushMatrix();
+        GL11.glLoadIdentity();
+        GL11.glOrtho(0, width, height, 0, -1, 1);
+        GL11.glMatrixMode(GL11.GL_MODELVIEW);
+        GL11.glPushMatrix();
+        GL11.glLoadIdentity();
+        try {
+            GL20.glUseProgram(0);
+            GL13.glActiveTexture(GL13.GL_TEXTURE0);
+            GL11.glDisable(GL11.GL_DEPTH_TEST);
+            GL11.glDisable(GL11.GL_SCISSOR_TEST);
+            GL11.glDisable(GL11.GL_STENCIL_TEST);
+            GL11.glDisable(GL11.GL_CULL_FACE);
+            GL11.glDisable(GL11.GL_ALPHA_TEST);
+            GL11.glDisable(GL11.GL_LIGHTING);
+            GL11.glEnable(GL11.GL_TEXTURE_2D);
+            GL11.glEnable(GL11.GL_BLEND);
+            GL11.glBlendFunc(GL11.GL_SRC_ALPHA, GL11.GL_ONE_MINUS_SRC_ALPHA);
+            GL11.glBindTexture(GL11.GL_TEXTURE_2D, target.id);
+            GL11.glColor4f(1, 1, 1, alpha);
+            GL11.glBegin(GL11.GL_QUADS);
+            GL11.glTexCoord2f(0, 0); GL11.glVertex2f(x, y);
+            GL11.glTexCoord2f(1, 0); GL11.glVertex2f(x + width, y);
+            GL11.glTexCoord2f(1, 1); GL11.glVertex2f(x + width, y + height);
+            GL11.glTexCoord2f(0, 1); GL11.glVertex2f(x, y + height);
+            GL11.glEnd();
+        } finally {
+            GL11.glPopMatrix();
+            GL11.glMatrixMode(GL11.GL_PROJECTION);
+            GL11.glPopMatrix();
+            GL11.glMatrixMode(matrix);
+            GL11.glPopAttrib();
+            GL20.glUseProgram(program);
+        }
+    }
+
     @Override public void setImagePixel(Object nativeImage, int x, int y, int pixel) {
         if (nativeImage instanceof com.mojang.blaze3d.platform.NativeImage image) image.setPixelRGBA(x, y, pixel);
     }
@@ -562,15 +650,25 @@ public final class CleanroomRenderService implements AuiRenderService {
         }
     }
     @Override public void closeTexture(Object texture) {
+        if (texture instanceof StartupTexture target) GL11.glDeleteTextures(target.id);
         if (texture instanceof AbstractTexture abstractTexture) abstractTexture.deleteGlTexture();
     }
     @Override public void registerTexture(Object texture, Object location) {
+        if (texture instanceof StartupTexture target) {
+            startupTexture = target;
+            return;
+        }
         if (!(texture instanceof AbstractTexture abstractTexture) || !(location instanceof ResourceLocation id)) return;
         try { Minecraft.getMinecraft().getTextureManager().loadTexture(id, abstractTexture); }
         catch (Throwable ignored) { }
     }
     @Override public void releaseTexture(Object location) {
         if (!(location instanceof ResourceLocation id)) return;
+        if ("apricityui:startup/loading".equals(id.toString()) && startupTexture != null) {
+            closeTexture(startupTexture);
+            startupTexture = null;
+            return;
+        }
         try { Minecraft.getMinecraft().getTextureManager().deleteTexture(id); }
         catch (Throwable ignored) { }
     }

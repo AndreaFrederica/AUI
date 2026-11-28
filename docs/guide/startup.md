@@ -101,12 +101,30 @@ ApricityEvents.startup(event => {
 - 1.18.2 的 KubeJS 还没有事件组 API，只能用 `ApricityUI.startup()` 直接取上下文；
 - 可用性跟着 target 走：1.19.2 / 1.20.1 / 1.21.1 有事件，Fabric targets 没有 KubeJS 集成。
 
+### Cleanroom 1.12.2
+
+Cleanroom 在客户端初始化时发送启动事件，此时 Forge 的启动画面仍在绘制。NekoJS 和旧版 KubeJS 的写法分别如下。
+
+```js
+// nekojs/startup_scripts/loading.js
+NativeEvents.onEvent('com.sighs.apricityui.startup.CleanroomStartupEvent', function (event) {
+    event.getContext().loadProject('loading')
+})
+```
+
+```js
+// kubejs/init.js
+events.listen('apricityui.startup', function (event) {
+    event.getContext().loadProject('loading')
+})
+```
+
 ## 关闭与降级
 
 - `-Dapricityui.startupOverlay=false` 关掉整个启动加载屏，回到原版；
 - 没有 WebView2 Runtime、创建失败、后端不支持像素上传：都只是不显示启动页，原版加载屏照常；
 - 一个 hook 出错不影响其它 hook，也不影响启动；
-- 启动屏停止绘制约 4 秒后浏览器被关掉，纹理留下给下一次加载（资源重载也会再画一次）。
+- Cleanroom 在 Forge 启动画面结束时释放浏览器和纹理。支持在资源重载时绘制加载屏的目标会在停止绘制约 4 秒后关闭浏览器，并保留纹理供下次加载使用。
 
 ## 限制
 

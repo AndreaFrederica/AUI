@@ -101,12 +101,30 @@ ApricityEvents.startup(event => {
 - KubeJS 1.18.2 predates event groups, so it can only use `ApricityUI.startup()` to reach the context;
 - availability follows the target: 1.19.2 / 1.20.1 / 1.21.1 have the event, Fabric targets have no KubeJS integration.
 
+### Cleanroom 1.12.2
+
+Cleanroom fires the startup event during client initialization while Forge is still drawing its splash screen. NekoJS and legacy KubeJS use the following subscriptions.
+
+```js
+// nekojs/startup_scripts/loading.js
+NativeEvents.onEvent('com.sighs.apricityui.startup.CleanroomStartupEvent', function (event) {
+    event.getContext().loadProject('loading')
+})
+```
+
+```js
+// kubejs/init.js
+events.listen('apricityui.startup', function (event) {
+    event.getContext().loadProject('loading')
+})
+```
+
 ## Turning it off and falling back
 
 - `-Dapricityui.startupOverlay=false` disables the whole startup loading screen and restores the vanilla one;
 - no WebView2 Runtime, a failed view, or a backend that cannot upload pixels: the startup page simply is not shown, and the vanilla loading screen stays;
 - a failing hook affects nothing but itself;
-- the browser is stopped about four seconds after the overlay stops being drawn, and the texture is kept for the next load (a resource reload draws the screen again).
+- Cleanroom releases the browser and texture when Forge's startup splash ends. Targets that draw the overlay during resource reloads close the browser after about four seconds without a draw and keep the texture for the next load.
 
 ## Limitations
 

@@ -36,11 +36,18 @@ public final class StartupHooks {
     }
 
     public static void dispatch() {
+        dispatch(true);
+    }
+
+    /** Loaders with a separate splash thread can dispatch scripts on the client thread. */
+    public static void dispatch(boolean scriptOnFirstDraw) {
         if (!DISPATCHED.compareAndSet(false, true)) {
             return;
         }
 
-        com.sighs.apricityui.webview.StartupLoadingOverlay.runOnceOnFirstDraw(StartupHooks::raiseScriptStartup);
+        if (scriptOnFirstDraw) {
+            com.sighs.apricityui.webview.StartupLoadingOverlay.runOnceOnFirstDraw(StartupHooks::dispatchScriptStartup);
+        }
         final long startedNanos = System.nanoTime();
         discover();
         if (HOOKS.isEmpty()) {
@@ -63,7 +70,7 @@ public final class StartupHooks {
                 (System.nanoTime() - startedNanos) / 1_000_000L);
     }
 
-    private static void raiseScriptStartup() {
+    public static void dispatchScriptStartup() {
         try {
             AuiServices.script().startupPhase(context());
         } catch (Throwable failure) {

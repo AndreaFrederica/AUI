@@ -8,7 +8,13 @@
     "compatibilityLevel": "JAVA_25",
     "mixins": [],
     "server": [],
-    "client": [],
+    "client": [
+        "client.ModelBoxAccessor",
+        "client.ModelRendererMixin",
+        "client.SplashProgressMixin",
+        "client.SplashRenderMixin",
+        "client.TessellatorMixin"
+    ],
     "setSourceFile": true
 }
 

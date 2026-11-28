@@ -6,6 +6,7 @@ import cc.sirrus.apricityui.compat.cleanroom.CleanroomDocumentExpander;
 import cc.sirrus.apricityui.compat.cleanroom.CleanroomResourceService;
 import cc.sirrus.apricityui.compat.cleanroom.CleanroomRenderService;
 import cc.sirrus.apricityui.compat.cleanroom.CleanroomItemRenderService;
+import cc.sirrus.apricityui.compat.cleanroom.CleanroomModelRenderService;
 import cc.sirrus.apricityui.compat.cleanroom.CleanroomNetworkService;
 import cc.sirrus.apricityui.compat.cleanroom.CleanroomAudioService;
 import cc.sirrus.apricityui.compat.cleanroom.CleanroomKeyService;
@@ -13,6 +14,7 @@ import cc.sirrus.apricityui.compat.cleanroom.CleanroomScriptService;
 import com.sighs.apricityui.ApricityUI;
 import com.sighs.apricityui.dev.DevToolsLogBridge;
 import com.sighs.apricityui.spi.AuiServices;
+import com.sighs.apricityui.startup.StartupHooks;
 import com.sighs.apricityui.webview.NativeWebViewService;
 import com.sighs.apricityui.registry.ApricityUIRegistry;
 import com.sighs.apricityui.loader.ClientLoader;
@@ -31,6 +33,11 @@ public class ClientProxy implements IProxy{
         AuiServices.setResources(CleanroomResourceService.INSTANCE);
         AuiServices.setRender(CleanroomRenderService.INSTANCE);
         AuiServices.setItems(CleanroomItemRenderService.INSTANCE);
+        AuiServices.setModels(CleanroomModelRenderService.INSTANCE);
+        Minecraft client = Minecraft.getMinecraft();
+        if (client.getResourceManager() instanceof net.minecraft.client.resources.IReloadableResourceManager resources) {
+            resources.registerReloadListener(manager -> CleanroomModelRenderService.INSTANCE.invalidate());
+        }
         AuiServices.setAudio(CleanroomAudioService.create(() -> {
             try {
                 Minecraft mc = Minecraft.getMinecraft();
@@ -59,6 +66,8 @@ public class ClientProxy implements IProxy{
         }
         AuiServices.setScript(CleanroomScriptService.INSTANCE);
         CleanroomScriptService.INSTANCE.warmUp();
+        CleanroomClientService.INSTANCE.setAnnotationData(event.getAsmData());
+        StartupHooks.dispatch(false);
         ApricityUIRegistry.scanPackages("com.sighs.apricityui.element");
         ApricityUIRegistry.register();
         CleanroomNetworkService.INSTANCE.register();
@@ -67,6 +76,7 @@ public class ClientProxy implements IProxy{
 
     @Override
     public void init(FMLInitializationEvent event) {
+        StartupHooks.dispatchScriptStartup();
         // Forge 1.12 has no FMLClientSetupEvent.  The first client task is the
         // equivalent safe point: the resource manager exists and all mod
         // resource packs have been attached, so HTML/CSS/JS discovery can run.
