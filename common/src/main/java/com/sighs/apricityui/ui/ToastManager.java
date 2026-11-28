@@ -17,7 +17,7 @@ public final class ToastManager {
     private static final Map<String, ToastRef> ACTIVE = new ConcurrentHashMap<>();
 
     private static final String ITEM_BASE_STYLE =
-            "pointer-events:auto;display:flex;align-items:flex-start;gap:10px;width:100%;" +
+            "pointer-events:auto;display:flex;align-items:flex-start;gap:10px;width:100%;box-sizing:border-box;" +
                     "padding:10px 12px;border:2px solid #1a1a1a;border-left:6px solid #8b5cf6;" +
                     "background-color:#ffffff;color:#1a1a1a;box-shadow:4px 4px 0 #1a1a1a;" +
                     "font-family:'Microsoft YaHei',sans-serif;font-size:12px;font-weight:600;line-height:18px;" +
