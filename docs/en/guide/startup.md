@@ -103,7 +103,9 @@ ApricityEvents.startup(event => {
 
 ### Cleanroom 1.12.2
 
-Cleanroom fires the startup event during client initialization while Forge is still drawing its splash screen. NekoJS and legacy KubeJS use the following subscriptions.
+Cleanroom fires the startup event for the selected script backend during client initialization while Forge is still drawing its splash screen.
+
+Set `scriptBackendPriority=nekojs,kubejs` in the instance's `config/apricityui.properties`. This is the default order. AUI reads the list from left to right and uses the first installed backend. Use `kubejs,nekojs` to prefer KubeJS, one name to allow only that backend, or `none` to disable AUI scripts. Restart the client after editing the file. The existing `-Dapricityui.scriptBackend` JVM property overrides the file when set to `nekojs`, `kubejs`, or `none`.
 
 ```js
 // nekojs/startup_scripts/loading.js

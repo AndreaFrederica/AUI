@@ -19,6 +19,8 @@ import java.util.concurrent.atomic.AtomicBoolean;
  */
 public final class CleanroomConfigService implements AuiConfigService {
     public static final CleanroomConfigService INSTANCE = new CleanroomConfigService();
+    static final String DEFAULT_SCRIPT_BACKEND_PRIORITY = "nekojs,kubejs";
+    private static final String SCRIPT_BACKEND_PRIORITY = "scriptBackendPriority";
 
     private final Object lock = new Object();
     private final Properties values = new Properties();
@@ -103,6 +105,17 @@ public final class CleanroomConfigService implements AuiConfigService {
         ensureLoaded();
         synchronized (lock) {
             values.setProperty(key, String.valueOf(value));
+        }
+    }
+
+    String scriptBackendPriority() {
+        ensureLoaded();
+        synchronized (lock) {
+            String configured = values.getProperty(SCRIPT_BACKEND_PRIORITY);
+            if (configured != null) return configured;
+            values.setProperty(SCRIPT_BACKEND_PRIORITY, DEFAULT_SCRIPT_BACKEND_PRIORITY);
+            save();
+            return DEFAULT_SCRIPT_BACKEND_PRIORITY;
         }
     }
 

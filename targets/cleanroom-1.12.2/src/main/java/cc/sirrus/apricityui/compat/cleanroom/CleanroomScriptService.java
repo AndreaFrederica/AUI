@@ -4,6 +4,9 @@ import com.sighs.apricityui.ApricityUI;
 import com.sighs.apricityui.event.Event;
 import com.sighs.apricityui.parser.JS;
 import com.sighs.apricityui.spi.AuiScriptService;
+import com.sighs.apricityui.startup.CleanroomStartupEvent;
+import com.sighs.apricityui.startup.StartupContext;
+import net.minecraftforge.common.MinecraftForge;
 import net.minecraftforge.fml.common.Loader;
 
 import javax.script.Bindings;
@@ -30,7 +33,22 @@ public final class CleanroomScriptService implements AuiScriptService {
     private static final String DOCUMENT_UUID_BINDING = "__auiDocumentUuid";
     private static final int INLINE_SOURCE_CACHE_LIMIT = 256;
 
-    private enum Backend { NONE, NEKOJS, KUBEJS }
+    private enum Backend {
+        NONE, NEKOJS, KUBEJS;
+
+        static Backend parse(String value) {
+            return switch (value.trim().toLowerCase(Locale.ROOT)) {
+                case "nekojs" -> NEKOJS;
+                case "kubejs" -> KUBEJS;
+                case "none" -> NONE;
+                default -> null;
+            };
+        }
+
+        boolean isInstalled() {
+            return this != NONE && isLoaded(name().toLowerCase(Locale.ROOT));
+        }
+    }
 
     private final Object lock = new Object();
     private volatile Backend backend;
@@ -71,11 +89,11 @@ public final class CleanroomScriptService implements AuiScriptService {
     }
 
     @Override
-    public void startupPhase(com.sighs.apricityui.startup.StartupContext context) {
-        net.minecraftforge.common.MinecraftForge.EVENT_BUS.post(
-                new com.sighs.apricityui.startup.CleanroomStartupEvent(context));
-        if (selectedBackend() == Backend.KUBEJS) {
-            LegacyKubeStartupEvent.post(context);
+    public void startupPhase(StartupContext context) {
+        switch (selectedBackend()) {
+            case NEKOJS -> MinecraftForge.EVENT_BUS.post(new CleanroomStartupEvent(context));
+            case KUBEJS -> LegacyKubeStartupEvent.post(context);
+            case NONE -> { }
         }
     }
 
@@ -182,28 +200,36 @@ public final class CleanroomScriptService implements AuiScriptService {
         Backend cached = backend;
         if (cached != null) return cached;
 
-        String configured = System.getProperty("apricityui.scriptBackend", "auto")
-                .trim().toLowerCase(Locale.ROOT);
-        boolean neko = isLoaded("nekojs");
-        boolean kube = isLoaded("kubejs");
-        Backend selected;
-        if ("nekojs".equals(configured)) selected = neko ? Backend.NEKOJS : Backend.NONE;
-        else if ("kubejs".equals(configured)) selected = kube ? Backend.KUBEJS : Backend.NONE;
-        else if ("none".equals(configured)) selected = Backend.NONE;
-        else if (neko && kube) {
-            ApricityUI.LOGGER.error("[AUI Cleanroom] both NekoJS and KubeJS are installed; choose one with -Dapricityui.scriptBackend");
-            selected = Backend.NONE;
-        } else if (neko) selected = Backend.NEKOJS;
-        else if (kube) selected = Backend.KUBEJS;
-        else selected = Backend.NONE;
-
-        if (selected == Backend.NONE && (!"none".equals(configured))) {
-            ApricityUI.LOGGER.info("[AUI Cleanroom] no compatible script backend is active; scripts are disabled");
-        } else {
-            ApricityUI.LOGGER.info("[AUI Cleanroom] script backend: {}", selected);
+        String priority = CleanroomConfigService.INSTANCE.scriptBackendPriority();
+        String override = System.getProperty("apricityui.scriptBackend", "auto").trim();
+        Backend forced = Backend.parse(override);
+        if (forced == null && !"auto".equalsIgnoreCase(override)) {
+            ApricityUI.LOGGER.warn("[AUI Cleanroom] unknown apricityui.scriptBackend '{}'; using the configured priority", override);
         }
+        Backend selected = forced == null ? selectByPriority(priority)
+                : forced.isInstalled() ? forced : Backend.NONE;
+        ApricityUI.LOGGER.info("[AUI Cleanroom] script backend: {} ({})", selected,
+                forced == null ? "priority: " + priority : "JVM override: " + override);
         backend = selected;
         return selected;
+    }
+
+    private static Backend selectByPriority(String priority) {
+        if (Backend.parse(priority) == Backend.NONE) return Backend.NONE;
+        boolean hasKnownBackend = false;
+        for (String name : priority.split(",", -1)) {
+            Backend candidate = Backend.parse(name);
+            if (candidate == null || candidate == Backend.NONE) {
+                ApricityUI.LOGGER.warn("[AUI Cleanroom] ignoring unknown scriptBackendPriority entry '{}'", name.trim());
+                continue;
+            }
+            hasKnownBackend = true;
+            if (candidate.isInstalled()) return candidate;
+        }
+        if (hasKnownBackend) return Backend.NONE;
+        ApricityUI.LOGGER.warn("[AUI Cleanroom] scriptBackendPriority has no valid entries; using {}",
+                CleanroomConfigService.DEFAULT_SCRIPT_BACKEND_PRIORITY);
+        return selectByPriority(CleanroomConfigService.DEFAULT_SCRIPT_BACKEND_PRIORITY);
     }
 
     private static boolean isLoaded(String id) {

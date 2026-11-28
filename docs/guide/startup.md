@@ -103,7 +103,9 @@ ApricityEvents.startup(event => {
 
 ### Cleanroom 1.12.2
 
-Cleanroom 在客户端初始化时发送启动事件，此时 Forge 的启动画面仍在绘制。NekoJS 和旧版 KubeJS 的写法分别如下。
+Cleanroom 在客户端初始化时为选中的脚本后端发送启动事件，此时 Forge 的启动画面仍在绘制。
+
+在实例目录的 `config/apricityui.properties` 中设置 `scriptBackendPriority=nekojs,kubejs`。这是默认顺序，AUI 会从左往右选择第一个已安装的后端。将顺序改成 `kubejs,nekojs` 可优先使用 KubeJS。只填一个名称可限定后端，填 `none` 可关闭 AUI 脚本。修改后重启客户端。已有的 JVM 参数 `-Dapricityui.scriptBackend=nekojs`、`kubejs` 或 `none` 优先于文件设置。
 
 ```js
 // nekojs/startup_scripts/loading.js
